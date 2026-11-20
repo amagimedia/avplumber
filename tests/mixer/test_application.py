@@ -74,6 +74,47 @@ assert not any(name.startswith('demos.') for name in sys.modules)
     subprocess.run([sys.executable, "-I", "-c", script], cwd=tmp_path, check=True, capture_output=True, text=True)
 
 
+@pytest.mark.parametrize("reader", config.MXL_READERS)
+@pytest.mark.parametrize("color, storage", [("sdr", "nv12"), ("hlg", "p210le")])
+def test_an_mxl_writer_restart_never_ends_the_program(native_boundary, color, storage, reader):
+    """A writer coming back restarts the MXL input group, which then sends an EOF that would end a
+    program showing only that source. A format declaration that ignores EOF, restarting with the
+    group, drops it before the fan-out. The unpack writes the canvas's storage itself when the
+    colour is the canvas's (no colour stage, no second pass); a conversion reads all of P210.
+    The native reader is one node that restarts its group itself; the demuxer chain is the fallback."""
+    api = fake_api()
+    api.MixerGraphBuilder = native_boundary[1]
+    cfg = config.parse({"canvas": {**CONFIG["canvas"], "mxl_reader": reader},
+                        "renditions": [{"id": "record", "target": "program.ts"}],
+                        "sources": [{"id": "cam", "kind": "mxl", "url": "/dev/shm/mxl", "flow": "f",
+                                     "width": 1920, "height": 1080, "color": color}],
+                        "scenes": [{"id": "one", "items": [{"source": "cam", "dst": {"x": 0, "y": 0, "w": 1920, "h": 1080}}]}]})
+    app = build_application(cfg, api=api)
+    nodes = {n.parameters["name"]: n.parameters for n in app.avp.nodes}
+    live = next(n for n in nodes.values() if n.get("dst") == nodes["mixer_otm_cam"]["src"])
+    if reader == "native":
+        assert not {"unpack_0", "decode_0"} & nodes.keys() and nodes["realtime_0"]["src"] == nodes["input_0"]["dst"]
+        assert {k: v for k, v in nodes["input_0"].items() if k not in ("name", "dst", "hwaccel", "group")} == {
+            "type": "raw_video_file_cuda", "url": "mxl:///dev/shm/mxl?id=f", "pixel_format": "v210", "storage": storage,
+            "video_size": "1920x1080", "framerate": "60/1", "loop": False, "loop_continuous_ts": False,
+            "frame_color": cfg.sources[0].color.tags, "auto_restart": "group"}
+    else:
+        assert nodes["unpack_0"]["graph"].startswith(f"hwupload_cuda=v210_width=1920:v210_format={storage},")
+        # Live: never looped; a recreated flow restarts the source's chain.
+        assert (nodes["input_0"]["url"], nodes["input_0"]["format"]) == ("mxl:///dev/shm/mxl?id=f", "mxl")
+        assert nodes["input_0"]["options"] == {"blocking": "1", "grain_index_init": "head", "on_too_late": "reset",
+                                               "reset_on_drop": "1"}
+        assert "loop" not in nodes["input_0"] and nodes["input_0"]["auto_restart"] == nodes["decode_0"]["auto_restart"] == "group"
+        assert nodes["decode_0"]["options"] == {"video_size": "5120x1080", "pixel_format": "gray"}
+    if color == "hlg":
+        assert "tonemap_cuda" in nodes["mixer_color_cam"]["graph"] and live["src"] == nodes["mixer_color_cam"]["dst"]
+    else:
+        assert "mixer_color_cam" not in nodes
+    assert {k: live[k] for k in ("type", "ignore_eof", "group", "pixel_format", "real_pixel_format")} == {
+        "type": "assume_video_format", "ignore_eof": True, "group": nodes["mixer_otm_cam"]["group"], "pixel_format": "cuda",
+        "real_pixel_format": cfg.working_format}
+
+
 def test_a_declared_decoded_format_lets_the_fanout_tag_the_frames(native_boundary):
     """A decoded source whose colour and storage are declared and match the canvas has no colour
     filter: the fan-out stamps the tags. Undeclared storage keeps the filter, which converts."""
@@ -429,7 +470,7 @@ def go_on_air(monkeypatch, counters, buses=("aux_1",), *, start=True, **options)
     engine = CountingEngine(clock, counters)
     app = mixer_application.MixerApplication(
         avp=engine, mixer=None, input_groups=(), input_edges=(), routed_inputs=False, preheat_timeout_sec=1,
-        held_outputs=("janus",), aux_buses=[SimpleNamespace(prefix=prefix) for prefix in buses], **options)
+        held_outputs=("janus",), aux_buses=[SimpleNamespace(prefix=prefix, listener=True) for prefix in buses], **options)
     if start:
         app._go_on_air()
     return app, engine, clock
@@ -704,3 +745,16 @@ def test_managed_browser_start_keeps_outputs_held_on_unstable_graph(monkeypatch,
         app._go_on_air()
     assert not engine.at(" hold false")
     assert not engine.at(" reset_counters true")
+
+
+def test_the_v210_unpack_kernels_of_the_node_and_of_the_ffmpeg_patch_are_the_same():
+    """hwupload_cuda=v210_width (FFmpeg patch 0017: the demuxer chain, v210 files) and
+    raw_video_file_cuda unpack with the same kernels, kept in two files; a change belongs in both."""
+    repo = Path(__file__).resolve().parents[2]
+    patch = (repo / "deps/ffmpeg/9/0017-avfilter-hwupload-cuda-pinned.patch").read_text()
+    hunk = patch.split("+++ b/libavfilter/vf_hwupload_cuda.cu\n")[1].split("\ndiff --git ")[0].splitlines()[1:]
+    assert all(line.startswith("+") for line in hunk)
+    kernels = "\n".join(line[1:] for line in hunk)
+    start = "#define INLINE"
+    node = (repo / "src/nodes/hwaccel/v210_pack.cu").read_text()
+    assert node[node.index(start):].strip() == kernels[kernels.index(start):].strip()

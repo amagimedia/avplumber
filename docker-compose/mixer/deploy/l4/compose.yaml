@@ -13,6 +13,8 @@ services:
         FFMPEG_TAG: ${FFMPEG_TAG:?Use deploy/l4/stack.sh}
         AVPLUMBER_REVISION: ${AVPLUMBER_REVISION}
         BUILD_JOBS: ${BUILD_JOBS:-4}
+        # nvidia_l4_cuarray, which stack.sh selects, offers MXL sources (instance_profiles.py mxl_sources).
+        WITH_MXL: ${WITH_MXL:-1}
     volumes:
       - ${MIXER_MEDIA_DIR}:/media:rw,z
     depends_on:

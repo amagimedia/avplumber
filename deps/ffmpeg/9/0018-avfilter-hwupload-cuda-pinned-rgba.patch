@@ -9,7 +9,7 @@ Subject: [PATCH] avfilter/hwupload_cuda: preserve RGBA alpha in pinned uploads
  2 files changed, 4 insertions(+), 3 deletions(-)
 
 diff --git a/doc/filters.texi b/doc/filters.texi
-index 6478de0..a8642e0 100644
+index 7f253e1..1c4e6d8 100644
 --- a/doc/filters.texi
 +++ b/doc/filters.texi
 @@ -16166,7 +16166,8 @@ It accepts the following optional parameters:
@@ -23,10 +23,10 @@ index 6478de0..a8642e0 100644
  output frame is forwarded; this option does not eliminate CPU waits.
  
 diff --git a/libavfilter/vf_hwupload_cuda.c b/libavfilter/vf_hwupload_cuda.c
-index 112e441..22468d2 100644
+index 027e36e..25ccc6d 100644
 --- a/libavfilter/vf_hwupload_cuda.c
 +++ b/libavfilter/vf_hwupload_cuda.c
-@@ -260,7 +260,7 @@ static int cudaupload_query_formats(const AVFilterContext *ctx,
+@@ -267,7 +267,7 @@ static int cudaupload_query_formats(const AVFilterContext *ctx,
                                                  : output_cuda_fmts;
      static const enum AVPixelFormat v210_fmts[] = { AV_PIX_FMT_GRAY8, AV_PIX_FMT_NONE };
      static const enum AVPixelFormat pinned_fmts[] = {
@@ -35,10 +35,10 @@ index 112e441..22468d2 100644
      };
      AVFilterFormats *in_fmts = ff_make_pixel_format_list(
          ((const CudaUploadContext *)ctx->priv)->v210_width ? v210_fmts :
-@@ -386,7 +386,7 @@ fail:
- #define FLAGS (AV_OPT_FLAG_FILTERING_PARAM | AV_OPT_FLAG_VIDEO_PARAM)
+@@ -400,7 +400,7 @@ fail:
  static const AVOption cudaupload_options[] = {
-     { "v210_width", "Unpack gray-wrapped v210 rows into P210 on the GPU (implies pinned)", OFFSET(v210_width), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, INT_MAX, FLAGS },
+     { "v210_width", "Unpack gray-wrapped v210 rows on the GPU (implies pinned)", OFFSET(v210_width), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, INT_MAX, FLAGS },
+     { "v210_format", "Storage the v210 rows are unpacked into: p210le, p010le or nv12", OFFSET(v210_format), AV_OPT_TYPE_PIXEL_FMT, { .i64 = AV_PIX_FMT_P210 }, -1, INT_MAX, FLAGS },
 -    { "pinned", "Upload software NV12/P010 through pinned staging on a private stream", OFFSET(pinned), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, FLAGS },
 +    { "pinned", "Upload software NV12/P010/RGBA through pinned staging on a private stream", OFFSET(pinned), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, FLAGS },
      { "device", "Number of the device to use", OFFSET(device_idx), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, INT_MAX, FLAGS },

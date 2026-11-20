@@ -7,7 +7,7 @@ from urllib.request import Request, urlopen
 
 import pytest
 
-from demos.mixer.instance_profiles import INSTANCE_PROFILES, InstanceType
+from demos.mixer.instance_profiles import INSTANCE_PROFILES, InstanceType, mxl_sources
 import demos.mixer.prepare_demo as prepare_demo
 from pyplumber.mixer.aux_layout import draws_program
 from pyplumber.mixer.config import MAX_SOURCES, parse
@@ -430,7 +430,7 @@ def test_hdr_422_cap_preserves_total_and_disabled_types(tmp_path, total, weights
     assert 0 < counts[2] <= 4
     assert counts[3] == 0
     assert sum(s["kind"] == "v210" for s in show["sources"]) == counts[2]
-    assert recipe["setup"]["weights"] == weights + [0, 0]
+    assert recipe["setup"]["weights"] == weights + [0, 0, 0]   # the raw 4:2:0 kinds and MXL
 
 
 def test_four_hdr_422_inputs_can_be_used_alone():
@@ -456,7 +456,7 @@ def test_browser_cap_redistributes_without_exceeding_other_caps(weights, expecte
     # Above the capacity of a 10-bit 4:2:2 canvas at 25 fps the show is scaled down first.
     recipe = recipe_for(T4, {**DEFAULT_SETTINGS, 'source_count': 64, 'fps': 25, 'weights': weights + [0, 0]})
     capacity = min(64, source_limit(T4, 25, DEFAULT_SETTINGS['bit_depth'], DEFAULT_SETTINGS['chroma']))
-    assert [source['weight'] for source in recipe['inputs']] == source_counts(T4, capacity, weights) + [0, 0]
+    assert [source['weight'] for source in recipe['inputs']] == source_counts(T4, capacity, weights) + [0, 0, 0]
 
 
 def test_browser_only_limit():
@@ -1681,3 +1681,74 @@ def test_capture_reset_closes_only_current_and_previous_show_windows(runtime, mo
              for names in [('kept', 'new'), ('removed', 'kept')]]
     SetupRuntime._close_show_browsers(runtime, shows)
     assert calls == [('/window/close', {'id': 'kept'}), ('/window/close', {'id': 'removed'})]
+
+
+L4 = {**INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY], "mxl_sources": mxl_sources("8.9")}
+MXL_SHOW = {**DEFAULT_SETTINGS, "orientation": "landscape", "fps": 30, "bit_depth": 8, "chroma": "420",
+            "source_count": 188, "weights": [105, 0, 0, 0, 36, 31, 0, 16]}
+
+
+def test_mxl_sources_take_raw_upload_units_up_to_the_profile_limit(tmp_path):
+    show, jobs, allocation = prepare_demo.plan(recipe_for(L4, MXL_SHOW), tmp_path)
+    mxl = [s for s in show["sources"] if s["kind"] == "mxl"]
+    assert allocation["sdr_mxl"] == len(mxl) == 16 and allocation["sdr420_raw"] == 31
+    # Every MXL source is its own flow, written from its own generated clip: packed v210, which needs no decoder.
+    assert len({s["flow"] for s in mxl}) == len({s["clip"] for s in mxl}) == 16 and all(s["clip"].endswith(".v210") for s in mxl)
+    assert all(s["url"] == prepare_demo.MXL_DOMAIN and s["clip"] in map(str, jobs) for s in mxl)
+    with pytest.raises(ValueError, match="MXL inputs are limited to 16 at 30 fps"):
+        recipe_for(L4, {**MXL_SHOW, "weights": [105, 0, 0, 0, 36, 30, 0, 17]})
+    with pytest.raises(ValueError, match="MXL inputs are not available"):   # no measured limit on the T4
+        recipe_for(T4, {**MXL_SHOW, "source_count": 16, "weights": [8, 0, 0, 0, 0, 0, 0, 8]})
+    # Settings saved before MXL sources have seven weights.
+    assert recipe_for(L4, {**MXL_SHOW, "weights": [105, 0, 0, 0, 36, 47, 0]})["setup"]["weights"] == [105, 0, 0, 0, 36, 47, 0, 0]
+
+
+def test_mxl_writers_copy_each_loop_into_its_flow_without_decoding(tmp_path, monkeypatch):
+    from demos.mixer import mxl_writers
+    commands, exited = [], SimpleNamespace(poll=lambda: 0, send_signal=lambda sig: None, wait=lambda: 0)
+    monkeypatch.setattr(mxl_writers.subprocess, "Popen", lambda command: commands.append(command) or exited)
+    config = tmp_path / "mixer.demo.json"
+    config.write_text(json.dumps({"canvas": {"fps": "30000/1001"}, "sources": [{"id": "cam", "kind": "video"}, {
+        "id": "sdr_mxl_000", "kind": "mxl", "url": "/domain", "flow": "f1", "clip": "/media/clip.v210", "width": 1920, "height": 1080}]}))
+    mxl_writers.main(config)
+    assert [command[command.index("-f"):] for command in commands] == [[
+        "-f", "v210", "-video_size", "1920x1080", "-framerate", "30000/1001", "-i", "/media/clip.v210",
+        "-c", "copy", "-f", "mxl", "-video_flow_id", "f1", "/domain"]]
+
+
+def test_mxl_writers_start_before_the_mixer_and_stop_after_it(tmp_path, monkeypatch):
+    import demos.mixer.setup_runtime as demo
+    events, stopped = [], threading.Event()
+    flow = tmp_path / "domain" / "f1.mxl-flow"
+    flow.mkdir(parents=True)   # left by a killed writer
+    config = tmp_path / "mixer.demo.json"
+    config.write_text(json.dumps({"sources": [{"id": "sdr_mxl_000", "kind": "mxl", "url": str(flow.parent),
+                                               "flow": "f1", "clip": "/media/clip.v210"}]}))
+    def launch(command, **kwargs):
+        assert command[-3:] == ["-m", "demos.mixer.mxl_writers", str(config)] and not flow.exists()
+        events.append("writers start")
+        flow.mkdir()
+        return SimpleNamespace(pid=1, returncode=0, poll=lambda: None, wait=lambda timeout=None: stopped.wait(3))
+    monkeypatch.setattr(demo.subprocess, "Popen", launch)
+    def killpg(pid, sig):
+        if not sig:   # the stop's poll: the group has exited
+            raise ProcessLookupError
+        events.append("writers stop")
+        stopped.set()
+    monkeypatch.setattr(demo.os, "killpg", killpg)
+    monkeypatch.setattr(demo.BaseSetupRuntime, "_start", lambda self, config: events.append("mixer start"))
+    monkeypatch.setattr(demo.BaseSetupRuntime, "_stop", lambda self: events.append("mixer stop"))
+    monkeypatch.setattr(demo, "mxl_available", lambda: True)
+    monkeypatch.setattr(demo, "_static_facts", lambda: {0: {"compute_capability": "7.5"}})   # a T4
+    assert SetupRuntime(tmp_path, tmp_path / "demo.json", SimpleNamespace(port=7777),
+                        InstanceType.NVIDIA_L4_CUARRAY).profile["mxl_sources"] == {25: 8, 30: 8, 50: 4, 60: 4}
+    monkeypatch.setattr(demo, "_static_facts", lambda: {0: {"compute_capability": "12.0"}})   # an RTX 5080
+    manager = SetupRuntime(tmp_path, tmp_path / "demo.json", SimpleNamespace(port=7777), InstanceType.NVIDIA_L4_CUARRAY)
+    assert manager.profile["mxl_sources"][30] == 16
+    manager._start(config)
+    manager._stop()
+    assert events == ["writers start", "mixer start", "mixer stop", "writers stop"] and not flow.exists()
+    # An image whose FFmpeg has no MXL demuxer offers none.
+    monkeypatch.setattr(demo, "mxl_available", lambda: False)
+    assert "mxl_sources" not in SetupRuntime(tmp_path, tmp_path / "demo.json", SimpleNamespace(port=7777),
+                                             InstanceType.NVIDIA_L4_CUARRAY).profile

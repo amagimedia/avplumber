@@ -13,6 +13,8 @@ docker-compose/mixer/deploy/l4/.env
 ffmpeg/
 !deps/ffmpeg/
 !deps/ffmpeg/**
+# Documentation only: an edit must not invalidate the FFmpeg build layer.
+deps/ffmpeg/README.md
 *.log
 *.csv
 *.ts

@@ -231,12 +231,23 @@ preserves the custom packet uploader's synchronization contract; moving it
 into FFmpeg does not by itself eliminate driver locks or CPU waits.
 
 `hwupload_cuda=v210_width=<picture-width>` accepts rawvideo/gray frames whose
-width is the packed v210 byte stride. It uploads the packed bytes and unpacks
-them on the GPU into P210, without CPU v210 decoding. This mode implies pinned
+width is the packed v210 byte stride, a multiple of 32 (the standard row is
+padded to 128). It uploads the packed bytes and unpacks them on the GPU, without
+CPU v210 decoding, into `v210_format`: `p210le` (the default, every code as it
+is), `p010le` or `nv12`, written by the one kernel pass with no P210
+intermediate. A thread owns 12 pixels of one row (of the row pair for 4:2:0):
+two aligned 128-bit loads a row, word-sized stores. NV12 samples are rounded; a
+4:2:0 chroma row is the rounded mean of its two rows, of the chroma row's own
+field in a frame flagged interlaced. A `scale_cuda=format=` after the unpack
+instead re-reads the P210 frame on its filtered path (bicubic, a horizontal and
+a vertical pass through an intermediate) and is field-unaware. This mode implies pinned
 staging and requires NVCC or CUDA LLVM at build time; ordinary pinned upload
 does not require a CUDA compiler. Set color and chroma tags with `setparams`.
-The mixer uses this mode for v210 sources and `pinned=1` for pinned NV12/P010
-sources.
+The mixer uses this mode for v210 files and, with `canvas.mxl_reader: "demuxer"`,
+for MXL sources, unpacking into the canvas's storage when the source's colour is
+the canvas's, and `pinned=1` for pinned NV12/P010 sources. An MXL source is read
+by `raw_video_file_cuda` by default, which launches the same kernels from
+`src/nodes/hwaccel/v210_pack.cu`: the two copies are to be kept alike.
 
 On an NVIDIA host, `tests/cuda/smoke_nv12_input.py` checks both ordinary and
 pinned uploads, looping timestamps, and exact v210 samples including padded

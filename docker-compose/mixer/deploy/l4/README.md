@@ -36,6 +36,10 @@ Override `DMA_BROWSER_WINDOWS_PER_PROCESS` and `DMA_BROWSER_STAGGER_FRAMES` in
 ordinary capture, and the mixer samples each captured buffer in place (see the
 [browser configuration](../../../../deps/dma-browser/README.md)).
 
+The image is built with MXL (`WITH_MXL=1`, set `WITH_MXL=0` in `.env` to leave it out), so Setup
+offers MXL sources among the HW uploads, up to the profile's `mxl_sources`. The mixer container
+runs their writers beside the mixer and holds their flows in its own `/dev/shm` (`shm_size`).
+
 Open `http://<host>:7681/setup/`, controls at `/`, outputs at `/wall`.
 The controls' **Graph** link opens the read-only Sigma.js viewer at `/graph/`.
 If viewers use a DNS name instead of the configured public address, set

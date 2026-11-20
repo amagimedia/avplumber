@@ -1694,18 +1694,20 @@ function renderScenes() {
 // The canvas: short in the counts ("1080p30 SDR"), whole in their tip ("1920×1080 · 30p · SDR 4:2:0").
 const shortFormat = (c) => `${c.height}p${c.fps} ${formatName(c).split(" ")[0]}`;
 const longFormat = (c) => `${c.width}×${c.height} · ${c.fps}p · ${formatName(c)}`;
+const MXL_ABOUT = "MXL: uncompressed 10-bit 4:2:2 video from another process on this machine, through shared memory.";
 function renderCounts() {
   const s = settings(), c = s.source_counts || {};
   // DSK keys are browser sources; the strip lists them apart from the browser sources in scenes.
   const keys = new Set((s.dsk_keys || []).map((k) => k.source)).size, hdr = s.hdr_video || 0;
   const kinds = [[c.video - hdr, hdr ? "NVDEC SDR" : "NVDEC"], [hdr, "NVDEC HDR"], [c.browser - keys, "browser"], [c.nv12, "raw 4:2:0"], [c.p010, "raw 10-bit 4:2:0"],
-                 [c.v210, "raw 4:2:2"], [keys, "keys"]].filter(([n]) => n > 0);
+                 [c.v210, "raw 4:2:2"], [c.mxl, "MXL"], [keys, "keys"]].filter(([n]) => n > 0);
   const text = [`${s.source_count ?? "—"} sources`, `${scenes.length} scenes`, ...kinds.map(([n, what]) => `${n} ${what}`),
                 ...(s.canvas ? [shortFormat(s.canvas)] : [])].join(" · ");
   const line = $("counts").querySelector(".txt");
   if (line.textContent !== text) line.textContent = text;
   setTip($("counts"), "Mixer setup", [["Sources", String(s.source_count ?? "—")], ["Scenes", String(scenes.length)],
-    ...kinds.map(([n, what]) => [what, String(n)]), ...(s.canvas ? [["Canvas", longFormat(s.canvas)]] : [])]);
+    ...kinds.map(([n, what]) => [what, String(n)]), ...(s.canvas ? [["Canvas", longFormat(s.canvas)]] : [])],
+    (rows) => [tipTable(["", ""], rows), ...(c.mxl ? [el("p", "sub plain", MXL_ABOUT)] : [])]);
 }
 // A meter's bar: amber from 75% and red past 85%, unless `level` ("", "warn" or "bad") says otherwise.
 function fillBar(m, pct, level) {
@@ -2210,7 +2212,7 @@ function renderPager(v, aux) {
   prev.disabled = aux.page <= 0;
   next.disabled = aux.page >= aux.pages - 1;
 }
-const KIND_TAGS = {video: "dec", browser: "web", nv12: "raw", p010: "raw", v210: "raw"};
+const KIND_TAGS = {video: "dec", browser: "web", nv12: "raw", p010: "raw", v210: "raw", mxl: "mxl"};
 // Labels and tally boxes are HTML on top of the video, placed in the canvas pixels the mixer reports.
 function renderOverlay(v, aux, [cw, ch], note) {
   const items = [], status = state?.status || {};

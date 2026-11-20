@@ -99,7 +99,7 @@ summary { cursor: pointer; }
 <div class="fields"><label>Browser overlay<select id="browser-motion"><option value="static">Centered · static</option><option value="dynamic">Moving · dynamic</option><option value="half">Half dynamic · 6 s moving / 6 s still</option></select></label></div>
 <p class="hint">All presets keep the transparent background. Static holds the centered card; dynamic moves continuously; half dynamic alternates six seconds moving and six seconds still.</p>
 </div>
-<details><summary>What gets generated?</summary><p>SDR 4:2:0 uses animated test patterns and colour bars, as H.264/NVDEC or as raw NV12 frames uploaded to the GPU. Raw upload uses no decoder engine but increases disk and CPU-to-GPU traffic. HLG uses HDR bars and moving highlights, with HEVC/NVDEC or raw P010 upload. 4:2:2 inputs use packed v210 clips and GPU unpacking; browser sources use the bundled transparent test page.</p><p>Each input is independent, but several inputs may read the same generated file. Increasing the source count does not create that many different movies.</p></details>
+<details><summary>What gets generated?</summary><p>SDR 4:2:0 uses animated test patterns and colour bars, as H.264/NVDEC or as raw NV12 frames uploaded to the GPU. Raw upload uses no decoder engine but increases disk and CPU-to-GPU traffic. HLG uses HDR bars and moving highlights, with HEVC/NVDEC or raw P010 upload. 4:2:2 inputs use packed v210 clips and GPU unpacking; browser sources use the bundled transparent test page.<span id="mxl-generated" hidden> Each MXL source has its own writer outside the mixer: it decodes the source’s own clip on NVDEC and publishes it as 10-bit 4:2:2 frames in shared memory.</span></p><p>Each input is independent, but several inputs may read the same generated file. Increasing the source count does not create that many different movies.</p></details>
 </section>
 <section class="card"><div class="card-title"><h2>Downstream keys</h2></div>
 <p class="hint">Alpha browser graphics keyed over the finished program, above transitions and wipes. Each page is one more browser source and counts against the source and browser limits. Keys start off; switch them on the mixer page.</p>
@@ -146,14 +146,15 @@ const types = [
  {id:'sdr422',name:'SDR · 4:2:2 · HW upload',detail:'10-bit v210 bars · CPU → GPU + unpack',color:'#d5a35f'},
  {id:'browser',name:'Browser',detail:'Bundled transparent test page<span id="browser-max"></span>',color:'#d47f95'},
  {id:'sdr420_raw',name:'SDR · 4:2:0 · HW upload',detail:'8-bit NV12 · CPU → GPU · 1 upload unit',color:'#78aa62'},
- {id:'hlg420_raw',name:'HDR · 4:2:0 · HW upload',detail:'10-bit HLG P010 · CPU → GPU · 2 upload units',color:'#818bcf'}
+ {id:'hlg420_raw',name:'HDR · 4:2:0 · HW upload',detail:'10-bit HLG P010 · CPU → GPU · 2 upload units',color:'#818bcf'},
+ {id:'sdr_mxl',name:'MXL',detail:'Uncompressed 10-bit 4:2:2 video from another process on this machine, through shared memory<span id="mxl-max"></span>',color:'#c9b458'}
 ];
 // Presentation order is independent of the saved recipe's weight indices.
-const sourceGroups=[['NVDEC',[0,1]],['Browser',[4]],['HW upload',[2,3,6,5]]];
+const sourceGroups=[['NVDEC',[0,1]],['Browser',[4]],['HW upload',[2,3,6,5,7]]];
 // The default Balanced mix (docs/capacity.md): NVDEC, browser
 // and raw uploads in about equal shares, half of each 4:2:0 path HLG on a 10-bit canvas (an SDR canvas
-// folds HLG into SDR).
-const BALANCED=[18,18,4,0,36,17,17];
+// folds HLG into SDR). MXL sources are added by their own count.
+const BALANCED=[18,18,4,0,36,17,17,0];
 const dskPages=()=>[...document.querySelectorAll('#dsk-pages input:checked')].map(i=>i.value);
 // The instance's measured limits (instance_profiles.py) arrive with the setup status; the page
 // applies them as setup_runtime.py does and computes nothing before they arrive.
@@ -180,10 +181,12 @@ const auxRate=(v,fullRate)=>rateNumber(v)>30&&!fullRate?(/\//.test(String(v))?`$
 const limits=()=>({...profile,...profile.mode_limits?.[$('mode').value]});
 const browserLimit=()=>limits().browser_windows_by_fps?.[rateWeight(rate())]??limits().browser_windows;
 const nvdecLimit=fps=>limits().nvdec_decodes[fps], rawUploadUnits=fps=>limits().raw_upload_units[fps];
+// Offered only by an instance whose profile measured it, on an image whose FFmpeg reads MXL (setup_runtime.py).
+const mxlLimit=()=>limits().mxl_sources?.[rateWeight(rate())]??0;
 const sourceBudgets=()=>[
  [[2,3],[1,1],limits().hlg_v210,'4:2:2 upload'],[[4],[1],browserLimit()-dskPages().length,'Browser'],
  [[0,1],[1,1],nvdecLimit(rateWeight(rate())),'Combined NVDEC'],
- [[5,6],[1,2],rawUploadUnits(rateWeight(rate())),'Raw 4:2:0 upload units']
+ [[7],[1],mxlLimit(),'MXL'],[[5,6,7],[1,2,1],rawUploadUnits(rateWeight(rate())),'Raw 4:2:0 upload units']
 ];
 let currentSettings=null, busy=false, online=false, loaded=false, submitting=false, submission=0;
 // setup_runtime.source_limit, less the key pages.
@@ -262,6 +265,7 @@ function sourceAvailable(i){
  if(i===0||i===1)return nvdecLimit(fps)>0&&(i===0||bit_depth===10);
  if(i===2||i===3)return chroma==='422'&&limits().hlg_v210>0;
  if(i===4)return browserLimit()>dskPages().length;
+ if(i===7)return mxlLimit()>0&&rawUploadUnits(fps)>0;
  return rawUploadUnits(fps)>0&&(i===5||bit_depth===10);
 }
 function sourceTypeMax(i,counts){
@@ -311,7 +315,8 @@ function update(){
  });
  $('source-total').textContent=counts.reduce((a,b)=>a+b,0);
  $('source-limit').textContent=`Maximum ${limit} unique sources at ${label} fps${tenBit?` on a 10-bit ${chroma==='422'?'4:2:2':'4:2:0'} canvas (estimated)`:''}. Limits measured on ${instanceType}.`;
- $('browser-max').textContent=` · maximum ${browserLimit()}`;
+ $('browser-max').textContent=` · maximum ${browserLimit()}`;$('mxl-max').textContent=` · maximum ${mxlLimit()}`;
+ $('mxl-generated').hidden=!mxlLimit();
  $('count-sdr420').parentElement.querySelector('small').textContent=`${profile.generated_decode?.codec==='hevc'?'HEVC':'H.264'} patterns · NVDEC`;
  // Outputs: the clean feed's row only while it is on, its encode counted either way.
  const clean=$('clean-feed').checked&&dskPages().length>0,outputs=encodeOutputs(rate(),tenBit);
@@ -363,14 +368,14 @@ function update(){
    bit_depth,chroma,weights:counts,encodes,dsk:dskPages(),clean_feed:clean,extra_aux:extra?integer('extra-aux',0,extraLimit):0,
    browser_motion:$('browser-motion').value};
  $('allocation').replaceChildren(...sourceGroups.flatMap(([,indices])=>indices).map(i=>{const span=document.createElement('span');span.style.width=`${100*counts[i]/sourceCount}%`;span.style.background=types[i].color;return span}));
- $('allocation-note').textContent=`${sourceCount} independent inputs. NVDEC: ${counts[0]+counts[1]}/${nvdecLimit(fps)} combined SDR + HDR. Upload: ${counts[5]+2*counts[6]}/${rawUploadUnits(fps)} units (NV12 = 1, P010 = 2). Capacity depends on codec and content.`;
+ $('allocation-note').textContent=`${sourceCount} independent inputs. NVDEC: ${counts[0]+counts[1]}/${nvdecLimit(fps)} combined SDR + HDR. Upload: ${counts[5]+2*counts[6]+counts[7]}/${rawUploadUnits(fps)} units (NV12 = 1, P010 = 2${mxlLimit()?', MXL = 1':''}). Capacity depends on codec and content.`;
  $('canvas-label').textContent=`${width} × ${height} · ${label} fps · ${portrait?'portrait':'landscape'}`;
  $('canvas-format').textContent=tenBit?`HLG, 10-bit ${chroma==='422'?'4:2:2':'4:2:0'} canvas · SDR and HDR outputs`:'BT.709, 8-bit 4:2:0 canvas · SDR output';
  $('input-size').textContent=`Generated inputs: ${sourceWidth} × ${sourceHeight} at ${label} fps`;
  $('summary-title').textContent=`${height>width?'Portrait':'Landscape'} ${sourceHeight}p${label}`;
  $('source-total').textContent=sourceCount;$('scene-total').textContent=sceneCount;$('fps-total').textContent=label;
  const keys=currentSettings.dsk.length;
- $('engine-split').textContent=`${counts[0]+counts[1]} NVDEC · ${counts[2]+counts[3]} v210 → CUDA · ${counts[5]} raw NV12 upload · ${counts[6]} raw P010 upload · ${counts[4]} browser${keys?` + ${keys} key`:''}. ${nvenc}.`;
+ $('engine-split').textContent=`${counts[0]+counts[1]} NVDEC · ${counts[2]+counts[3]} v210 → CUDA · ${counts[5]} raw NV12 upload · ${counts[6]} raw P010 upload${mxlLimit()?` · ${counts[7]} MXL`:''} · ${counts[4]} browser${keys?` + ${keys} key`:''}. ${nvenc}.`;
  // The server refuses encodes above the budget with the same reason (setup_runtime.extra_aux_limit).
  if(invalid||over)throw Error(invalid||`The encodes need ${used.toFixed(1)}% of NVENC, above its ${budget}% budget: choose faster presets.`);
  $('error').textContent='';
@@ -409,10 +414,11 @@ async function refresh(){
     encodes=structuredClone(s.encodes??{});extraAux=s.extra_aux??0;
     document.querySelectorAll('#dsk-pages input').forEach(i=>{i.checked=(s.dsk||[]).includes(i.value);});$('clean-feed').checked=!!s.clean_feed;
     typedSources=s.source_count<sourceLimit()?s.source_count:null;
-    if(Array.isArray(s.weights)&&s.weights.length===types.length&&s.weights.every(n=>Number.isInteger(n)&&n>=0)&&
-       s.weights.reduce((a,b)=>a+b,0)===s.source_count){
+    const saved=Array.isArray(s.weights)&&s.weights.length===7?[...s.weights,0]:s.weights;   // saved before MXL
+    if(Array.isArray(saved)&&saved.length===types.length&&saved.every(n=>Number.isInteger(n)&&n>=0)&&
+       saved.reduce((a,b)=>a+b,0)===s.source_count){
      const balanced=sourceCounts(Math.min(s.source_count,sourceLimit()),foldForMode([...BALANCED]));
-     if(s.weights.some((n,i)=>n!==balanced[i]))manualCounts=[...s.weights];
+     if(saved.some((n,i)=>n!==balanced[i]))manualCounts=[...saved];
     }
    }
    loaded=true;update();

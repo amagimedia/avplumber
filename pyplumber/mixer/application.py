@@ -491,7 +491,7 @@ class MixerApplication:
                                           ticking, strict=managed_browser)
         if managed_browser and not report["settled"]:
             raise BrowserStartupUnsettled(BrowserStartupUnsettled.prefix + report["reason"])
-        prefixes = [*self.held_outputs, *(bus.prefix for bus in self.aux_buses or ())]
+        prefixes = [*self.held_outputs, *(bus.prefix for bus in self.aux_buses or () if bus.listener)]   # the held Janus buses
         browser = self._browser_snapshot()
         self.avp.executeCommandsFromString("\n".join(
             [f"node.object.set {node} reset_counters true" for node in compositors]
@@ -638,6 +638,7 @@ def load_avp_api():
     from pyplumber.node import (
         AssumeVideoFormat,
         Bsf,
+        CudaToV210,
         CudaTransform,
         AudioMixer,
         DecAudio,
@@ -674,6 +675,7 @@ def load_avp_api():
         MixerGraphBuilder=MixerGraphBuilder,
         AssumeVideoFormat=AssumeVideoFormat,
         Bsf=Bsf,
+        CudaToV210=CudaToV210,
         CudaTransform=CudaTransform,
         AudioMixer=AudioMixer,
         DecAudio=DecAudio,
@@ -802,9 +804,14 @@ def _hdr_metadata(r: "mixer_config.Rendition", target) -> dict | None:
 
 
 def _build_record_output(avp, api, edge: str, r: "mixer_config.Rendition", *, codec: str,
-                         enc_format: str, color: dict, output_format=None, hdr_metadata=None) -> None:
-    """``force_fps -> assume_format -> nvenc -> mux -> output``, nodes named ``<id>_*``."""
-    name = lambda suffix: f"{r.id}_{suffix}"  # noqa: E731
+                         enc_format: str, color: dict, output_format=None, hdr_metadata=None,
+                         prefix: str = "", group: str = OUTPUT_GROUP, failure_mode: str = "panic") -> None:
+    """``force_fps -> assume_format -> nvenc -> mux -> output``, nodes named ``<prefix or id>_*``.
+    An MXL target is packed to v210 on the GPU instead of encoded (``cuda_to_v210`` in place of
+    ``assume_format -> nvenc``) and published as the video flow ``r.flow`` of the domain ``r.url``."""
+    name = lambda suffix: f"{prefix or r.id}_{suffix}"  # noqa: E731
+    mxl = r.target == "mxl"
+    output_format = "mxl" if mxl else infer_output_format(r.target, output_format)
     bitrate = f"{r.bitrate_kbps}k"
     profile = r.profile or (("main10" if enc_format in TEN_BIT_FORMATS else "main") if "hevc" in codec else "high")
     gop = max(1, round(r.fps)) * 2
@@ -812,10 +819,12 @@ def _build_record_output(avp, api, edge: str, r: "mixer_config.Rendition", *, co
     # show timeline and keyframed on the same show frames as the other host's (mux show_time,
     # enc_video show_keyframes; forced-idr makes NVENC's forced picture an IDR). MPEG-TS wraps the
     # large show timestamps the same way on both hosts; an MP4 or FLV would start months in.
-    show = (os.environ.get("AVP_CLOCK_ORIGIN") == "tai" and
-            infer_output_format(r.target, output_format) == "mpegts")
+    show = os.environ.get("AVP_CLOCK_ORIGIN") == "tai" and output_format == "mpegts"
     add_nodes(avp, api, [
+        # The MXL muxer writes each packet to the next grain, so force_fps's constant rate is the flow's.
         ("ForceFPS", {"name": name("fps"), "src": edge, "dst": name("fps"), "fps": mixer_config.rate_text(r.fps)}),
+        *([("CudaToV210", {"name": name("pack"), "src": name("fps"), "dst": name("encoded"),
+                           "width": r.width, "height": r.height, "fps": mixer_config.rate_text(r.fps)})] if mxl else [
         ("AssumeVideoFormat", {"name": name("format"), "src": name("fps"), "dst": name("video"),
                                "width": r.width, "height": r.height, "pixel_format": "cuda",
                                "real_pixel_format": enc_format}),
@@ -826,12 +835,13 @@ def _build_record_output(avp, api, edge: str, r: "mixer_config.Rendition", *, co
                       "options": {"b": bitrate, "maxrate": bitrate, "bufsize": bitrate,
                                   "g": gop, "bf": 0, "preset": r.preset,
                                   "tune": "ll", "profile": profile, **dpb_options(r.dpb_size), **color,
-                                  **({"forced-idr": 1} if show else {})}}),
+                                  **({"forced-idr": 1} if show else {})}})]),
         ("Mux", {"name": name("mux"), "src": [name("encoded")], "dst": name("muxed"), "ts_sort_wait": 0,
                  **({"show_time": True} if show else {})}),
-        ("Output", {"name": name("output"), "src": name("muxed"), "url": r.target,
-                    "format": infer_output_format(r.target, output_format), "auto_restart": "panic"}),
-    ], group=OUTPUT_GROUP)
+        ("Output", {"name": name("output"), "src": name("muxed"), "url": r.url if mxl else r.target,
+                    "format": output_format, **({"options": {"video_flow_id": r.flow}} if mxl else {}),
+                    "auto_restart": failure_mode}),
+    ], group=group)
 
 
 def _rendition_target(r, working_format, color):
@@ -1010,6 +1020,7 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
     audio_edges: list[tuple[str, str]] = []  # (source.id, audio edge), only sources with has_audio
     for index, source in enumerate(cfg.sources):
         group = _input_group(index)
+        raw_storage = mixer_config.RAW_STORAGE.get(source.kind)   # what a raw source's frames arrive as
         if source.id in external:
             from pyplumber.node import InternalNode
             source_type = type("CudaIpcSource", (InternalNode,), {"TYPE": "cuda_ipc_source"})
@@ -1030,12 +1041,19 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
             file_params = dict(group=group, fps=fps_num, fps_den=fps_den, hwaccel=HWACCEL, loop=source.loop,
                                event_loop=_pacing_loop(index), native_rate=True,
                                frame_metadata=SOURCE_FRAME_METADATA, demux=demux)
-            if source.kind == "v210":
-                # Unpack v210 to P210 on the GPU to preserve 10-bit 4:2:2 through the canvas.
+            if source.kind in ("v210", "mxl"):
+                # Unpack v210 (a file, or an MXL flow's grains) on the GPU: straight into the canvas's
+                # storage when the canvas is the next reader and wants the same colour, so no second
+                # pass re-stores every frame; otherwise to P210, all of the 10-bit 4:2:2 samples, for the
+                # transform, filter, hook or colour conversion that reads them.
                 assert source.color is not None  # config requires an explicit color contract for v210
+                if source.color == cfg.out_color and not (source.transform or source.filter_graph or process_source):
+                    raw_storage = cfg.working_format
                 edge = build_v210_input(
                     avp, api, str(index), source.location, width=source.width, height=source.height,
-                    color=source.color.tags, **file_params)
+                    color=source.color.tags, mxl=source.kind == "mxl", storage=raw_storage,
+                    direct=source.kind == "mxl" and cfg.mxl_reader == "native", pool_frames=cfg.raw_pool_frames,
+                    **file_params)
             elif source.kind in ("nv12", "p010"):
                 edge = build_raw420_input(
                     avp, api, str(index), source.location, width=source.width, height=source.height,
@@ -1092,18 +1110,19 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
             # The reusable builder shares conversion and fan-out for identical edges.
             mixer.add_source(mixer_config.alias_name(source.id, k), pre_otm_edge=edge,
                              input_group=group, picture=source.picture,
+                             reconnects=(source.width, source.height) if source.kind == "mxl" else None,
                              fan_out_loop=_pacing_loop(index) if cfg.source_fan_out == "event_loop" else None,
                              color=None if source.filter_graph else source.color,
                              # Raw upload stamps tags; transforms preserve frame properties.
                              # User filters/hooks can change them, so keep normalization there.
-                             color_tagged=((source.kind in ("nv12", "p010", "v210") or source.id in external) and
+                             color_tagged=((source.kind in mixer_config.RAW_STORAGE or source.id in external) and
                                            not source.filter_graph and process_source is None),
                              packed_rgb=source.kind == "browser" or source.alpha,
                              # Decoded alpha is straight; only browser pages arrive premultiplied.
                              premultiplied_alpha=source.kind == "browser" and source.id in blended_sources,
                              pixel_format="rgba" if source.alpha else source.filter_output_format or
                              (source.transform.sw_format if source.transform
-                              else source.decoded_format or ("nv12" if source.id in external else mixer_config.RAW_STORAGE.get(source.kind))))
+                              else source.decoded_format or ("nv12" if source.id in external else raw_storage)))
     for scene in cfg.scenes:
         mixer.add_scene(scene.id, mixer_config.scene_layers(cfg, scene))
     mixer.set_initial_scene(cfg.initial_scene, slot="A")

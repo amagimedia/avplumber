@@ -25,6 +25,9 @@ class MixerSource:
     frame_color: Optional[Dict[str, str]] = None
     # The event loop this source's fan-out runs on; None: on a thread of its own.
     fan_out_loop: Optional[str] = None
+    # A live source whose input group restarts when its writer comes back (MXL): its (width,
+    # height). The builder keeps the restart's EOF from reaching the compositor.
+    reconnects: Optional[tuple] = None
 
 
 @dataclass
