@@ -364,6 +364,13 @@ def build_raw420_input(avp, api, tag: str, path: str, *, width: int, height: int
 # wraps it waits in queues the writer's ring history does not bound.
 MXL_READER_OPTIONS = {"blocking": "1", "grain_index_init": "head", "on_too_late": "reset", "reset_on_drop": "1"}
 
+# Seconds after its grain's time (TAI) that the native reader's picture is released, whatever the
+# rate: it covers the writer's commit, the copy and the upload, which take as long at 60 fps as at
+# 25 (`due_us` of the reader's stats: 7-40 ms, 81 ms at most, on an L4 beside the 192-source show).
+# The nearest output tick then lies 40 ms +- half a frame after the grain, ahead of the playout
+# latency; a frame period instead would leave 8 ms of that at 60 fps.
+MXL_RELEASE_DELAY = 0.040
+
 
 def build_v210_input(avp, api, tag: str, path: str, *, width: int, height: int, group: str,
                      fps: int, fps_den: int = 1, hwaccel: str = "@gpu", loop: bool = False,
@@ -389,13 +396,14 @@ def build_v210_input(avp, api, tag: str, path: str, *, width: int, height: int, 
     """
     # A live flow's pictures arrive as their writer commits them, not ahead of time as a file's do.
     # The native reader stamps each with its grain's time on the flow's clock (TAI), and pacing
-    # releases it a frame after that time, whenever it arrived: a reader that fell out of the ring
-    # and left grains out, or a start that stalled, moves no later picture off its output tick.
+    # releases it MXL_RELEASE_DELAY after that time, whenever it arrived: a reader that fell out of
+    # the ring and left grains out, or a start that stalled, moves no later picture off its output
+    # tick. (Paced by arrival instead, such grain timestamps freeze a source whose start stalled.)
     # The demuxer's timestamps run on across what it left out, so its pictures are held a frame
     # after the first one's arrival instead (a jitter buffer), and such a stall leaves the source
     # late, in repeat and drop pairs on the output ticks, until it is late enough to resync.
     if mxl and direct:
-        pacing = {"team": f"input_{tag}_tai", "tai_delay": fps_den / fps}
+        pacing = {"team": f"input_{tag}_tai", "tai_delay": MXL_RELEASE_DELAY}
     elif mxl:
         pacing = {"jitter_margin": fps_den / fps, "initial_jitter_margin": fps_den / fps}
     else:

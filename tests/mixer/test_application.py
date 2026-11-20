@@ -98,8 +98,8 @@ def test_an_mxl_writer_restart_never_ends_the_program(native_boundary, color, st
             "type": "raw_video_file_cuda", "url": "mxl:///dev/shm/mxl?id=f", "pixel_format": "v210", "storage": storage,
             "video_size": "1920x1080", "framerate": "60/1", "loop": False, "loop_continuous_ts": False,
             "frame_color": cfg.sources[0].color.tags, "auto_restart": "group"}
-        # Released a frame after each grain's own time (TAI), on a team of its own.
-        assert (nodes["realtime_0"]["team"], nodes["realtime_0"]["tai_delay"]) == ("input_0_tai", 1 / 60)
+        # Released 40 ms after each grain's own time (TAI) at any rate, on a team of its own.
+        assert (nodes["realtime_0"]["team"], nodes["realtime_0"]["tai_delay"]) == ("input_0_tai", 0.040)
         assert "jitter_margin" not in nodes["realtime_0"]
     else:
         # The demuxer's timestamps run on across a stall: a frame of jitter buffer after arrival.

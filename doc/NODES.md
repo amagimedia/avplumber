@@ -1037,7 +1037,8 @@ the pictures are the grains of that [MXL](https://github.com/dmf-mxl/mxl) flow i
 copied once out of the flow's shared-memory ring into the page-locked memory (CUDA does not register
 the ring's own mapping). The flow must exist when the node starts and be progressive `video/v210` of
 `video_size`; timestamps are its grains' indices, their times on the flow's clock (TAI) in grain
-periods, so `realtime` with `tai_delay` releases each picture at its own time. The node starts at the
+periods, to be paced by `realtime` with `tai_delay`, which releases each picture at its own time
+(paced by arrival, a source whose start stalled leaves grains out and freezes). The node starts at the
 newest grain and waits for the next one for as long as a stalled writer takes. When it falls out of
 the ring it returns to the newest grain, and the grains it left behind are a gap in the timestamps.
 A grain the writer overwrote during the copy is dropped. When the flow is gone or was created again the node fails, for
