@@ -241,6 +241,12 @@ def build_v210_input(avp, api, tag: str, path: str, *, width: int, height: int, 
 MXL_ZERO_COPY_PACKET_CAPACITY = 1
 
 
+def mxl_unpack_group(group: str) -> str:
+    """Group for build_mxl_input's unpack_{tag} filter: see its own definition for why
+    this is kept separate from, and must be started/tolerated alongside, `group`."""
+    return f"{group}_unpack"
+
+
 def build_mxl_input(avp, api, tag: str, url: str, *, width: int, height: int, group: str,
                     fps: int, fps_den: int = 1, hwaccel: str = "@gpu",
                     color: Optional[dict] = None, zero_copy: bool = True,
@@ -278,6 +284,12 @@ def build_mxl_input(avp, api, tag: str, url: str, *, width: int, height: int, gr
         "group": group, "auto_restart": "off",
     }))
     decoded = f"input_{tag}_decoded"
+    if zero_copy:
+        # rawvideo decode of an already-raw payload wraps the packet's buffer directly
+        # into the output frame with no copy, so this frame's data still points straight
+        # into the MXL ring buffer: it inherits the same "never let one wait behind
+        # another" requirement as vpkt above, right up until unpack_{tag} consumes it.
+        avp.edges.planCapacity(decoded, MXL_ZERO_COPY_PACKET_CAPACITY)
     avp.addNode(api.DecVideo({
         "name": f"decode_{tag}", "src": vpkt, "dst": decoded, "codec": "rawvideo",
         "reinterpret_width": v210_row_stride(width), "reinterpret_pixel_format": "gray",
@@ -286,6 +298,14 @@ def build_mxl_input(avp, api, tag: str, url: str, *, width: int, height: int, gr
     avp.addNode(api.FilterVideo({
         "name": f"unpack_{tag}", "src": decoded, "dst": f"input_{tag}_cuda",
         "hwaccel": hwaccel, "graph": _v210_unpack_graph(width, color), "threads": 1,
-        "group": group, "auto_restart": "off",
+        # Its own group, not `group`: a restart of the input/demux/decode group tears
+        # down and recreates every node in it, including this one's CUDA pinned
+        # staging buffer, stream, event and (for v210) PTX module. Rebuilding those
+        # under concurrent-source load can stall the whole process for seconds --
+        # long enough to blow MXL's grain retention window for frames anywhere else
+        # in the pipeline. Edge<T> is producer-identity-agnostic (consumer wait just
+        # resumes once the restarted decode_{tag} starts enqueuing again), so keeping
+        # this filter graph alive across restarts of its upstream siblings is safe.
+        "group": mxl_unpack_group(group), "auto_restart": "off",
     }))
     return _pace(avp, api, tag, f"input_{tag}_cuda", fps=fps, fps_den=fps_den, group=group, event_loop=event_loop)

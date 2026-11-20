@@ -3,11 +3,22 @@
 #include "avutils.hpp"
 #include <libavutil/hwcontext.h>
 #include <libavutil/pixfmt.h>
+#include <mutex>
 
 class HWAccelDevice: public InstanceShared<HWAccelDevice> {
 protected:
     AVBufferRef* device_ctx_;
+    // Every FilterVideo node sharing this device (looked up by name, e.g. "@gpu")
+    // gets the same HWAccelDevice instance. FFmpeg's CUDA filters (hwupload_cuda,
+    // scale_cuda, ...) are not documented as safe for concurrent AVFilterGraph
+    // alloc/config/free sharing one hw_device_ctx: two sources restarting within
+    // the same instant (each source's own auto_restart is independent) raced here
+    // and segfaulted during concurrent graph teardown/recreate. Recursive because
+    // maybeInitFilterGraph() calls freeFilterGraph() on several of its own error
+    // paths while already holding the lock.
+    std::recursive_mutex graph_mutex_;
 public:
+    std::recursive_mutex& graphMutex() { return graph_mutex_; }
     // Adopt an initialized device reference (e.g. a stream sharing an existing CUDA context).
     explicit HWAccelDevice(AVBufferRef *device): device_ctx_(device) {}
     HWAccelDevice(Parameters &params) {

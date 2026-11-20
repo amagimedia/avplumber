@@ -151,6 +151,39 @@ def test_native_error_handler_restored_after_successful_start(native_boundary):
     assert app._startup_error is None
 
 
+def test_native_input_group_startup_failure_recovers_without_aborting(native_boundary, monkeypatch):
+    """An input group's own NodeGroup-level startup failure must not raise:
+    every input group starts concurrently and already carries its own
+    auto_restart for exactly this kind of transient hiccup (observed with many
+    concurrent MXL sources attaching at once). Raising here would call stop()
+    on every group from run_application's finally block, racing sibling input
+    groups still legitimately starting. _wait_for_edges' own timeout is the
+    real gate; a node-level failure (not a group) elsewhere still aborts
+    immediately, per test_native_startup_error_aborts_without_waiting_for_frames."""
+    app = application(native_boundary)
+    engine = app.avp
+    edge = app.input_edges[0]
+    engine.missing.add(edge)   # stuck at first, as if the group's auto_restart is retrying
+    received = []
+    engine.on_exception = lambda *args: received.append(args)
+    failure = (app.input_groups[0], "NodeGroup", "Error while changing state: Input/output error")
+    polls = []
+    inspect = engine.getEdge
+    def get_edge(name, data_type=None):
+        if name == edge:
+            polls.append(None)
+            if len(polls) == 1:
+                engine.on_exception(*failure)
+            else:
+                engine.missing.discard(edge)   # auto_restart recovered the source
+        return inspect(name, data_type)
+    monkeypatch.setattr(engine, "getEdge", get_edge)
+    app.start()
+    assert received == [failure]
+    assert app._startup_error is None
+    assert engine.ready
+
+
 @pytest.mark.parametrize("failure", [False, True])
 def test_ready_waits_for_aux_encoder_and_keeps_startup_error_handler(native_boundary, monkeypatch, failure):
     app = application(native_boundary)

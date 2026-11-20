@@ -1,6 +1,6 @@
-From 3c3cff97e489ea9bb1e68425a2b30aa2f2de0a1b Mon Sep 17 00:00:00 2001
+From a63440ad680c4fcc5eb39fefdcb2d15630453771 Mon Sep 17 00:00:00 2001
 From: avplumber mxl builder <avplumber-mxl@local>
-Date: Tue, 6 Oct 2026 15:21:09 +0000
+Date: Tue, 13 Oct 2026 12:08:22 +0000
 Subject: [PATCH] avformat/mxl: add libmxl demuxer and muxer
 
 Adds the MXL demuxer, muxer, URI parser, JSON/diagnostic helpers
@@ -10,9 +10,10 @@ Cherry-picked from https://github.com/cbcrc/FFmpeg (branch
 dmf-mxl/9.0) and squashed onto 98e92563a3b60dbf6d370fd3491d7f896398e4c1 on top of the avplumber series.
 
 Original commits:
-  * a249e67196 avformat/mxldec: keep pts monotonic across a reset_on_drop reset
-  * 1afbef9a6a ffmpeg 9 port
-  * 784f5b85b3 Apply FFmpeg 8 MXL integration to FFmpeg 9
+  * 9cbe76c9a6 avformat/mxldec: share one mxlInstance per domain across demuxer contexts
+  * 4044f6fdde avformat/mxldec: keep pts monotonic across a reset_on_drop reset
+  * 134a0a54e2 ffmpeg 9 port
+  * b4d355b6e3 Apply FFmpeg 8 MXL integration to FFmpeg 9
 
 Co-authored-by: avplumber mxl builder <avplumber-mxl@local>
 Co-authored-by: jpt <jim.trainor@jptrainor.com>
@@ -21,27 +22,27 @@ Co-authored-by: jpt <jim.trainor@jptrainor.com>
  libavformat/Makefile            |    6 +-
  libavformat/allformats.c        |    2 +
  libavformat/jsmn.c              |   27 +
- libavformat/jsmn.h              |  468 ++++++++
+ libavformat/jsmn.h              |  468 +++++++
  libavformat/mxl_common.h        |   29 +
  libavformat/mxl_diag.c          |  379 ++++++
  libavformat/mxl_diag.h          |  227 ++++
  libavformat/mxl_dump.c          |   92 ++
  libavformat/mxl_dump.h          |   36 +
- libavformat/mxl_flow_def.h      |  272 +++++
+ libavformat/mxl_flow_def.h      |  272 ++++
  libavformat/mxl_json.c          |  449 +++++++
  libavformat/mxl_json.h          |  225 ++++
  libavformat/mxl_loc.c           |  217 ++++
  libavformat/mxl_loc.h           |   42 +
- libavformat/mxl_log.h           |   67 ++
+ libavformat/mxl_log.h           |   67 +
  libavformat/mxl_status.h        |   59 +
  libavformat/mxl_uri.c           |  304 +++++
  libavformat/mxl_uri.h           |  118 ++
- libavformat/mxldec.c            | 1990 +++++++++++++++++++++++++++++++
+ libavformat/mxldec.c            | 2058 +++++++++++++++++++++++++++++++
  libavformat/mxlenc.c            |  893 ++++++++++++++
- libavformat/tests/mxl_diag.c    | 1471 +++++++++++++++++++++++
- libavformat/tests/mxl_json.c    | 1076 +++++++++++++++++
+ libavformat/tests/mxl_diag.c    | 1471 ++++++++++++++++++++++
+ libavformat/tests/mxl_json.c    | 1076 ++++++++++++++++
  libavformat/tests/mxl_loc.c     |  587 +++++++++
- libavformat/tests/mxl_uri.c     | 1408 ++++++++++++++++++++++
+ libavformat/tests/mxl_uri.c     | 1408 +++++++++++++++++++++
  tests/Makefile                  |    1 +
  tests/fate/mxl.mak              |  249 ++++
  tests/ref/fate/mxl-audio-encdec |   14 +
@@ -57,7 +58,7 @@ Co-authored-by: jpt <jim.trainor@jptrainor.com>
  tests/ref/fate/mxl-uri          | 1176 ++++++++++++++++++
  tests/ref/fate/mxl-video-encdec |   14 +
  tests/ref/fate/mxl-video-probe  |   10 +
- 40 files changed, 13710 insertions(+), 2 deletions(-)
+ 40 files changed, 13778 insertions(+), 2 deletions(-)
  create mode 100644 libavformat/jsmn.c
  create mode 100644 libavformat/jsmn.h
  create mode 100644 libavformat/mxl_common.h
@@ -3253,10 +3254,10 @@ index 0000000000..ce0e67131a
 +#endif /* AVFORMAT_MXL_URI_H */
 diff --git a/libavformat/mxldec.c b/libavformat/mxldec.c
 new file mode 100644
-index 0000000000..655ccb5152
+index 0000000000..40a55e0c4d
 --- /dev/null
 +++ b/libavformat/mxldec.c
-@@ -0,0 +1,1990 @@
+@@ -0,0 +1,2058 @@
 +/*
 + * MXL demuxer for Media eXchange Layer flows
 + *
@@ -3308,6 +3309,7 @@ index 0000000000..655ccb5152
 +#include "libavutil/opt.h"
 +#include "libavutil/log.h"
 +#include "libavutil/mem.h"
++#include "libavutil/thread.h"
 +
 +#include <mxl/mxl.h>
 +#include <mxl/flow.h>
@@ -3574,6 +3576,77 @@ index 0000000000..655ccb5152
 +#undef OFFSET
 +#undef FLAGS
 +
++typedef struct MXLSharedInstance {
++    char *domain_path;
++    mxlInstance instance;
++    int refcount;
++} MXLSharedInstance;
++// Every demuxer context for a domain used to call mxlCreateInstance() on its
++// own: N sources sharing one MXL domain meant N independent mxlInstance
++// objects (each with its own DomainWatcher epoll/inotify thread) touching the
++// same shared-memory domain with no coordination between them, which is where
++// instability showed up as source count grew. mxlInstance already supports
++// many flow readers safely (Instance::getFlowReader takes an internal lock);
++// this cache makes every demuxer context for a domain, within one process,
++// share that one instance instead of each opening its own.
++static AVMutex mxl_instances_mutex = AV_MUTEX_INITIALIZER;
++static MXLSharedInstance *mxl_instances;
++static int mxl_instances_count;
++static mxlInstance mxl_instance_acquire(const char *domain_path)
++{
++    mxlInstance instance;
++    MXLSharedInstance *grown;
++    ff_mutex_lock(&mxl_instances_mutex);
++    for (int i = 0; i < mxl_instances_count; i++) {
++        if (!strcmp(mxl_instances[i].domain_path, domain_path)) {
++            mxl_instances[i].refcount++;
++            instance = mxl_instances[i].instance;
++            ff_mutex_unlock(&mxl_instances_mutex);
++            return instance;
++        }
++    }
++    instance = mxlCreateInstance(domain_path, NULL);
++    if (instance) {
++        grown = av_realloc_array(mxl_instances, mxl_instances_count + 1, sizeof(*mxl_instances));
++        if (grown) {
++            mxl_instances = grown;
++            mxl_instances[mxl_instances_count].domain_path = av_strdup(domain_path);
++            if (mxl_instances[mxl_instances_count].domain_path) {
++                mxl_instances[mxl_instances_count].instance = instance;
++                mxl_instances[mxl_instances_count].refcount = 1;
++                mxl_instances_count++;
++            } else {
++                // OOM copying the key: destroy the instance we just made rather
++                // than leak it uncached (the next acquire would just retry).
++                mxlDestroyInstance(instance);
++                instance = NULL;
++            }
++        } else {
++            // OOM growing the table: same, do not leak an uncached instance.
++            mxlDestroyInstance(instance);
++            instance = NULL;
++        }
++    }
++    ff_mutex_unlock(&mxl_instances_mutex);
++    return instance;
++}
++static void mxl_instance_release(mxlInstance instance)
++{
++    if (!instance)
++        return;
++    ff_mutex_lock(&mxl_instances_mutex);
++    for (int i = 0; i < mxl_instances_count; i++) {
++        if (mxl_instances[i].instance == instance) {
++            if (--mxl_instances[i].refcount == 0) {
++                mxlDestroyInstance(mxl_instances[i].instance);
++                av_free(mxl_instances[i].domain_path);
++                mxl_instances[i] = mxl_instances[--mxl_instances_count];
++            }
++            break;
++        }
++    }
++    ff_mutex_unlock(&mxl_instances_mutex);
++}
 +static const AVClass mxl_demuxer_class = {
 +     .class_name = "mxl demuxer",
 +     .item_name  = av_default_item_name,
@@ -4360,9 +4433,9 @@ index 0000000000..655ccb5152
 +        goto finally;
 +    }
 +
-+    mxl_instance = mxlCreateInstance(loc.domain_path, NULL);
++    mxl_instance = mxl_instance_acquire(loc.domain_path);
 +    if (NULL == mxl_instance) {
-+        loge(s, "mxlCreateInstance error\n");
++        loge(s, "mxl_instance_acquire error\n");
 +        exit_status = AVERROR(EIO);
 +        goto finally;
 +    }
@@ -4457,11 +4530,8 @@ index 0000000000..655ccb5152
 +        av_free(stream_contexts);
 +    }
 +
-+    if (mxl_instance) {
-+        mxlStatus mxl_status = mxlDestroyInstance(mxl_instance);
-+        if (MXL_STATUS_OK != mxl_status)
-+            logw(s, "mxlDestroyInstance error %s\n", mxl_status_to_str(mxl_status));
-+    }
++    if (mxl_instance)
++        mxl_instance_release(mxl_instance);
 +
 +    if (diag_server)
 +        mxl_diag_close(s, diag_server);
@@ -5192,8 +5262,7 @@ index 0000000000..655ccb5152
 +    p->stream_contexts = NULL;
 +
 +    if (p->mxl_instance) {
-+        if (MXL_STATUS_OK != mxlDestroyInstance(p->mxl_instance))
-+            logw(s, "mxlDestroyInstance error\n");
++        mxl_instance_release(p->mxl_instance);
 +        p->mxl_instance = NULL;
 +    }
 +

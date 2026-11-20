@@ -1,0 +1,142 @@
+From 9cbe76c9a695ea4cf2f7e81df2678966a528e937 Mon Sep 17 00:00:00 2001
+From: avplumber mxl builder <avplumber-mxl@local>
+Date: Tue, 13 Oct 2026 12:07:02 +0000
+Subject: [PATCH] avformat/mxldec: share one mxlInstance per domain across
+ demuxer contexts
+
+Each demuxer context (one per avplumber Input node) called
+mxlCreateInstance() for itself. With N sources on the same MXL domain that
+is N independent mxlInstance objects, each with its own DomainWatcher (its
+own epoll fd, inotify fd and watcher thread), all touching the same
+shared-memory domain concurrently with no coordination between them.
+Attaching many readers to the same domain at once intermittently failed
+with EIO/EAGAIN from mxlCreateFlowReader, which avplumber surfaced as
+per-source startup failures and group restarts.
+
+mxlInstance already supports many flow readers safely --
+Instance::getFlowReader() takes an internal lock per instance -- so the
+fix is to share one instance per domain path within a process instead of
+letting every demuxer context open its own. Reference-counted: the first
+context to open a domain creates the instance, the last to close it tears
+it down.
+
+Every call site that frees the instance goes through
+mxl_instance_release(), including mxl_read_header()'s own finally: error
+path on a failed open -- a direct mxlDestroyInstance() there would tear
+down the shared instance out from under any other demuxer context still
+using it on the same domain. mxl_probe()'s instance is unrelated: it is
+its own short-lived, uncached, un-shared instance for an existence check
+and is destroyed directly as before.
+---
+ libavformat/mxldec.c | 86 +++++++++++++++++++++++++++++++++++++++-----
+ 1 file changed, 77 insertions(+), 9 deletions(-)
+
+diff --git a/libavformat/mxldec.c b/libavformat/mxldec.c
+index 655ccb5152..40a55e0c4d 100644
+--- a/libavformat/mxldec.c
++++ b/libavformat/mxldec.c
+@@ -51,2 +51,3 @@
+ #include "libavutil/mem.h"
++#include "libavutil/thread.h"
+ 
+@@ -317,2 +318,73 @@ static const AVOption mxl_options[] = {
+ 
++typedef struct MXLSharedInstance {
++    char *domain_path;
++    mxlInstance instance;
++    int refcount;
++} MXLSharedInstance;
++// Every demuxer context for a domain used to call mxlCreateInstance() on its
++// own: N sources sharing one MXL domain meant N independent mxlInstance
++// objects (each with its own DomainWatcher epoll/inotify thread) touching the
++// same shared-memory domain with no coordination between them, which is where
++// instability showed up as source count grew. mxlInstance already supports
++// many flow readers safely (Instance::getFlowReader takes an internal lock);
++// this cache makes every demuxer context for a domain, within one process,
++// share that one instance instead of each opening its own.
++static AVMutex mxl_instances_mutex = AV_MUTEX_INITIALIZER;
++static MXLSharedInstance *mxl_instances;
++static int mxl_instances_count;
++static mxlInstance mxl_instance_acquire(const char *domain_path)
++{
++    mxlInstance instance;
++    MXLSharedInstance *grown;
++    ff_mutex_lock(&mxl_instances_mutex);
++    for (int i = 0; i < mxl_instances_count; i++) {
++        if (!strcmp(mxl_instances[i].domain_path, domain_path)) {
++            mxl_instances[i].refcount++;
++            instance = mxl_instances[i].instance;
++            ff_mutex_unlock(&mxl_instances_mutex);
++            return instance;
++        }
++    }
++    instance = mxlCreateInstance(domain_path, NULL);
++    if (instance) {
++        grown = av_realloc_array(mxl_instances, mxl_instances_count + 1, sizeof(*mxl_instances));
++        if (grown) {
++            mxl_instances = grown;
++            mxl_instances[mxl_instances_count].domain_path = av_strdup(domain_path);
++            if (mxl_instances[mxl_instances_count].domain_path) {
++                mxl_instances[mxl_instances_count].instance = instance;
++                mxl_instances[mxl_instances_count].refcount = 1;
++                mxl_instances_count++;
++            } else {
++                // OOM copying the key: destroy the instance we just made rather
++                // than leak it uncached (the next acquire would just retry).
++                mxlDestroyInstance(instance);
++                instance = NULL;
++            }
++        } else {
++            // OOM growing the table: same, do not leak an uncached instance.
++            mxlDestroyInstance(instance);
++            instance = NULL;
++        }
++    }
++    ff_mutex_unlock(&mxl_instances_mutex);
++    return instance;
++}
++static void mxl_instance_release(mxlInstance instance)
++{
++    if (!instance)
++        return;
++    ff_mutex_lock(&mxl_instances_mutex);
++    for (int i = 0; i < mxl_instances_count; i++) {
++        if (mxl_instances[i].instance == instance) {
++            if (--mxl_instances[i].refcount == 0) {
++                mxlDestroyInstance(mxl_instances[i].instance);
++                av_free(mxl_instances[i].domain_path);
++                mxl_instances[i] = mxl_instances[--mxl_instances_count];
++            }
++            break;
++        }
++    }
++    ff_mutex_unlock(&mxl_instances_mutex);
++}
+ static const AVClass mxl_demuxer_class = {
+@@ -1103,5 +1175,5 @@ static int mxl_read_header(AVFormatContext *s)
+ 
+-    mxl_instance = mxlCreateInstance(loc.domain_path, NULL);
++    mxl_instance = mxl_instance_acquire(loc.domain_path);
+     if (NULL == mxl_instance) {
+-        loge(s, "mxlCreateInstance error\n");
++        loge(s, "mxl_instance_acquire error\n");
+         exit_status = AVERROR(EIO);
+@@ -1200,7 +1272,4 @@ finally:
+ 
+-    if (mxl_instance) {
+-        mxlStatus mxl_status = mxlDestroyInstance(mxl_instance);
+-        if (MXL_STATUS_OK != mxl_status)
+-            logw(s, "mxlDestroyInstance error %s\n", mxl_status_to_str(mxl_status));
+-    }
++    if (mxl_instance)
++        mxl_instance_release(mxl_instance);
+ 
+@@ -1935,4 +2004,3 @@ static int mxl_read_close(AVFormatContext *s)
+     if (p->mxl_instance) {
+-        if (MXL_STATUS_OK != mxlDestroyInstance(p->mxl_instance))
+-            logw(s, "mxlDestroyInstance error\n");
++        mxl_instance_release(p->mxl_instance);
+         p->mxl_instance = NULL;
+-- 
+2.43.0
+

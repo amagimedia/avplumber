@@ -278,7 +278,15 @@ protected:
         int putFrame(T &frm) {
             if (!ctx_)
                 throw Error("graph input count does not match node sources");
-            return av_buffersrc_add_frame_flags(ctx_, frm.raw(), 0 /*AV_BUFFERSRC_FLAG_KEEP_REF*/);
+            // Flags=0 (no AV_BUFFERSRC_FLAG_KEEP_REF) makes av_buffersrc_add_frame_flags
+            // take ownership by moving frm's AVFrame fields out in place (zeroing them
+            // on frm's own underlying struct) rather than copying. frm here is often
+            // *edge->peek() -- a pointer into the caller's still-live queue slot, not
+            // yet popped -- so mutate an independent clone instead of that slot's own
+            // struct. T(frm.raw()) is a cheap refcounted clone (new AVFrame struct,
+            // av_frame_ref into it), not a pixel copy.
+            T clone(frm.raw());
+            return av_buffersrc_add_frame_flags(ctx_, clone.raw(), 0 /*AV_BUFFERSRC_FLAG_KEEP_REF*/);
         }
         int closeAtEof() {
             if (!ctx_ || eof_closed_)
@@ -308,6 +316,10 @@ protected:
     std::vector<bool> input_eof_;
 
     void freeFilterGraph() {
+        // Serialize against every other FilterVideo sharing this hwaccel device:
+        // see HWAccelDevice::graphMutex() for why.
+        std::unique_lock<std::recursive_mutex> hwaccel_lock;
+        if (hwaccel_) hwaccel_lock = std::unique_lock<std::recursive_mutex>(hwaccel_->graphMutex());
         if (filter_graph_ == nullptr) return;
         avfilter_graph_free(&filter_graph_);
         filter_graph_ = nullptr;
@@ -391,10 +403,17 @@ protected:
         return avfilter_graph_parse2(filter_graph_, graph_desc_.c_str(), inputs, outputs);
     }
     bool maybeInitFilterGraph(bool frame_waiting = false) {
+        // Held for the whole alloc/parse/config sequence below, not just the free()
+        // above: a concurrent free+recreate on another FilterVideo sharing this
+        // device must not interleave with this one's. Recursive: freeFilterGraph()
+        // (called just below, and again on several error paths further down) takes
+        // the same lock on the same thread.
+        std::unique_lock<std::recursive_mutex> hwaccel_lock;
+        if (hwaccel_) hwaccel_lock = std::unique_lock<std::recursive_mutex>(hwaccel_->graphMutex());
         if (filter_graph_ != nullptr) {
             freeFilterGraph();
         }
-        
+
         for (Port &port: sources_) {
             if (!port.isSourceReadyToInit()) {
                 // not ready yet

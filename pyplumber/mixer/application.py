@@ -24,7 +24,7 @@ from .color import Color, TEN_BIT_FORMATS, default_codec, hdr_metadata, renditio
 from .config import FEEDS
 from .dsk import DownstreamKeyer, register_dsk_commands
 from .dmabuf_inputs import dmabuf_cuda_input_nodes, open_windows, refresh_windows, wait_for_sockets
-from .inputs import build_input, build_v210_input, build_raw420_input, build_mxl_input
+from .inputs import build_input, build_v210_input, build_raw420_input, build_mxl_input, mxl_unpack_group
 from .janus import (DEFAULT_KEYFRAME_MIN_INTERVAL_MS, JANUS_KEYFRAME_NODE, JanusVideoConfig,
                     RtcpFeedbackGroup, add_nodes, build_janus_output, dpb_options)
 from ..transform import transform_output, transform_params
@@ -163,6 +163,11 @@ class MixerApplication:
     wipe_cache_mb: float = 640.0            # hold decoded wipes in GPU memory
     cut_latency_encoder: str = ""
     prewarm_cut_scenes: tuple[str, ...] = ()
+    # Per-source groups that hold expensive, restart-independent state (e.g. an MXL
+    # source's hwupload_cuda filter and its CUDA pinned staging buffer/stream/event):
+    # started and startup-tolerated like input_groups, but never torn down by an
+    # input group's own auto_restart. See build_mxl_input in pyplumber/mixer/inputs.py.
+    persistent_input_groups: tuple[str, ...] = ()
     _startup_error: str | None = field(default=None, init=False, repr=False)
 
     def _check_startup(self) -> None:
@@ -210,11 +215,20 @@ class MixerApplication:
 
     def start(self) -> None:
         # Control requests wait for setReady(), so Setup cannot inspect failed nodes
-        # while preheating. Abort here on the native error instead of waiting for frames.
+        # while preheating. Abort here on the native error instead of waiting for frames
+        # -- except an input group's own startup failure, which must not: every input
+        # group starts concurrently (NodeGroup::startNodesInternal() on its own thread),
+        # each already carrying auto_restart for exactly this kind of transient hiccup
+        # (observed with many concurrent MXL sources attaching at once). Raising here
+        # the instant one fails calls stop() on every group from run_application's
+        # finally block, which races NodeGroup::startNodesInternal() of sibling input
+        # groups still legitimately starting and can crash GPU filter teardown mid-init.
+        # _wait_for_edges' own timeout still catches a source that never recovers, with
+        # a clearer error (which edge never got a frame) than this one would have given.
         original = self.avp.on_exception
         self._startup_error = None
         def failed(name, kind, message):
-            if self._startup_error is None:
+            if self._startup_error is None and name not in self.input_groups and name not in self.persistent_input_groups:
                 self._startup_error = f"Mixer startup failed at {name} ({kind}): {message}"
             original(name, kind, message)
         self.avp.on_exception = failed
@@ -225,7 +239,7 @@ class MixerApplication:
 
     def _start(self) -> None:
         started = time.monotonic()
-        for group in self.input_groups:
+        for group in (*self.input_groups, *self.persistent_input_groups):
             self.avp.group(group).startNodes()
         if self.browser_windows:
             refresh_windows(self.dmabuf_rest, list(self.browser_windows))
@@ -289,7 +303,8 @@ class MixerApplication:
             # shutdown() stops one group after another, so a large show took minutes; stopNodes()
             # only signals the group's own thread. Asking every input and aux group first leaves
             # shutdown() joining groups that stop concurrently (its group order was never defined).
-            for group in (*self.input_groups, *(bus.group for bus in self.aux_buses or ())):
+            for group in (*self.input_groups, *self.persistent_input_groups,
+                         *(bus.group for bus in self.aux_buses or ())):
                 self.avp.group(group).stopNodes()
         self.avp.shutdown()
         log.info("Graph stopped in %.1f s", time.monotonic() - started)
@@ -590,6 +605,7 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
     blended_sources = {item.source for scene in cfg.scenes for item in scene.items if item.blend}
     blended_sources |= {key.source for key in cfg.dsk_keys}
     input_edges: list[str] = []
+    persistent_groups: list[str] = []
     for index, source in enumerate(cfg.sources):
         group = _input_group(index)
         if source.kind == "browser":
@@ -618,6 +634,7 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
                 avp, api, str(index), source.location, width=source.width, height=source.height,
                 group=group, fps=cfg.fps, fps_den=FPS_DEN, hwaccel=HWACCEL,
                 color=source.color.tags, event_loop=_pacing_loop(index))
+            persistent_groups.append(mxl_unpack_group(group))
         elif source.kind in ("nv12", "p010"):
             edge = build_raw420_input(
                 avp, api, str(index), source.location, width=source.width, height=source.height,
@@ -691,7 +708,8 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
     listener = _build_renditions(avp, api, options, renditions, feeds, canvas=canvas,
                                  working_format=cfg.working_format, color=cfg.out_color, backend=mixer.backend)
     return _application(avp, mixer, options, input_edges, listener, routed_inputs=False,
-                        wipe_files=tuple(w.path for w in cfg.wipes), browser_windows=tuple(s.id for s in browsers), aux_buses=aux)
+                        wipe_files=tuple(w.path for w in cfg.wipes), browser_windows=tuple(s.id for s in browsers),
+                        aux_buses=aux, persistent_input_groups=tuple(persistent_groups))
 
 
 def _startup_result(error=None):
