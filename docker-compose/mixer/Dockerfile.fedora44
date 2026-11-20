@@ -75,11 +75,16 @@ FROM base AS ffmpeg
 
 ARG FFMPEG_TAG=master-1bfb9160
 ARG BUILD_JOBS=4
+# Empty: the nv-codec-headers pinned in deps/ffmpeg/9/bases.env (see there for driver 595 hosts).
+ARG NV_CODEC_HEADERS_TAG=
+ARG NV_CODEC_HEADERS_COMMIT=
 
 COPY deps/ffmpeg /build/deps/ffmpeg
 
 RUN if [ "${FFMPEG_TAG}" = "$(. /build/deps/ffmpeg/9/bases.env; echo "$upstream_ref")" ]; then \
         . /build/deps/ffmpeg/9/bases.env; \
+        nv_codec_headers_tag=${NV_CODEC_HEADERS_TAG:-$nv_codec_headers_tag}; \
+        nv_codec_headers_commit=${NV_CODEC_HEADERS_COMMIT:-$nv_codec_headers_commit}; \
         git clone --quiet --branch "$nv_codec_headers_tag" --depth 1 \
             https://github.com/FFmpeg/nv-codec-headers.git /tmp/nv-codec-headers \
         && test "$(git -C /tmp/nv-codec-headers rev-parse HEAD)" = "$nv_codec_headers_commit" \
