@@ -1703,17 +1703,24 @@ def test_mxl_sources_take_raw_upload_units_up_to_the_profile_limit(tmp_path):
     assert recipe_for(L4, {**MXL_SHOW, "weights": [105, 0, 0, 0, 36, 47, 0]})["setup"]["weights"] == [105, 0, 0, 0, 36, 47, 0, 0]
 
 
-def test_mxl_writers_copy_each_loop_into_its_flow_without_decoding(tmp_path, monkeypatch):
+def test_mxl_writers_plan_one_v210_flow_per_mxl_source_with_a_clip():
+    import ctypes
     from demos.mixer import mxl_writers
-    commands, exited = [], SimpleNamespace(poll=lambda: 0, send_signal=lambda sig: None, wait=lambda: 0)
-    monkeypatch.setattr(mxl_writers.subprocess, "Popen", lambda command: commands.append(command) or exited)
-    config = tmp_path / "mixer.demo.json"
-    config.write_text(json.dumps({"canvas": {"fps": "30000/1001"}, "sources": [{"id": "cam", "kind": "video"}, {
-        "id": "sdr_mxl_000", "kind": "mxl", "url": "/domain", "flow": "f1", "clip": "/media/clip.v210", "width": 1920, "height": 1080}]}))
-    mxl_writers.main(config)
-    assert [command[command.index("-f"):] for command in commands] == [[
-        "-f", "v210", "-video_size", "1920x1080", "-framerate", "30000/1001", "-i", "/media/clip.v210",
-        "-c", "copy", "-f", "mxl", "-video_flow_id", "f1", "/domain"]]
+    rate, flows = mxl_writers.plan({"canvas": {"fps": "30000/1001"}, "sources": [{"id": "cam", "kind": "video"}, {
+        "id": "sdr_mxl_000", "kind": "mxl", "url": "/domain", "flow": "f1", "clip": "/media/clip.v210", "width": 1920, "height": 1080},
+        {"id": "outside", "kind": "mxl", "url": "/domain", "flow": "f2", "width": 1920, "height": 1080}]})
+    (flow,) = flows   # a flow without a clip has its own producer
+    definition = flow.pop("definition")
+    assert (rate.numerator, rate.denominator) == (30000, 1001)
+    assert flow == {"domain": "/domain", "clip": "/media/clip.v210", "stride": 5120, "grain_bytes": 5120 * 1080}
+    # What the mixer's reader (mxl_flow_reader.hpp) requires of a flow.
+    assert {key: definition[key] for key in ("id", "media_type", "interlace_mode", "frame_width", "frame_height", "grain_rate")} == {
+        "id": "f1", "media_type": "video/v210", "interlace_mode": "progressive", "frame_width": 1920, "frame_height": 1080,
+        "grain_rate": {"numerator": 30000, "denominator": 1001}}
+    assert [(c["name"], c["width"], c["height"]) for c in definition["components"]] == [("Y", 1920, 1080), ("Cb", 960, 1080), ("Cr", 960, 1080)]
+    # The sizes of libmxl 1.1.0's structures.
+    assert [ctypes.sizeof(t) for t in (mxl_writers.Rational, mxl_writers.GrainInfo, mxl_writers.FlowConfigInfo)] == [16, 4096, 192]
+    assert mxl_writers.FlowConfigInfo.discrete.offset == 128
 
 
 def test_mxl_writers_start_before_the_mixer_and_stop_after_it(tmp_path, monkeypatch):
