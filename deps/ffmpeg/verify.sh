@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Verify the patch series reproduces its pinned tree.
 set -euo pipefail
-[[ $# -eq 2 ]] || { echo "usage: $0 master-1bfb9160 /path/to/FFmpeg" >&2; exit 2; }
+[[ $# -eq 2 ]] || { echo "usage: $0 n9.1 /path/to/FFmpeg" >&2; exit 2; }
 dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 case "$1" in
-    master-1bfb9160)
+    n9.1)
         source "$dir/9/bases.env"
         base_commit=$upstream_commit
         expected_tree=$upstream_tree

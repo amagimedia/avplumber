@@ -20,43 +20,17 @@ Tested on an NVIDIA L4: identical frame checksums and timestamps with and
 without the flag, distinct nonblocking streams for two decoders, output
 frames retained after decoder shutdown and parent-device release, and
 rejection of incompatible output modes and caller-supplied pools.
+
+Backport the functional change to the pinned FFmpeg 9.1 release. The standalone
+upstream submission also carries its API version and changelog updates.
 ---
- Changelog                  |  1 +
- doc/APIchanges             |  3 +++
  libavcodec/avcodec.h       |  8 ++++++
  libavcodec/nvdec.c         | 55 +++++++++++++++++++++++++++++++++++---
  libavcodec/options_table.h |  1 +
- libavcodec/version.h       |  2 +-
- 6 files changed, 66 insertions(+), 4 deletions(-)
+ 3 files changed, 61 insertions(+), 3 deletions(-)
 
-diff --git a/Changelog b/Changelog
-index 7a39e27..e4d699c 100644
---- a/Changelog
-+++ b/Changelog
-@@ -5,6 +5,7 @@ version <next>:
- - DTS:X height channels in the DCA decoder
- - extra_hw_frames_only flag for NVDEC unsafe CUarray surface budgeting
- - device-owned non-blocking streams in the CUDA hardware context
-+- private_stream flag for NVDEC unsafe CUarray stream isolation
- 
- version 9.1:
- - ASTC image encoding and decoding via libastcenc, with .astc and KTX 1.0 muxers and demuxers
-diff --git a/doc/APIchanges b/doc/APIchanges
-index 209dc04..5297bd6 100644
---- a/doc/APIchanges
-+++ b/doc/APIchanges
-@@ -2,6 +2,9 @@ The last version increases of all libraries were on 2026-06-23.
- 
- API changes, most recent first:
- 
-+2026-11-02 - xxxxxxxxxx - lavc 63.27.100 - avcodec.h
-+  Add AV_HWACCEL_FLAG_PRIVATE_STREAM for opt-in NVDEC stream isolation.
-+
- 2026-11-02 - xxxxxxxxxx - lavu 61.21.100 - hwcontext_cuda.h
-   Add AVCUDADeviceContext.create_stream for device-owned non-blocking streams.
- 
 diff --git a/libavcodec/avcodec.h b/libavcodec/avcodec.h
-index 510b1dd..b36d063 100644
+index 510b1dd5b7..b36d06324c 100644
 --- a/libavcodec/avcodec.h
 +++ b/libavcodec/avcodec.h
 @@ -2064,6 +2064,14 @@ typedef struct AVHWAccel {
@@ -75,7 +49,7 @@ index 510b1dd..b36d063 100644
   * @}
   */
 diff --git a/libavcodec/nvdec.c b/libavcodec/nvdec.c
-index f54de06..c7b9e53 100644
+index f54de06bb5..c7b9e53167 100644
 --- a/libavcodec/nvdec.c
 +++ b/libavcodec/nvdec.c
 @@ -60,6 +60,7 @@ typedef struct NVDECDecoder {
@@ -216,7 +190,7 @@ index f54de06..c7b9e53 100644
      av_buffer_unref(&real_hw_frames_ref);
  
 diff --git a/libavcodec/options_table.h b/libavcodec/options_table.h
-index cf3fbed..11434a1 100644
+index cf3fbed899..11434a1243 100644
 --- a/libavcodec/options_table.h
 +++ b/libavcodec/options_table.h
 @@ -414,6 +414,7 @@ static const AVOption avcodec_options[] = {
@@ -227,16 +201,3 @@ index cf3fbed..11434a1 100644
  {"extra_hw_frames", "Number of extra hardware frames to allocate for the user", OFFSET(extra_hw_frames), AV_OPT_TYPE_INT, { .i64 = -1 }, -1, INT_MAX, V|D },
  {"discard_damaged_percentage", "Percentage of damaged samples to discard a frame", OFFSET(discard_damaged_percentage), AV_OPT_TYPE_INT, {.i64 = 95 }, 0, 100, V|D },
  {"side_data_prefer_packet", "Comma-separated list of side data types for which user-supplied (container) data is preferred over coded bytestream",
-diff --git a/libavcodec/version.h b/libavcodec/version.h
-index 26ee41e..735c8b8 100644
---- a/libavcodec/version.h
-+++ b/libavcodec/version.h
-@@ -29,7 +29,7 @@
- 
- #include "version_major.h"
- 
--#define LIBAVCODEC_VERSION_MINOR  26
-+#define LIBAVCODEC_VERSION_MINOR  27
- #define LIBAVCODEC_VERSION_MICRO 100
- 
- #define LIBAVCODEC_VERSION_INT  AV_VERSION_INT(LIBAVCODEC_VERSION_MAJOR, \

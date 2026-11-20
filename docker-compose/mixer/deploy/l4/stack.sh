@@ -51,5 +51,11 @@ if [[ $1 == up ]] && command -v nvidia-smi >/dev/null; then
             "'sudo nvidia-smi compute-policy --set-timeslice=3' (README.md)" >&2
     fi
 fi
+ndi_compose=()
+case "${ENABLE_NDI:-0}" in
+    0) ;;
+    1) ndi_compose=(-f "$here/ndi.yaml") ;;
+    *) echo 'ENABLE_NDI must be 0 or 1' >&2; exit 2 ;;
+esac
 exec docker compose --env-file /dev/null --project-directory "$repo/docker-compose/mixer" \
-    -f "$repo/docker-compose/mixer/compose.yaml" -f "$here/compose.yaml" "$@"
+    -f "$repo/docker-compose/mixer/compose.yaml" -f "$here/compose.yaml" "${ndi_compose[@]}" "$@"

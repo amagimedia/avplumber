@@ -34,43 +34,17 @@ and timestamps. No private-stream or application-specific patches are
 required.
 
 The configured sample-free FATE suite passes on the same build.
+
+Backport the functional change to the pinned FFmpeg 9.1 release. The standalone
+upstream submission also carries its API version and changelog updates.
 ---
- Changelog                  |  1 +
- doc/APIchanges             |  3 +++
  libavcodec/avcodec.h       | 14 ++++++++++++++
  libavcodec/nvdec.c         | 29 ++++++++++++++++++++++++++++-
  libavcodec/options_table.h |  1 +
- libavcodec/version.h       |  4 ++--
- 6 files changed, 49 insertions(+), 3 deletions(-)
+ 3 files changed, 43 insertions(+), 1 deletion(-)
 
-diff --git a/Changelog b/Changelog
-index 08a79e9..aba49d2 100644
---- a/Changelog
-+++ b/Changelog
-@@ -3,6 +3,7 @@ releases are sorted from youngest to oldest.
- 
- version <next>:
- - DTS:X height channels in the DCA decoder
-+- extra_hw_frames_only flag for NVDEC unsafe CUarray surface budgeting
- 
- version 9.1:
- - ASTC image encoding and decoding via libastcenc, with .astc and KTX 1.0 muxers and demuxers
-diff --git a/doc/APIchanges b/doc/APIchanges
-index a037323..ff4c8b3 100644
---- a/doc/APIchanges
-+++ b/doc/APIchanges
-@@ -2,6 +2,9 @@ The last version increases of all libraries were on 2026-06-23.
- 
- API changes, most recent first:
- 
-+2026-11-02 - xxxxxxxxxx - lavc 63.26.100 - avcodec.h
-+  Add AV_HWACCEL_FLAG_EXTRA_HW_FRAMES_ONLY.
-+
- 2026-10-xx - xxxxxxxxxx - lavfi 12.12.100 - avfilter.h
-   Deprecate AVFilterGraph.max_buffered_frames in favor of
-   avfilter_graph_set_max_buffered_frames().
 diff --git a/libavcodec/avcodec.h b/libavcodec/avcodec.h
-index bb654ec..510b1dd 100644
+index bb654ec5a6..510b1dd5b7 100644
 --- a/libavcodec/avcodec.h
 +++ b/libavcodec/avcodec.h
 @@ -2050,6 +2050,20 @@ typedef struct AVHWAccel {
@@ -95,7 +69,7 @@ index bb654ec..510b1dd 100644
   * @}
   */
 diff --git a/libavcodec/nvdec.c b/libavcodec/nvdec.c
-index d928e3c..f54de06 100644
+index d928e3c7a1..f54de06bb5 100644
 --- a/libavcodec/nvdec.c
 +++ b/libavcodec/nvdec.c
 @@ -420,6 +420,7 @@ int ff_nvdec_decode_init(AVCodecContext *avctx)
@@ -149,7 +123,7 @@ index d928e3c..f54de06 100644
                     decode_pool_size, frames_ctx->initial_pool_size, MAX_NUM_REGISTERED_DECODE_SURFACES);
          } else if (avctx->extra_hw_frames > 0) {
 diff --git a/libavcodec/options_table.h b/libavcodec/options_table.h
-index 862b450..cf3fbed 100644
+index 862b4505f4..cf3fbed899 100644
 --- a/libavcodec/options_table.h
 +++ b/libavcodec/options_table.h
 @@ -413,6 +413,7 @@ static const AVOption avcodec_options[] = {
@@ -160,18 +134,3 @@ index 862b450..cf3fbed 100644
  {"extra_hw_frames", "Number of extra hardware frames to allocate for the user", OFFSET(extra_hw_frames), AV_OPT_TYPE_INT, { .i64 = -1 }, -1, INT_MAX, V|D },
  {"discard_damaged_percentage", "Percentage of damaged samples to discard a frame", OFFSET(discard_damaged_percentage), AV_OPT_TYPE_INT, {.i64 = 95 }, 0, 100, V|D },
  {"side_data_prefer_packet", "Comma-separated list of side data types for which user-supplied (container) data is preferred over coded bytestream",
-diff --git a/libavcodec/version.h b/libavcodec/version.h
-index aa3a484..26ee41e 100644
---- a/libavcodec/version.h
-+++ b/libavcodec/version.h
-@@ -29,8 +29,8 @@
- 
- #include "version_major.h"
- 
--#define LIBAVCODEC_VERSION_MINOR  25
--#define LIBAVCODEC_VERSION_MICRO 101
-+#define LIBAVCODEC_VERSION_MINOR  26
-+#define LIBAVCODEC_VERSION_MICRO 100
- 
- #define LIBAVCODEC_VERSION_INT  AV_VERSION_INT(LIBAVCODEC_VERSION_MAJOR, \
-                                                LIBAVCODEC_VERSION_MINOR, \

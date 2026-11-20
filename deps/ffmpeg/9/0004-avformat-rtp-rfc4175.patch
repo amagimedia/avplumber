@@ -4,11 +4,11 @@ Date: Wed, 16 Sep 2026 19:56:02 +0200
 Subject: [PATCH] 0005-avformat-rtp-rfc4175.patch
 
 ---
- libavformat/rtpdec_rfc4175.c | 85 +++++++++++++++++++++++++++++++++---
- 1 file changed, 78 insertions(+), 7 deletions(-)
+ libavformat/rtpdec_rfc4175.c | 87 +++++++++++++++++++++++++++++++++---
+ 1 file changed, 80 insertions(+), 7 deletions(-)
 
 diff --git a/libavformat/rtpdec_rfc4175.c b/libavformat/rtpdec_rfc4175.c
-index a73f59e..aff7a9d 100644
+index a73f59e984..f10eaec97c 100644
 --- a/libavformat/rtpdec_rfc4175.c
 +++ b/libavformat/rtpdec_rfc4175.c
 @@ -43,6 +43,9 @@ struct PayloadContext {
@@ -70,19 +70,20 @@ index a73f59e..aff7a9d 100644
  static int rfc4175_handle_packet(AVFormatContext *ctx, PayloadContext *data,
                                   AVStream *st, AVPacket *pkt, uint32_t *timestamp,
                                   const uint8_t * buf, int len,
-@@ -263,7 +280,10 @@ static int rfc4175_handle_packet(AVFormatContext *ctx, PayloadContext *data,
+@@ -263,7 +280,11 @@ static int rfc4175_handle_packet(AVFormatContext *ctx, PayloadContext *data,
               * previous frame (or pair of fields) anyway by filling the AVPacket.
               */
              av_log(ctx, AV_LOG_ERROR, "Missed previous RTP Marker\n");
 -            missed_last_packet = rfc4175_finalize_packet(data, pkt, st->index) >= 0;
-+            if (ctx->flags & AVFMT_FLAG_DISCARD_CORRUPT)
++            if (ctx->flags & AVFMT_FLAG_DISCARD_CORRUPT) {
 +                rfc4175_discard_packet(data);
-+            else
++            } else {
 +                missed_last_packet = rfc4175_finalize_packet(data, pkt, st->index) >= 0;
++            }
          }
  
          if (!data->frame)
-@@ -280,6 +300,11 @@ static int rfc4175_handle_packet(AVFormatContext *ctx, PayloadContext *data,
+@@ -280,6 +301,11 @@ static int rfc4175_handle_packet(AVFormatContext *ctx, PayloadContext *data,
          }
      }
  
@@ -94,7 +95,7 @@ index a73f59e..aff7a9d 100644
      /*
       * looks for the 'Continuation bit' in scan lines' headers
       * to find where data start
-@@ -320,13 +345,59 @@ static int rfc4175_handle_packet(AVFormatContext *ctx, PayloadContext *data,
+@@ -320,13 +346,60 @@ static int rfc4175_handle_packet(AVFormatContext *ctx, PayloadContext *data,
          if (line >= data->height)
              goto invalid;
  
@@ -127,7 +128,8 @@ index a73f59e..aff7a9d 100644
 +            int uvoff, i;
 +
 +            /* libavformat stores YUV420 planar frames, depacketized payload is interleaved */
-+            if (line % 2 != 0 || !data->frame || (offset % 2) != 0 || (length % 6) != 0)
++            if (line % 2 != 0 || line + 1 >= data->height || offset % 2 != 0 ||
++                length % 6 != 0 || offset + length / 3 > data->width)
 +                goto invalid;
 +
 +            yd1p = data->frame + line * data->width + offset;

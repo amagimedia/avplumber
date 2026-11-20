@@ -8,9 +8,13 @@
 #       --build-arg WITH_TENSORRT=1 --secret id=tensorrt_url,env=TENSORRT_URL .
 #   docker build -f docker-compose/mixer/Dockerfile.fedora44 -t avplumber-mixer:fedora44-mxl \
 #       --build-arg WITH_MXL=1 .
+#   docker build -f docker-compose/mixer/Dockerfile.fedora44 -t avplumber-mixer:fedora44-ndi \
+#       --build-arg ENABLE_NDI=1 .
 #
 # WITH_MXL=1 adds the MXL SDK and FFmpeg's libmxl demuxer/muxer.
 # Without it the image carries neither, and FFmpeg is configured as before.
+# ENABLE_NDI=1 downloads the official NDI 6.4 SDK, which accepts its license, and
+# adds FFmpeg's libndi_newtek input device. The two options are independent.
 #
 # The host driver must be R615 or newer (CUDA 13.4): FFmpeg ships its CUDA
 # filters as PTX that the driver JIT-compiles, and an older driver rejects
@@ -133,7 +137,8 @@ RUN git clone --quiet --branch "${MXL_TAG}" --depth 1 \
 FROM mxl-${WITH_MXL} AS ffmpeg
 
 ARG WITH_MXL
-ARG FFMPEG_TAG=master-1bfb9160
+ARG ENABLE_NDI=0
+ARG FFMPEG_TAG=n9.1
 ARG BUILD_JOBS=4
 # Empty: the nv-codec-headers pinned in deps/ffmpeg/9/bases.env (see there for driver 595 hosts).
 ARG NV_CODEC_HEADERS_TAG=
@@ -160,6 +165,16 @@ RUN if [ "${FFMPEG_TAG}" = "$(. /build/deps/ffmpeg/9/bases.env; echo "$upstream_
     fi \
     && bash /build/deps/ffmpeg/apply.sh /tmp/ffmpeg
 
+# Only the SDK runtime library crosses into the final image. /opt/ndi/6.4/lib
+# exists empty without NDI so the runtime stage's COPY always works.
+RUN case "$ENABLE_NDI" in \
+        0) mkdir -p /opt/ndi/6.4/lib ;; \
+        1) dnf -y install avahi-libs curl tar gzip \
+           && dnf clean all && bash /build/deps/ffmpeg/install-ndi-sdk.sh \
+           && echo /opt/ndi/6.4/lib >> /etc/ld.so.conf.d/avplumber.conf && ldconfig ;; \
+        *) echo "ENABLE_NDI must be 0 or 1" >&2; exit 2 ;; \
+    esac
+
 # Janus program audio encodes with libopus. Without it FFmpeg only has the
 # native Opus decoder, and the RTP mux fails open with a codec-direction error.
 RUN dnf -y install --setopt=install_weak_deps=False opus-devel \
@@ -175,10 +190,16 @@ RUN dnf -y install --setopt=install_weak_deps=False opus-devel \
 # WITH_MXL=1 adds --enable-libmxl, which is what makes configure build the mxl
 # demuxer and muxer, and points pkg-config at libmxl.pc alone. Without it the
 # configure line and its environment are the ones below, unchanged.
+# ENABLE_NDI=1 likewise adds --enable-libndi_newtek and the SDK's header and
+# library directories, which configure's plain compile-and-link check reads.
 RUN cd /tmp/ffmpeg \
     && grep -q 'nvccflags="$nvccflags -ptx"' configure \
     && sed -i 's/nvccflags="$nvccflags -ptx"/nvccflags="$nvccflags -fatbin"/' configure \
     && if [ "${WITH_MXL}" = 1 ]; then mxl=--enable-libmxl; export PKG_CONFIG_PATH=/opt/mxl/pkgconfig; else mxl=; fi \
+    && if [ "${ENABLE_NDI}" = 1 ]; then \
+           ndi=--enable-libndi_newtek; \
+           export C_INCLUDE_PATH=/opt/ndi/6.4/include LIBRARY_PATH=/opt/ndi/6.4/lib; \
+       else ndi=; fi \
     && ./configure \
         --prefix=/usr/local \
         --libdir=/usr/local/lib \
@@ -198,6 +219,7 @@ RUN cd /tmp/ffmpeg \
         --enable-nvenc \
         --disable-libnpp \
         $mxl \
+        $ndi \
         --disable-doc \
         --disable-htmlpages \
         --disable-manpages \
@@ -324,6 +346,7 @@ RUN test -f /build/_avplumber"$(python3-config --extension-suffix)" \
 
 FROM fedora:44 AS runtime
 
+ARG ENABLE_NDI=0
 ARG AVPLUMBER_REVISION=workspace
 
 # glvnd needs an ICD naming the NVIDIA EGL library the container runtime
@@ -363,6 +386,7 @@ COPY --from=builder /usr/local/bin/ffmpeg /usr/local/bin/ffprobe /usr/local/bin/
 COPY --from=builder /usr/local/lib/libav*.so* /usr/local/lib/libsw*.so* /usr/local/lib/libpostproc.so* /usr/local/lib/
 COPY --from=builder /opt/tensorrt /opt/tensorrt
 COPY --from=builder /opt/mxl /opt/mxl
+COPY --from=builder /opt/ndi/6.4/lib /opt/ndi/6.4/lib
 COPY --from=builder /build/_avplumber*.so /build/
 COPY --from=builder /build/pyplumber /build/pyplumber
 COPY demos/mixer /build/demos/mixer
@@ -374,7 +398,10 @@ COPY docker-compose/mixer/deploy/l4/seed.py /build/docker-compose/mixer/deploy/l
 # flag drifted (HAVE_NVJPEG, libnpp).
 # import _avplumber loads the native module (import pyplumber is lazy), so
 # unresolved symbols fail here rather than at the first mixer start.
-RUN ldconfig \
+# libndi needs Avahi's client library for source discovery.
+RUN if [ "$ENABLE_NDI" = 1 ]; then dnf -y install avahi-libs && dnf clean all; fi \
+    && ldconfig \
+    && if [ "$ENABLE_NDI" = 1 ]; then ffmpeg -hide_banner -devices | grep -qw libndi_newtek; fi \
     && pip3 install --no-cache-dir -r /build/pyplumber/mixer/gui/requirements.txt \
     && ls /build/_avplumber*.so >/dev/null \
     && ! ldd /build/_avplumber*.so /usr/local/bin/ffmpeg | grep 'not found' \

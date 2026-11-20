@@ -1,0 +1,7 @@
+services:
+  mixer:
+    build:
+      args:
+        ENABLE_NDI: "1"
+    volumes:
+      - /run/dbus/system_bus_socket:/run/dbus/system_bus_socket:ro
