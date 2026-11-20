@@ -174,6 +174,37 @@ def test_an_alpha_source_reaches_the_canvas_as_straight_rgba(native_boundary):
         show(alpha=True, color="hlg")
 
 
+def test_an_ndi_source_is_received_converted_to_nv12_and_uploaded(native_boundary):
+    """FFmpeg's libndi_newtek device receives the named source (found at extra_ips besides mDNS);
+    its packed 4:2:2 decodes in software, becomes tagged NV12 and is uploaded after pacing, and
+    its audio joins the show's like a video file's. NDI never ends: no loop, the group restarts."""
+    api = fake_api()
+    api.MixerGraphBuilder = native_boundary[1]
+    ndi = {"id": "cam", "kind": "ndi", "name": "HOST (avp-smoke)", "extra_ips": "127.0.0.1", "color": "sdr"}
+    def ndi_show(source):
+        return config.parse({"canvas": CONFIG["canvas"], "renditions": [{"id": "record", "target": "program.ts"}],
+                             "sources": [source, {**CONFIG["sources"][0], "id": "idle", "path": "idle.mp4"}],
+                             "scenes": [{"id": "two", "items": CONFIG["scenes"][1]["items"][1:]}]})
+    cfg = ndi_show({**ndi, "has_audio": True})
+    app = build_application(cfg, api=api)
+    nodes = {n.parameters["name"]: n.parameters for n in app.avp.nodes}
+    received = nodes["input_0"]
+    assert (received["url"], received["format"], received["loop"]) == ("HOST (avp-smoke)", "libndi_newtek", False)
+    assert received["options"] == {"wait_sources": "5", "extra_ips": "127.0.0.1"}
+    assert nodes["decode_0"]["auto_restart"] == "group" and nodes["decode_0"]["hwaccel_only_for_codecs"] == []
+    upload = nodes["ndi_upload_0"]
+    assert upload["src"] == "input_0_realtime" and app.input_edges[0] == "input_0_nv12"
+    assert upload["graph"] == f"format=nv12,{cfg.sources[0].color.setparams},hwupload_cuda"
+    (cam,) = [s for s in app.mixer._sources if s.name == "cam"]
+    assert cam.pixel_format == "nv12" and not cam.packed_rgb
+    assert "realtime_audio_0" in nodes
+    for bad, match in (({"color": "hlg"}, "SDR only"), ({"name": None}, "needs name"), ({"extra_ips": 1}, "extra_ips")):
+        with pytest.raises(config.ConfigError, match=match):
+            ndi_show({k: v for k, v in {**ndi, **bad}.items() if v is not None})
+    with pytest.raises(config.ConfigError, match="extra_ips"):
+        show(extra_ips="127.0.0.1")
+
+
 def test_config_renditions_do_not_need_cli_output_flags(tmp_path):
     cfg = show()
     app = build_application(cfg, api=fake_api())
