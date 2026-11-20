@@ -131,10 +131,15 @@ tail a measurement of "the MXL reader" is mostly a measurement of mpeg4.
 
 The conversion itself can be moved or redirected. `--sws-flags` picks the
 swscale algorithm for the writer's and the CPU reader's `rescale_video`
-nodes (`fast_bilinear`, `neighbor`, ...). `--gpu-scale
-{writer,reader,both}` replaces those nodes with
-`hwupload,scale_cuda,hwdownload`, and `--cuda-interp` is its
-`--sws-flags`. `--reader-encoder {mpeg4,nvenc}` decouples the output
+nodes (`fast_bilinear`, `neighbor`, ...); it defaults to `fast_bilinear`,
+measured at 707 fps vs. 567 fps for `area` on the writer-only case below —
+the cheapest way to lighten test-signal generation, since it works
+regardless of the source's pixel format. `--gpu-scale
+{off,writer,reader,both}` replaces those nodes with
+`hwupload,scale_cuda,hwdownload` instead, and `--cuda-interp` is its
+`--sws-flags`; it defaults to `off` and stays opt-in because `scale_cuda`
+rejects `rgb24`, which is what `lavfi testsrc` (the default `--input`)
+decodes to. `--reader-encoder {mpeg4,nvenc}` decouples the output
 encoder from `--gpu-unpack`, so either unpack can feed either encoder —
 which is what makes the upload and the download visible one at a time.
 See [Conversion on the GPU](#conversion-on-the-gpu).

@@ -121,13 +121,15 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--sws-flags",
-        default=os.environ.get("AVP_SWS_FLAGS"),
+        default=os.environ.get("AVP_SWS_FLAGS", "fast_bilinear"),
         help=(
             "swscale flags for the writer's and the CPU reader's rescale "
             "nodes, comma-separated: 'fast_bilinear', 'bilinear', "
-            "'neighbor', 'area', ... Unset lets rescale_video choose, which "
-            "for these same-size conversions means area. The choice only "
-            "moves the chroma resampling cost; see README."
+            "'neighbor', 'area', ... 'fast_bilinear' (default) is the "
+            "cheapest algorithm, measured at 707 fps vs. 567 fps for "
+            "'area' on the writer-only case (see README); empty/'' lets "
+            "rescale_video choose 'area' instead. The choice only moves "
+            "the chroma resampling cost; see README."
         ),
     )
     p.add_argument(
@@ -139,7 +141,9 @@ def _parse_args() -> argparse.Namespace:
             "swscale: the rescale_video node is replaced by "
             "hwupload,scale_cuda,hwdownload. Frames that are already on the "
             "GPU (--gpu-unpack) skip the upload, and frames headed for NVENC "
-            "skip the download."
+            "skip the download. Needs a YUV source: scale_cuda rejects "
+            "rgb24, which is what 'lavfi testsrc' (the default --input) "
+            "decodes to, so this is opt-in rather than auto-detected."
         ),
     )
     p.add_argument(
