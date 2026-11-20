@@ -4,14 +4,16 @@
 // ring's own read-only shared mapping, so one copy on the CPU is the least a grain costs.
 //
 // It behaves as FFmpeg's mxl demuxer does with `blocking=1:grain_index_init=head:
-// on_too_late=reset:reset_on_drop=1` under `input_rec`:
+// on_too_late=reset` under `input_rec`:
 // - it starts at the newest grain and waits one grain period at a time for the next, for as
 //   long as a stalled writer takes (logged when a second has passed, and when grains return);
-// - a reader that has fallen out of the ring goes back to the newest grain, and timestamps run
-//   on from the last picture instead of jumping;
+// - a reader that has fallen out of the ring goes back to the newest grain;
 // - a flow that is gone or was created again, or any other failed read, is an Error: the node
 //   finishes with it and its `auto_restart` opens the flow again.
 // Unlike the demuxer:
+// - timestamps are the grains' indices, their times on the flow's clock (TAI), so the grains a
+//   reader left behind in the ring are a gap in them: `realtime` with `tai_delay` releases each
+//   picture at its own time, whenever it arrived;
 // - a grain the writer overwrote while it was being copied is dropped;
 // - a grain the writer left out or flagged invalid is passed over with its timestamp, not asked
 //   for again until it is too late;
@@ -32,6 +34,7 @@ inline bool isMxlUrl(const std::string &url) { return url.rfind("mxl://", 0) == 
 #if HAVE_MXL
 #include <mxl/flow.h>
 #include <mxl/mxl.h>
+#include <mxl/time.h>
 
 #include <algorithm>
 #include <atomic>
@@ -66,8 +69,7 @@ class MxlFlowReader {
     size_t grain_bytes_ = 0;
     av::Rational rate_;
     uint64_t wait_ns_ = 0;     // one grain period
-    uint64_t index_ = 0;       // the next grain to read
-    uint64_t origin_ = 0;      // the grain index of timestamp zero
+    uint64_t index_ = 0;       // the next grain to read, which is also its timestamp
     uint64_t idle_ = 0;        // waits in a row that brought no grain
     uint64_t idle_logged_ = 1; // as many waits as make a second
     std::atomic<uint64_t> lapped_{0}, resets_{0}, skipped_{0};
@@ -81,9 +83,10 @@ class MxlFlowReader {
             fail("cannot read its head index", status);
         return now.headIndex;
     }
-    // On to the newest grain, which gets the timestamp the grain left behind would have had.
+    // On to the newest grain: the grains left behind are a gap in the timestamps, as lost frames
+    // are. Timestamps that ran on instead would put every later picture that much behind its own
+    // time for good, whatever paces them.
     void jumpTo(uint64_t newest) {
-        origin_ += newest - index_;
         index_ = newest;
         ++resets_;
     }
@@ -133,18 +136,24 @@ public:
         rate_ = av::Rational(int(rate.numerator), int(rate.denominator));
         wait_ns_ = uint64_t(av_rescale(1'000'000'000, rate.denominator, rate.numerator));
         idle_logged_ = uint64_t(std::max<int64_t>(1, rate.numerator / rate.denominator));
-        // The grain after the newest: the newest may have been written up to a period ago, and
-        // pacing downstream takes the first picture's arrival as the timeline of all that follow,
-        // which then arrive later than it and repeat and drop pairs on the output ticks.
-        index_ = origin_ = head() + 1;
+        // The grain after the newest: the newest may have been written up to a period ago.
+        index_ = head() + 1;
     }
 
     av::Rational frameRate() const { return rate_; }
 
+    /// How long ago the grain of timestamp `pts` was due, on the flow's clock (TAI): what a
+    /// release that long after it must wait for at least.
+    int64_t sinceDueNs(int64_t pts) const {
+        const mxlRational rate{rate_.getNumerator(), rate_.getDenominator()};
+        return int64_t(mxlGetTime()) - int64_t(mxlIndexToTimestamp(&rate, uint64_t(pts)));
+    }
+
     /// The next grain into `block` (a v210 picture at v210Stride() bytes a row) and its
-    /// timestamp, in grain periods; `copied_from` is when the wait for it ended and the copy
-    /// began. False: no picture this time, and the caller calls again; that returns within a
-    /// grain period, so a node stays stoppable while a writer stalls.
+    /// timestamp: its grain index, the time it is due on the flow's clock (TAI) in grain
+    /// periods, as its writer counts it; `copied_from` is when the wait for it ended and the
+    /// copy began. False: no picture this time, and the caller calls again; that returns within
+    /// a grain period, so a node stays stoppable while a writer stalls.
     bool read(uint8_t *block, int64_t &pts, std::chrono::steady_clock::time_point &copied_from) {
         mxlGrainInfo info{};
         uint8_t *payload = nullptr;
@@ -188,7 +197,7 @@ public:
         }
         if (idle_ >= idle_logged_) logstream << "mxl flow " << flow_ << ": grains again";
         idle_ = 0;
-        pts = int64_t(index_++ - origin_);
+        pts = int64_t(index_++);
         return true;
     }
 
@@ -207,6 +216,7 @@ struct MxlFlowReader {
                     "(the mixer's canvas.mxl_reader \"demuxer\")");
     }
     av::Rational frameRate() const { return {}; }
+    int64_t sinceDueNs(int64_t) const { return 0; }
     bool read(uint8_t *, int64_t &, std::chrono::steady_clock::time_point &) { return false; }
     Parameters stats() const { return {}; }
 };

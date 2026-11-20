@@ -387,15 +387,24 @@ def build_v210_input(avp, api, tag: str, path: str, *, width: int, height: int, 
     ``frame_metadata`` and ``demux`` are ``build_input``'s: the keys ``input_rec`` stamps on each
     decoded picture, and whether a ``demux`` node splits the file's one stream.
     """
-    # A live flow's pictures arrive as their writer commits them, not ahead of time as a file's do:
-    # pacing holds them one frame (a jitter buffer), so a source that started fast does not land
-    # its later pictures on the far side of their output ticks (repeat and drop pairs).
-    jitter = {"jitter_margin": fps_den / fps, "initial_jitter_margin": fps_den / fps} if mxl else None
+    # A live flow's pictures arrive as their writer commits them, not ahead of time as a file's do.
+    # The native reader stamps each with its grain's time on the flow's clock (TAI), and pacing
+    # releases it a frame after that time, whenever it arrived: a reader that fell out of the ring
+    # and left grains out, or a start that stalled, moves no later picture off its output tick.
+    # The demuxer's timestamps run on across what it left out, so its pictures are held a frame
+    # after the first one's arrival instead (a jitter buffer), and such a stall leaves the source
+    # late, in repeat and drop pairs on the output ticks, until it is late enough to resync.
+    if mxl and direct:
+        pacing = {"team": f"input_{tag}_tai", "tai_delay": fps_den / fps}
+    elif mxl:
+        pacing = {"jitter_margin": fps_den / fps, "initial_jitter_margin": fps_den / fps}
+    else:
+        pacing = None
     if direct:
         return _direct_raw_input(
             avp, api, tag, path, pixel_format="v210", storage=storage, width=width, height=height, group=group,
             fps=fps, fps_den=fps_den, hwaccel=hwaccel, loop=loop, color=color, pool_frames=pool_frames,
-            event_loop=event_loop, native_rate=native_rate, realtime_params=jitter)
+            event_loop=event_loop, native_rate=native_rate, realtime_params=pacing)
     stride = v210_row_stride(width)
     if mxl:
         packets = f"input_{tag}_packed"
@@ -431,4 +440,4 @@ def build_v210_input(avp, api, tag: str, path: str, *, width: int, height: int, 
         "group": group, **_raw_file_restart(loop),
     }))
     return _pace(avp, api, tag, f"input_{tag}_cuda", fps=fps, fps_den=fps_den, group=group, event_loop=event_loop,
-                 native_rate=native_rate, realtime_params=jitter)
+                 native_rate=native_rate, realtime_params=pacing)

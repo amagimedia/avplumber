@@ -71,6 +71,7 @@ protected:
     std::atomic<uint64_t> frames_{0}, file_reads_{0}, read_us_{0}, upload_us_{0};
     std::atomic<uint64_t> frame_waits_{0}, longest_wait_ms_{0};
     std::atomic<bool> waiting_{false};
+    std::atomic<int64_t> due_us_{0}, due_max_us_{INT64_MIN};   // MXL: a picture's time after its grain's
 
     struct stat fileStatus() {
         struct stat st{};
@@ -107,7 +108,7 @@ public:
         };
         if (isMxlUrl(path_)) {
             flow_ = std::make_unique<MxlFlowReader>(path_, width_, height_);
-            // Timestamps count the flow's grains, at its own rate whatever `framerate` says.
+            // Timestamps are the grains' indices, at the flow's own rate whatever `framerate` says.
             frame_rate_ = flow_->frameRate();
             time_base_ = av::Rational(frame_rate_.getDenominator(), frame_rate_.getNumerator());
             return makeUploader(1);
@@ -192,6 +193,10 @@ public:
         frames_ = next_;
         read_us_ = microseconds(was_read - started);
         upload_us_ = microseconds(uploaded - was_read);
+        if (flow_) {
+            due_us_ = flow_->sinceDueNs(pts) / 1000;
+            if (due_us_.load() > due_max_us_.load()) due_max_us_ = due_us_.load();
+        }
         // Blocks while the edge is full: the consumer paces the reading.
         this->sink_->put(frame);
     }
@@ -214,7 +219,14 @@ public:
                 // Device-frame shortages: how often a picture waited for one, whether one waits
                 // now (the source repeats its last picture), and the longest wait.
                 {"frame_waits", frame_waits_.load()}, {"waiting", waiting_.load()}, {"longest_wait_ms", longest_wait_ms_.load()}};
-        if (flow_) stats.update(flow_->stats());
+        if (flow_) {
+            stats.update(flow_->stats());
+            // How long after its grain was due (its index on the flow's clock, TAI) the last
+            // picture went out, and the longest since the last read of these stats: what
+            // `realtime`'s tai_delay must cover for pictures to be released on time.
+            const int64_t longest = due_max_us_.exchange(INT64_MIN);
+            stats.update({{"due_us", due_us_.load()}, {"due_max_us", longest == INT64_MIN ? due_us_.load() : longest}});
+        }
         return stats;
     }
 
