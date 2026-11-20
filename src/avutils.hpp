@@ -20,6 +20,7 @@ void silenceAudioFrame(av::AudioSamples &frm, av::SampleFormat::Alignment align 
 
 av::Rational parseRatio(const std::string ratio);
 
+void warnUnusedInputOptions(av::Dictionary &options);
 av::Dictionary parametersToDict(const json &params);
 
 std::string mediaTypeToString(AVMediaType mt);

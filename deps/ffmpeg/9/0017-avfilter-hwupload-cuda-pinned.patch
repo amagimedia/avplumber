@@ -6,18 +6,18 @@ Subject: [PATCH] avfilter/hwupload_cuda: opt-in pinned staging and GPU v210
 
 Reuse the supplied CUDA context, stage software frames in pinned memory and copy on a private nonblocking stream. Preserve default transfers. GPU v210 unpack accepts gray-wrapped packed rows and requires a CUDA compiler; ordinary pinned upload does not. Synchronize before forwarding, and order pooled output reuse against the device stream.
 ---
- doc/filters.texi                |  14 ++
+ doc/filters.texi                |  22 +++
  libavfilter/Makefile            |   3 +
- libavfilter/vf_hwupload_cuda.c  | 219 +++++++++++++++++++++++++++++++-
- libavfilter/vf_hwupload_cuda.cu |  24 ++++
- 4 files changed, 255 insertions(+), 5 deletions(-)
+ libavfilter/vf_hwupload_cuda.c  | 233 +++++++++++++++++++++++++++++++-
+ libavfilter/vf_hwupload_cuda.cu |  83 ++++++++++++
+ 4 files changed, 336 insertions(+), 5 deletions(-)
  create mode 100644 libavfilter/vf_hwupload_cuda.cu
 
 diff --git a/doc/filters.texi b/doc/filters.texi
-index 0167152..6478de0 100644
+index 0167152..7f253e1 100644
 --- a/doc/filters.texi
 +++ b/doc/filters.texi
-@@ -16164,6 +16164,20 @@ It accepts the following optional parameters:
+@@ -16164,6 +16164,28 @@ It accepts the following optional parameters:
  @table @option
  @item device
  The number of the CUDA device to use
@@ -29,11 +29,19 @@ index 0167152..6478de0 100644
 +
 +@item v210_width
 +Treat gray input frames as packed v210 rows and unpack them on the GPU into
-+linear P210 frames of this picture width. The input width is the packed byte
-+stride; it must be a multiple of four and large enough for an even picture
-+width. Zero disables unpacking (the default). This option implies pinned
-+staging and requires a CUDA compiler at build time. It does not perform CPU
-+v210 decoding. Set the source's color properties explicitly.
++linear frames of this picture width. The input width is the packed byte
++stride; it must be a multiple of 32 (v210 rows are padded to 128 bytes) and
++large enough for an even picture width. Zero disables unpacking (the default).
++This option implies pinned staging and requires a CUDA compiler at build time.
++It does not perform CPU v210 decoding. Set the source's color properties
++explicitly.
++
++@item v210_format
++The storage @option{v210_width} unpacks into, in the same pass: @code{p210le}
++(the default, every code as it is), @code{p010le} or @code{nv12}. The 8-bit
++samples of NV12 are rounded. A 4:2:0 chroma row is the rounded mean of its two
++picture rows, which in a frame flagged interlaced are the two nearest rows of
++the chroma row's own field.
 +
  @end table
  
@@ -53,10 +61,10 @@ index a4bd8ef..2f5e9ed 100644
  OBJS-$(CONFIG_HYSTERESIS_FILTER)             += vf_hysteresis.o framesync.o
  OBJS-$(CONFIG_ICCDETECT_FILTER)              += vf_iccdetect.o fflcms2.o
 diff --git a/libavfilter/vf_hwupload_cuda.c b/libavfilter/vf_hwupload_cuda.c
-index 1478b02..112e441 100644
+index 1478b02..027e36e 100644
 --- a/libavfilter/vf_hwupload_cuda.c
 +++ b/libavfilter/vf_hwupload_cuda.c
-@@ -18,6 +18,9 @@
+@@ -18,13 +18,21 @@
  
  #include "libavutil/buffer.h"
  #include "libavutil/hwcontext.h"
@@ -65,8 +73,9 @@ index 1478b02..112e441 100644
 +#include "libavutil/imgutils.h"
  #include "libavutil/log.h"
  #include "libavutil/opt.h"
++#include "libavutil/pixdesc.h"
  
-@@ -25,6 +28,10 @@
+ #include "avfilter.h"
  #include "filters.h"
  #include "formats.h"
  #include "video.h"
@@ -77,12 +86,13 @@ index 1478b02..112e441 100644
  
  enum {
      CUDAUPLOAD_FMT_CUDA,
-@@ -35,26 +42,190 @@ enum {
+@@ -35,26 +43,196 @@ enum {
  typedef struct CudaUploadContext {
      const AVClass *class;
      int device_idx;
 +    int pinned;
 +    int v210_width;
++    enum AVPixelFormat v210_format;
 +    CUdeviceptr packed;
 +    CUmodule module;
 +    CUfunction unpack;
@@ -192,12 +202,14 @@ index 1478b02..112e441 100644
 +    if (ret >= 0 && s->v210_width) {
 +        extern const unsigned char ff_vf_hwupload_cuda_ptx_data[];
 +        extern const unsigned int ff_vf_hwupload_cuda_ptx_len;
++        char name[32];
++        snprintf(name, sizeof(name), "unpack_v210_%s", av_get_pix_fmt_name(frames->sw_format));
 +        ret = CHECK_CU(cu->cuMemAlloc(&s->packed, size));
 +        if (ret >= 0)
 +            ret = ff_cuda_load_module(ctx, s->cuda, &s->module,
 +                                      ff_vf_hwupload_cuda_ptx_data, ff_vf_hwupload_cuda_ptx_len);
 +        if (ret >= 0)
-+            ret = CHECK_CU(cu->cuModuleGetFunction(&s->unpack, s->module, "unpack_v210"));
++            ret = CHECK_CU(cu->cuModuleGetFunction(&s->unpack, s->module, name));
 +    }
 +#endif
 +    CHECK_CU(cu->cuCtxPopCurrent(&previous));
@@ -236,10 +248,13 @@ index 1478b02..112e441 100644
 +    if (ret >= 0)
 +        ret = CHECK_CU(cu->cuStreamWaitEvent(s->upload_stream, s->readers_done, 0));
 +    if (ret >= 0 && s->v210_width) {
-+        void *args[] = { &s->packed, &s->linesizes[0], &out->width, &out->height,
++        /* A thread unpacks 12 pixels of one picture row, or of the two a 4:2:0 chroma row spans. */
++        const int rows = 8 << av_pix_fmt_desc_get(s->v210_format)->log2_chroma_h;
++        int interlaced = !!(in->flags & AV_FRAME_FLAG_INTERLACED);
++        void *args[] = { &s->packed, &s->linesizes[0], &out->width, &out->height, &interlaced,
 +                         &out->data[0], &out->linesize[0], &out->data[1], &out->linesize[1] };
 +        ret = CHECK_CU(cu->cuLaunchKernel(s->unpack,
-+                       (out->width / 2 + 31) / 32, (out->height + 7) / 8, 1,
++                       (out->width + 12 * 32 - 1) / (12 * 32), (out->height + rows - 1) / rows, 1,
 +                       32, 8, 1, 0, s->upload_stream, args, NULL));
 +    }
 +    for (int i = 0; !s->v210_width && ret >= 0 && i < 4 && s->linesizes[i]; i++) {
@@ -269,7 +284,7 @@ index 1478b02..112e441 100644
      av_buffer_unref(&s->hwframe);
      av_buffer_unref(&s->hwdevice);
  }
-@@ -87,7 +258,13 @@ static int cudaupload_query_formats(const AVFilterContext *ctx,
+@@ -87,7 +265,13 @@ static int cudaupload_query_formats(const AVFilterContext *ctx,
      const enum AVPixelFormat *output_pix_fmts = s->output_format == CUDAUPLOAD_FMT_CUARRAY
                                                  ? output_cuarray_fmts
                                                  : output_cuda_fmts;
@@ -284,7 +299,7 @@ index 1478b02..112e441 100644
      AVFilterFormats *out_fmts;
  
      ret = ff_formats_ref(in_fmts, &cfg_in[0]->formats);
-@@ -114,6 +291,23 @@ static int cudaupload_config_output(AVFilterLink *outlink)
+@@ -114,6 +298,29 @@ static int cudaupload_config_output(AVFilterLink *outlink)
      AVHWFramesContext *hwframe_ctx;
      int ret;
  
@@ -294,10 +309,16 @@ index 1478b02..112e441 100644
 +    }
 +
 +    /* v210 has no AVPixelFormat: rawvideo/gray frames carry its packed rows.
-+     * The declared input width is the byte stride, not the picture width. */
++     * The declared input width is the byte stride, not the picture width. The
++     * kernel reads 32 bytes (12 pixels) at a time, so the stride is a multiple. */
 +    if (s->v210_width && (s->v210_width % 2 || inlink->format != AV_PIX_FMT_GRAY8 ||
-+        inlink->w % 4 || inlink->w < ((int64_t)s->v210_width * 2 + 2) / 3 * 4))
++        inlink->w % 32 || inlink->w < ((int64_t)s->v210_width * 2 + 2) / 3 * 4 ||
++        (s->v210_format != AV_PIX_FMT_P210 && s->v210_format != AV_PIX_FMT_P010 &&
++         s->v210_format != AV_PIX_FMT_NV12))) {
++        av_log(ctx, AV_LOG_ERROR, "v210 unpack needs an even v210_width, gray input whose width is the "
++               "row stride (a multiple of 32) and v210_format p210le, p010le or nv12\n");
 +        return AVERROR(EINVAL);
++    }
 +
 +    if (!s->hwdevice) {
 +        ret = cudaupload_init_device(ctx);
@@ -308,13 +329,13 @@ index 1478b02..112e441 100644
      av_buffer_unref(&s->hwframe);
      s->hwframe = av_hwframe_ctx_alloc(s->hwdevice);
      if (!s->hwframe)
-@@ -128,13 +322,22 @@ static int cudaupload_config_output(AVFilterLink *outlink)
+@@ -128,13 +335,22 @@ static int cudaupload_config_output(AVFilterLink *outlink)
      } else {
          hwframe_ctx->sw_format = inlink->format;
      }
 -    hwframe_ctx->width     = inlink->w;
 +    if (s->v210_width)
-+        hwframe_ctx->sw_format = AV_PIX_FMT_P210;
++        hwframe_ctx->sw_format = s->v210_format;
 +    hwframe_ctx->width     = s->v210_width ? s->v210_width : inlink->w;
 +    outlink->w            = hwframe_ctx->width;
      hwframe_ctx->height    = inlink->h;
@@ -332,7 +353,7 @@ index 1478b02..112e441 100644
      outl->hw_frames_ctx = av_buffer_ref(s->hwframe);
      if (!outl->hw_frames_ctx)
          return AVERROR(ENOMEM);
-@@ -156,10 +359,11 @@ static int cudaupload_filter_frame(AVFilterLink *link, AVFrame *in)
+@@ -156,10 +372,11 @@ static int cudaupload_filter_frame(AVFilterLink *link, AVFrame *in)
          goto fail;
      }
  
@@ -346,16 +367,17 @@ index 1478b02..112e441 100644
      if (ret < 0) {
          av_log(ctx, AV_LOG_ERROR, "Error transferring data to the GPU\n");
          goto fail;
-@@ -181,6 +385,8 @@ fail:
+@@ -181,6 +398,9 @@ fail:
  #define OFFSET(x) offsetof(CudaUploadContext, x)
  #define FLAGS (AV_OPT_FLAG_FILTERING_PARAM | AV_OPT_FLAG_VIDEO_PARAM)
  static const AVOption cudaupload_options[] = {
-+    { "v210_width", "Unpack gray-wrapped v210 rows into P210 on the GPU (implies pinned)", OFFSET(v210_width), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, INT_MAX, FLAGS },
++    { "v210_width", "Unpack gray-wrapped v210 rows on the GPU (implies pinned)", OFFSET(v210_width), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, INT_MAX, FLAGS },
++    { "v210_format", "Storage the v210 rows are unpacked into: p210le, p010le or nv12", OFFSET(v210_format), AV_OPT_TYPE_PIXEL_FMT, { .i64 = AV_PIX_FMT_P210 }, -1, INT_MAX, FLAGS },
 +    { "pinned", "Upload software NV12/P010 through pinned staging on a private stream", OFFSET(pinned), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, FLAGS },
      { "device", "Number of the device to use", OFFSET(device_idx), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, INT_MAX, FLAGS },
      { "output_format", "Output frame format", OFFSET(output_format), AV_OPT_TYPE_INT, { .i64 = CUDAUPLOAD_FMT_CUDA }, 0, CUDAUPLOAD_FMT_NB - 1, FLAGS, .unit = "output_format" },
          { "cuda",    "Pitch-linear device memory (default)", 0, AV_OPT_TYPE_CONST, { .i64 = CUDAUPLOAD_FMT_CUDA },    .flags = FLAGS, .unit = "output_format" },
-@@ -212,6 +418,9 @@ const FFFilter ff_vf_hwupload_cuda = {
+@@ -212,6 +432,9 @@ const FFFilter ff_vf_hwupload_cuda = {
      .p.description = NULL_IF_CONFIG_SMALL("Upload a system memory frame to a CUDA device."),
  
      .p.priv_class  = &cudaupload_class,
@@ -367,31 +389,90 @@ index 1478b02..112e441 100644
      .uninit    = cudaupload_uninit,
 diff --git a/libavfilter/vf_hwupload_cuda.cu b/libavfilter/vf_hwupload_cuda.cu
 new file mode 100644
-index 0000000..c81a04d
+index 0000000..5b9a852
 --- /dev/null
 +++ b/libavfilter/vf_hwupload_cuda.cu
-@@ -0,0 +1,24 @@
+@@ -0,0 +1,83 @@
 +#include <stdint.h>
 +#include <stddef.h>
 +
-+// One thread owns a 4:2:2 pixel pair spanning two packed v210 words.
-+extern "C" __global__ void unpack_v210(
-+    const uint8_t *input, int input_pitch, int width, int height,
-+    uint8_t *output_y, int y_pitch, uint8_t *output_uv, int uv_pitch)
++#define INLINE __device__ static inline __attribute__((always_inline))
++
++// 12 pixels of a v210 row: two blocks of four words, each word three 10-bit codes, in the order
++// Cb Y Cr Y... Of the 24 codes the even ones are chroma (Cb, Cr alternating), the odd ones luma.
++struct __align__(16) Block { uint32_t word[4]; };
++struct Row { Block block[2]; };
++#define CODE(row, n) ((row).block[(n) / 12].word[(n) % 12 / 3] >> (n) % 3 * 10 & 1023)
++
++// The 12 pixels from x of a picture row: two aligned 128-bit loads.
++INLINE Row load(const uint8_t *input, int pitch, int row, int x)
 +{
-+    const int pair = blockIdx.x * blockDim.x + threadIdx.x;
-+    const int row = blockIdx.y * blockDim.y + threadIdx.y;
-+    if (pair >= width / 2 || row >= height) return;
-+    const uint32_t *packed = reinterpret_cast<const uint32_t *>(
-+        input + static_cast<size_t>(row) * input_pitch);
-+    const int sample = pair * 4;
-+    const int word = sample / 3;
-+    const uint64_t bits = ((static_cast<uint64_t>(packed[word + 1] & 0x3fffffff) << 30)
-+                          | (packed[word] & 0x3fffffff)) >> ((sample % 3) * 10);
-+    uint16_t *y = reinterpret_cast<uint16_t *>(output_y + static_cast<size_t>(row) * y_pitch);
-+    uint16_t *uv = reinterpret_cast<uint16_t *>(output_uv + static_cast<size_t>(row) * uv_pitch);
-+    y[pair * 2] = ((bits >> 10) & 1023) << 6;
-+    y[pair * 2 + 1] = ((bits >> 30) & 1023) << 6;
-+    uv[pair * 2] = (bits & 1023) << 6;
-+    uv[pair * 2 + 1] = ((bits >> 20) & 1023) << 6;
++    const Block *block = reinterpret_cast<const Block *>(input + static_cast<size_t>(row) * pitch) + x / 6;
++    const Row loaded = { { block[0], block[1] } };
++    return loaded;
 +}
++
++// The rounded mean of two 10-bit codes: 8 bits, or 10 in the high bits of 16.
++template <typename T> INLINE T mean(uint32_t a, uint32_t b)
++{
++    const int drop = sizeof(T) == 1 ? 3 : 1;
++    const uint32_t v = (a + b + (1 << drop >> 1)) >> drop;
++    return sizeof(T) == 1 ? (v > 255 ? 255 : v) : v << 6;
++}
++
++// 12 samples (T, four to a word W) of a plane row from sample x, each the mean of the luma or
++// the chroma code of picture rows a and b: three aligned word stores, or sample by sample
++// where the picture ends. Every index is a constant, so the codes stay in registers.
++template <typename T, typename W, int luma>
++INLINE void store(uint8_t *plane, int pitch, int row, int x, int width, const Row &a, const Row &b)
++{
++    const int bits = sizeof(T) * 8;
++#define SAMPLE(i) static_cast<W>(mean<T>(CODE(a, 2 * (i) + luma), CODE(b, 2 * (i) + luma)))
++#define WORD(i) (SAMPLE(i) | SAMPLE(i + 1) << bits | SAMPLE(i + 2) << 2 * bits | SAMPLE(i + 3) << 3 * bits)
++    const W w0 = WORD(0), w1 = WORD(4), w2 = WORD(8);
++    T *dst = reinterpret_cast<T *>(plane + static_cast<size_t>(row) * pitch) + x;
++    if (x + 12 <= width) {
++        reinterpret_cast<W *>(dst)[0] = w0;
++        reinterpret_cast<W *>(dst)[1] = w1;
++        reinterpret_cast<W *>(dst)[2] = w2;
++    } else {
++        for (int i = 0; i < 12; i++)
++            if (x + i < width)
++                dst[i] = (i < 4 ? w0 : i < 8 ? w1 : w2) >> i % 4 * bits;
++    }
++}
++
++// One thread owns 12 pixels of a chroma row and of the `rows` picture rows it is made of (2 for
++// 4:2:0), so no packed word is read twice and no P210 intermediate exists. In an interlaced
++// frame 4:2:0 chroma rows alternate fields, and the two picture rows are of the chroma row's field.
++template <typename T, typename W, int rows>
++INLINE void unpack(const uint8_t *input, int input_pitch, int width, int height, int interlaced,
++                   uint8_t *output_y, int y_pitch, uint8_t *output_uv, int uv_pitch)
++{
++    const int x = (blockIdx.x * blockDim.x + threadIdx.x) * 12;
++    const int chroma = blockIdx.y * blockDim.y + threadIdx.y;
++    const int fields = rows == 2 && interlaced;
++    const int first = chroma * rows - (fields & chroma), next = first + 1 + fields;
++    if (x >= width || first >= height) return;
++    const int second = rows == 2 && next < height ? next : first;
++    const Row a = load(input, input_pitch, first, x);
++    const Row b = rows == 2 ? load(input, input_pitch, second, x) : a;
++    store<T, W, 1>(output_y, y_pitch, first, x, width, a, a);
++    if (second != first)
++        store<T, W, 1>(output_y, y_pitch, second, x, width, b, b);
++    if (chroma * rows < height)   // a last bottom-field row can lie below the last chroma row
++        store<T, W, 0>(output_uv, uv_pitch, chroma, x, width, a, b);
++}
++
++#define UNPACK(format, T, W, rows) \
++extern "C" __global__ void unpack_v210_##format( \
++    const uint8_t *input, int input_pitch, int width, int height, int interlaced, \
++    uint8_t *output_y, int y_pitch, uint8_t *output_uv, int uv_pitch) \
++{ \
++    unpack<T, W, rows>(input, input_pitch, width, height, interlaced, \
++                       output_y, y_pitch, output_uv, uv_pitch); \
++}
++
++UNPACK(p210le, uint16_t, uint64_t, 1)
++UNPACK(p010le, uint16_t, uint64_t, 2)
++UNPACK(nv12, uint8_t, uint32_t, 2)

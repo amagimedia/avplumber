@@ -254,6 +254,28 @@ def _raw_file_packets(avp, api, tag: str, path: str, *, pixel_format: str, video
 RAW_UPLOADED_CAPACITY = 1
 
 
+def _direct_raw_input(avp, api, tag: str, path: str, *, pixel_format: str, width: int, height: int, group: str,
+                      fps: int, fps_den: int, hwaccel: str, loop: bool, color: Optional[dict],
+                      pool_frames: Optional[int], event_loop: Optional[str], native_rate: bool,
+                      realtime_params: Optional[dict] = None, **node) -> str:
+    """``raw_video_file_cuda -> realtime(set_pts) -> force_fps``: the node writes each picture (of a
+    headerless file, or of an MXL flow) once into page-locked memory, uploads it from there one
+    frame ahead of pacing and stamps the *color* tags. *node* is further parameters of it."""
+    uploaded = f"input_{tag}_cuda"
+    # addNode creates the edge, so the plan must come first.
+    avp.edges.planCapacity(uploaded, RAW_UPLOADED_CAPACITY)
+    avp.addNode(api.RawVideoFileCuda({
+        "name": f"input_{tag}", "url": path, "dst": uploaded, "hwaccel": hwaccel, "group": group,
+        "pixel_format": pixel_format, "video_size": f"{width}x{height}", "framerate": f"{fps}/{fps_den}",
+        "loop": loop, "loop_continuous_ts": loop, **node,
+        **({} if pool_frames is None else {"pool_frames": pool_frames}),
+        **({"frame_color": color} if color else {}),
+        **_raw_file_restart(loop),
+    }))
+    return _pace(avp, api, tag, uploaded, fps=fps, fps_den=fps_den, group=group, event_loop=event_loop,
+                 native_rate=native_rate, realtime_params=realtime_params)
+
+
 def build_raw420_input(avp, api, tag: str, path: str, *, width: int, height: int, group: str,
                        pixel_format: str, fps: int, fps_den: int = 1,
                        hwaccel: str = "@gpu", loop: bool = False, event_loop: Optional[str] = None,
@@ -289,18 +311,11 @@ def build_raw420_input(avp, api, tag: str, path: str, *, width: int, height: int
     if pinned and direct:
         raise ValueError("pinned and direct are two different upload paths")
     if direct:
-        uploaded = f"input_{tag}_cuda"
-        # addNode creates the edge, so the plan must come first.
-        avp.edges.planCapacity(uploaded, RAW_UPLOADED_CAPACITY)
-        avp.addNode(api.RawVideoFileCuda({
-            "name": f"input_{tag}", "url": path, "dst": uploaded, "hwaccel": hwaccel, "group": group,
-            "pixel_format": pixel_format, "video_size": f"{width}x{height}", "framerate": f"{fps}/{fps_den}",
-            "loop": loop, "loop_continuous_ts": loop, **({"resident": True} if resident and loop else {}),
-            **({} if pool_frames is None else {"pool_frames": pool_frames}),
-            **({"frame_color": Color.parse(color).tags} if color is not None else {}),
-            **_raw_file_restart(loop),
-        }))
-        return _pace(avp, api, tag, uploaded, fps=fps, fps_den=fps_den, group=group, event_loop=event_loop, native_rate=native_rate)
+        return _direct_raw_input(
+            avp, api, tag, path, pixel_format=pixel_format, width=width, height=height, group=group, fps=fps,
+            fps_den=fps_den, hwaccel=hwaccel, loop=loop, color=None if color is None else Color.parse(color).tags,
+            pool_frames=pool_frames, event_loop=event_loop, native_rate=native_rate,
+            **({"resident": True} if resident and loop else {}))
     tags = "," + Color.parse(color).setparams if color is not None else ""
     if not pinned:
         from .backends.cuda import CudaMixerBackend   # backends load only when used
@@ -339,32 +354,70 @@ def build_raw420_input(avp, api, tag: str, path: str, *, width: int, height: int
     return _pace(avp, api, tag, uploaded, fps=fps, fps_den=fps_den, group=group, event_loop=event_loop, native_rate=native_rate)
 
 
+# The MXL demuxer's options for a live source, when `canvas.mxl_reader` is "demuxer" (the native
+# reader, raw_video_file_cuda, behaves the same without them): wait up to a frame period for the next grain (a
+# non-blocking read between grains returns EAGAIN; input_rec waits a stalled writer out); start at
+# the newest grain, and go back to it when the reader falls out of the ring (`on_too_late=reset`),
+# with timestamps that run on from the last grain (`reset_on_drop`, FFmpeg patch
+# 0027 of deps/ffmpeg/9), not a jump that realtime would wait out. Grains are copied:
+# a `zero_copy` packet points into the ring with no reference held, and the decoded frame that
+# wraps it waits in queues the writer's ring history does not bound.
+MXL_READER_OPTIONS = {"blocking": "1", "grain_index_init": "head", "on_too_late": "reset", "reset_on_drop": "1"}
+
+
 def build_v210_input(avp, api, tag: str, path: str, *, width: int, height: int, group: str,
                      fps: int, fps_den: int = 1, hwaccel: str = "@gpu", loop: bool = False,
                      color: Optional[dict] = None, event_loop: Optional[str] = None,
                      native_rate: bool = False, frame_metadata: Optional[Sequence[str]] = None,
-                     demux: bool = True) -> str:
-    """Headerless packed v210 file -> GPU unpack (P210, 10-bit 4:2:2) -> paced output edge.
+                     demux: bool = True, mxl: bool = False, storage: str = "p210le",
+                     direct: bool = False, pool_frames: Optional[int] = None) -> str:
+    """Packed v210, a headerless file or with ``mxl`` the live MXL flow at the reader URL *path*
+    (``mxl://<domain>?id=<flow>``) -> GPU unpack into *storage* (P210 keeps every 10-bit 4:2:2
+    sample; P010 and NV12 are written by the same kernel pass) -> paced output edge.
 
-    ``input_rec -> demux -> dec_video(rawvideo/gray) ->
-    filter(hwupload_cuda=v210_width=...) -> realtime(set_pts) -> force_fps``.
+    ``direct``: ``raw_video_file_cuda -> realtime(set_pts) -> force_fps``. One node copies each
+    picture once, out of the file or the flow's ring into page-locked memory, and the device
+    unpacks it from there; the node restarts its group when the flow is gone or made again.
+
+    Otherwise ``input_rec -> demux -> dec_video(rawvideo/gray) ->
+    filter(hwupload_cuda=v210_width=...) -> realtime(set_pts) -> force_fps``, which copies each
+    picture twice on the CPU (into a packet, then into the filter's staging memory).
     The packed bytes carry no metadata, so the color contract (HLG/BT.2020 for
     the HDR sources) is supplied here and stamped on the CUDA frames.
     ``frame_metadata`` and ``demux`` are ``build_input``'s: the keys ``input_rec`` stamps on each
     decoded picture, and whether a ``demux`` node splits the file's one stream.
     """
+    # A live flow's pictures arrive as their writer commits them, not ahead of time as a file's do:
+    # pacing holds them one frame (a jitter buffer), so a source that started fast does not land
+    # its later pictures on the far side of their output ticks (repeat and drop pairs).
+    jitter = {"jitter_margin": fps_den / fps, "initial_jitter_margin": fps_den / fps} if mxl else None
+    if direct:
+        return _direct_raw_input(
+            avp, api, tag, path, pixel_format="v210", storage=storage, width=width, height=height, group=group,
+            fps=fps, fps_den=fps_den, hwaccel=hwaccel, loop=loop, color=color, pool_frames=pool_frames,
+            event_loop=event_loop, native_rate=native_rate, realtime_params=jitter)
     stride = v210_row_stride(width)
-    packets = _raw_file_packets(avp, api, tag, path, pixel_format="gray", video_size=f"{stride}x{height}",
-                                group=group, fps=fps, fps_den=fps_den, loop=loop, frame_metadata=frame_metadata, demux=demux)
+    if mxl:
+        packets = f"input_{tag}_packed"
+        # A stalled writer is waited out. When the flow is recreated or the read fails, the reader
+        # restarts the group itself: no end of stream reaches the decoder to restart it from there.
+        _add_packet_input(avp, api, tag, {"url": path, "format": "mxl", "options": MXL_READER_OPTIONS,
+                                          "auto_restart": "group", **_frame_metadata(frame_metadata)},
+                          group=group, routing={"v:0": packets}, demux=demux, restart=_raw_file_restart(loop))
+    else:
+        packets = _raw_file_packets(avp, api, tag, path, pixel_format="gray", video_size=f"{stride}x{height}",
+                                    group=group, fps=fps, fps_den=fps_den, loop=loop, frame_metadata=frame_metadata, demux=demux)
     decoded = f"input_{tag}_decoded"
     avp.addNode(api.DecVideo({
         "name": f"decode_{tag}", "src": packets, "dst": decoded,
-        "codec": "rawvideo", "pixel_format": "gray",
+        # Gray rows of the v210 stride. An MXL flow reports codec v210 at the picture width:
+        # the explicit rawvideo codec reinterprets its bytes in this same shape.
+        "codec": "rawvideo", "options": {"video_size": f"{stride}x{height}", "pixel_format": "gray"},
         "group": group, **_raw_file_restart(loop),
     }))
     # Gray wraps the packed bytes; the patched uploader performs v210 unpacking
-    # on the GPU and publishes P210 frames at the actual picture width.
-    graph = f"hwupload_cuda=v210_width={width}"
+    # on the GPU and publishes frames of that storage at the actual picture width.
+    graph = f"hwupload_cuda=v210_width={width}:v210_format={storage}"
     if color:
         names = {"color_range": "range", "colorspace": "colorspace",
                  "color_primaries": "color_primaries", "color_trc": "color_trc",
@@ -377,4 +430,5 @@ def build_v210_input(avp, api, tag: str, path: str, *, width: int, height: int, 
         "hwaccel": hwaccel, "graph": graph, "threads": 1,
         "group": group, **_raw_file_restart(loop),
     }))
-    return _pace(avp, api, tag, f"input_{tag}_cuda", fps=fps, fps_den=fps_den, group=group, event_loop=event_loop, native_rate=native_rate)
+    return _pace(avp, api, tag, f"input_{tag}_cuda", fps=fps, fps_den=fps_den, group=group, event_loop=event_loop,
+                 native_rate=native_rate, realtime_params=jitter)

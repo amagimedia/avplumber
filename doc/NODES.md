@@ -200,6 +200,13 @@ Recommended options for displaying live video:
         but allow use of any
     -   if doesn't start with `?`, force specified pixel format, fail if
         it's incompatible with codec or stream
+-   `codec: rawvideo` on a video stream of another codec reads its packets as raw
+    bytes; give their geometry and format in `options` (`video_size`,
+    `pixel_format`). An MXL flow reports `v210` at the picture width, so
+    `video_size: <v210 row stride>x<height>` with `pixel_format: gray` hands each
+    grain to `hwupload_cuda=v210_width=<picture width>` for unpacking on the GPU
+    (`raw_video_file_cuda`, the mixer's default reader of MXL sources, reads a flow itself
+    with one CPU copy of each grain instead of two)
 -   `hwaccel` (string, name of instance-shared object) - optional, name of
     hwaccel previously created with `hwaccel.init`
 -   `hwaccel_only_for_codecs` (list of strings) - use hwaccel only for
@@ -1006,12 +1013,30 @@ Get video frames from CUDA IPC memory. Frame pointer and parameters are read fro
 
 ### `raw_video_file_cuda`
 
-Play a headerless raw NV12 or P010 file as CUDA frames. Each picture is read from the file
-straight into page-locked host memory and the device takes it from there, so the samples are
+Play a headerless raw NV12, P010 or v210 file, or a live MXL flow, as CUDA frames. Each picture is
+read from the file straight into page-locked host memory and the device takes it from there, so the samples are
 copied once on the CPU (page cache to that memory). The chain `input_rec` (`rawvideo`) → `demux`
 → `dec_video` → `filter_video` (`hwupload_cuda=pinned=1`) copies them twice and runs four
 threads; this node runs one. Nothing is kept between passes: every picture shown is read from
 the file and transferred for that showing.
+
+`pixel_format: v210` is packed 10-bit 4:2:2 at the standard row stride (128 bytes per 48 pixels):
+the device takes the packed picture and one kernel pass unpacks it there into `storage`. It needs a
+`HAVE_NVCC=1` build.
+
+With `url: mxl://<domain directory>?id=<video flow id>` (a `HAVE_MXL=1` build, which links libmxl)
+the pictures are the grains of that [MXL](https://github.com/dmf-mxl/mxl) flow instead: each is
+copied once out of the flow's shared-memory ring into the page-locked memory (CUDA does not register
+the ring's own mapping). The flow must exist when the node starts and be progressive `video/v210` of
+`video_size`; timestamps count its grains at its own rate. The node starts at the newest grain and
+waits for the next one for as long as a stalled writer takes. When it falls out of the ring it
+returns to the newest grain, and timestamps run on without a jump. A grain the writer overwrote
+during the copy is dropped. When the flow is gone or was created again the node fails, for
+`auto_restart` to open it again. All such nodes of a process share one libmxl instance per domain
+(each instance holds an inotify instance, of which a user has 128 by default). `stats` adds `lapped`
+(grains dropped as overwritten), `resets` (returns to the newest grain) and `skipped` (grains the
+writer left out), and `read_us` is the copy of a grain without the wait for it. `loop`, `resident`
+and `send_eof` do not apply to a flow.
 
 1 output: `av::VideoFrame` (hardware "pixel format" `cuda`). The node blocks while its output
 queue is full, so the consumer (typically `realtime`) paces the reading; give the queue a
@@ -1019,10 +1044,18 @@ capacity of 1 to hold one uploaded picture ahead. Timestamps count pictures in a
 one frame period.
 
 Parameters:
--   `url` (string, required) - path of the file. A trailing part of a picture is not shown.
--   `pixel_format` (string, required) - `nv12` or `p010le`; rows carry no padding.
--   `video_size` (string, required) - `WIDTHxHEIGHT`
--   `framerate` (string, required) - rational, e.g. `30000/1001`
+-   `url` (string, required) - path of the file, or `mxl://<domain directory>?id=<video flow id>`.
+    A trailing part of a picture of a file is not shown.
+-   `pixel_format` (string, required) - `nv12` or `p010le`, whose rows carry no padding, or `v210`
+-   `storage` (string, default `p210le`) - what v210 is unpacked into: `p210le` (every sample as it
+    is), `p010le` or `nv12` (4:2:0: a chroma row is the rounded mean of its two rows; NV12 samples
+    are rounded to 8 bits)
+-   `field_order` (string, default `progressive`) - `tff` or `bff`: the rows are two woven fields.
+    Frames are flagged interlaced with that field order, and 4:2:0 chroma unpacked from v210 is taken
+    from the two nearest rows of the chroma row's own field.
+-   `video_size` (string, required) - `WIDTHxHEIGHT`; an even width for v210
+-   `framerate` (string, required) - rational, e.g. `30000/1001`. For an MXL flow it only stands
+    until the flow is open, whose grain rate replaces it.
 -   `hwaccel` (string, required) - CUDA device created with `hwaccel.init`
 -   `loop` (bool, default `false`) - start again after the last picture. Without it the node
     sends the end-of-file marker (unless `send_eof` is `false`) and finishes, which
@@ -1165,6 +1198,22 @@ could not be created; the frame is dropped) and instance-wide cleanup counts. Th
 drops from EGL/CUDA import work without per-frame logs. `allocations` counts the distinct producer
 allocations ever imported and `reimports` the registrations of one seen before (it had expired or
 been evicted): a producer recycling a fixed pool stops adding `allocations` once its pool is seen.
+
+### `cuda_to_v210`
+
+Packs CUDA frames into headerless `v210` packets with a CUDA kernel, one packet per frame, and DMAs each one into pinned memory the muxer reads directly - so a GPU graph can publish uncompressed video (an MXL flow, an SDI-style feed) without `hwdownload` and without the CPU `v210` encoder.
+
+The node acts as the encoder for the muxer below it, so no `enc_video` belongs in between. Geometry, frame rate and time base are taken from the nodes above at creation time, because the `output` node opens its format context then; the parameters override them, or stand in when the node above reports none.
+
+1 input: `av::VideoFrame` (hardware "pixel format" `cuda`; `p210le`, `yuv422p10le`, `nv12` or `p010le`), 1 output: `av::Packet` (`stride * height` bytes each)
+
+10-bit 4:2:2 input (`p210le`, `yuv422p10le`) is packed as it is. What NVDEC decodes 4:2:0 video to is converted in the same kernel, so a decoder feeds the node without a `scale_cuda` in between and its frame pool: `nv12` samples get two zero low bits (limited range stays exact: 16..235 becomes 64..940), and the chroma of `nv12` and `p010le` is interpolated linearly between its two nearest rows (weights 3:1, chroma sited midway between two luma rows, picture taken as progressive).
+
+Parameters:
+-   `width`, `height` (int) - even width, default the geometry reported from above
+-   `stride` (int) - row pitch in bytes, default the 128-byte aligned v210 pitch
+-   `fps` (rational string) - stream frame rate, default the frame rate reported from above; required if nothing above reports one, because the MXL muxer derives the flow's grain rate from it
+-   `timebase` (rational string) - default the time base reported from above, else `1/fps`
 
 ### `object_tracker`
 

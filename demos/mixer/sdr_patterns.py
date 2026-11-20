@@ -60,14 +60,15 @@ def render(directory: pathlib.Path, name: str, graph: str, size: str, fps: int, 
            gop: str = "low_delay") -> pathlib.Path:
     """*overlay* is (extra FFmpeg input arguments, filter_complex over [0:v] and [1:v],
     stdin bytes for that input), e.g. prepare_demo.id_overlay(); *gop* one of GOP_SHAPES."""
-    raw = encoder == "rawvideo"
-    out = directory / f"{name}.{'nv12' if raw else 'mp4'}"
+    # Headerless output (extension, pixel format): raw NV12, or packed v210 for an MXL writer's loop.
+    raw = {"rawvideo": ("nv12", "nv12"), "v210": ("v210", "yuv422p10le")}.get(encoder)
+    out = directory / f"{name}.{raw[0] if raw else 'mp4'}"
     source = f"{graph}{':' if '=' in graph else '='}size={size}:rate={fps},{GRAIN}"
     inputs, graph_filter, data = overlay or ([], None, None)
     subprocess.run([ffmpeg, "-v", "error", "-nostdin", "-y", "-f", "lavfi", "-i", source, *inputs,
                     *(["-filter_complex", graph_filter] if graph_filter else []), "-t", str(seconds),
                     "-c:v", encoder,
-                    *(["-f", "rawvideo", "-pix_fmt", "nv12"] if raw else
+                    *(["-f", "rawvideo", "-pix_fmt", raw[1]] if raw else
                       [*encoding_options(encoder, kbps, fps, gop), "-pix_fmt", "yuv420p"]), str(out)],
                    input=data, check=True)
     return out

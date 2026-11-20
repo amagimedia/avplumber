@@ -61,8 +61,9 @@ def outputs(show, extra_aux=0):
         # Only renditions[0] carries the bus's audio leg (aux.py), so only it gets an audio
         # mountpoint, however many renditions a bus grows.
         for index, rendition in enumerate(bus.renditions):
-            add(f"{bus.id}:{rendition.id}", rendition, aux=True, extra=bus.id in extra_ids,
-                with_audio=index == 0)
+            if rendition.target == "janus":
+                add(f"{bus.id}:{rendition.id}", rendition, aux=True, extra=bus.id in extra_ids,
+                    with_audio=index == 0)
     ids = [spec["id"] for spec in result.values()]
     if len(ids) != len(set(ids)):
         raise ValueError("Janus outputs must have distinct RTP ports and mountpoint IDs")

@@ -24,7 +24,7 @@ def _integer(value):
 
 class AuxBus:
     """One AUX bus: a compositor over subscribed sources (and the program, last, when one of its
-    layouts draws it), then SDR H.264 or HEVC to Janus.
+    layouts draws it), then SDR H.264 or HEVC to Janus, or SDR v210 to MXL.
 
     A ``mixer_pvw_follow`` node (``<prefix>_pvw``) is the only writer of the composition: this class
     computes, for the current layout, every scene's preview layers and the base (everything else)
@@ -98,9 +98,11 @@ class AuxBus:
                               f"latency_ms ({self.main_latency_ms():g}) by a program frame ({floor:.1f} ms) at least, "
                               f"for the program frame to reach the bus in time")
         inputs = self.inputs()
-        # The compositor already stamps the canvas colour contract. SDR/NV12 can go
-        # straight to the encoder chain without a setparams-only thread and queue.
-        needs_conversion = self.cfg.out_color.transfer != "sdr" or self.cfg.working_format != "nv12"
+        # The compositor already stamps the canvas colour contract. SDR in the output's storage
+        # (NV12; P210 for v210 to MXL) can go straight to the encoder chain without a
+        # setparams-only thread and queue.
+        storage = "p210le" if self.rendition.codec == "v210" else "nv12"
+        needs_conversion = self.cfg.out_color.transfer != "sdr" or self.cfg.working_format != storage
         converted = f"{self.prefix}_sdr" if needs_conversion else self.output_edge
         # Inputs hold 3: the compositor takes frames between ticks and Playout picks each tick by
         # time, so the depth absorbs bunched sources without adding latency.
@@ -128,10 +130,14 @@ class AuxBus:
                 "name": converted, "src": self.output_edge, "dst": converted,
                 "hwaccel": self.hwaccel, "group": self.group, "defer_preliminary_init": True,
                 "threads": self.mixer.backend.graph_threads,
-                "graph": self.mixer.backend.conversion("sdr", "nv12", source=self.cfg.out_color,
+                "graph": self.mixer.backend.conversion("sdr", storage, source=self.cfg.out_color,
                                           source_format=self.cfg.working_format, tonemap=r.tonemap or "clip"),
             }))
-        self.listener = build_janus_output(
+        if r.target == "mxl":
+            from .application import _build_record_output
+            _build_record_output(self.avp, self.api, converted, r, codec=r.codec, enc_format=storage, color={},
+                                 prefix=self.prefix, group=self.group, failure_mode="off")
+        self.listener = None if r.target == "mxl" else build_janus_output(
             self.avp, self.api, converted,
             JanusVideoConfig(host=options.janus_host, video_port=r.port,
                              bitrate_kbps=r.bitrate_kbps, ssrc=options.janus_video_ssrc + r.port,
@@ -161,12 +167,14 @@ class AuxBus:
 
     def start(self):
         self.avp.group(self.group).startNodes()
-        self.listener.start()
+        if self.listener:   # an MXL output has none
+            self.listener.start()
 
     def stop(self):
         """Stop the RTCP listener. The application stops the group together with all others
         (MixerApplication.stop), and not after a panic."""
-        self.listener.stop()
+        if self.listener:
+            self.listener.stop()
 
     def _status(self, node):
         """*node*'s status, or None while it is unreachable (not created, stopped)."""

@@ -1,22 +1,33 @@
 """Synthetic source allocation and measured demo capacity policies."""
+from contextlib import suppress
 import json
+import logging
 import math
+import os
 from pathlib import Path
+import shutil
+import signal
+import subprocess
+import sys
+import threading
+import time
 
 from . import prepare_demo
 from .demo_recipe import allocate, validate_dsk
-from .instance_profiles import INSTANCE_PROFILES, InstanceType
+from .instance_profiles import INSTANCE_PROFILES, InstanceType, mxl_sources
 from pyplumber.mixer.color import TRANSFER_TAGS
 from pyplumber.mixer.config import CANVAS_RATES, parse, parse_rate, rate_number, rate_weight
+from pyplumber.mixer.gui.telemetry import _static_facts
 from pyplumber.mixer.gui.setup_runtime import (
     SetupRuntime as BaseSetupRuntime, for_mode, extra_aux_limit as output_limit,
 )
 
+log = logging.getLogger("setup")
 DEMO_DIR = Path(__file__).resolve().parent
 # The demo is 1080p only: every source is a unique 1920x1080 input, in either orientation.
 PROGRAM_SIZE = (1920, 1080)
 DEFAULT_SETTINGS = dict(orientation="portrait", fps=60, bit_depth=10, chroma="422",
-                        source_count=16, scene_count=32, layout="balanced", weights=[8, 4, 2, 0, 2, 0, 0],
+                        source_count=16, scene_count=32, layout="balanced", weights=[8, 4, 2, 0, 2, 0, 0, 0],
                         encodes={}, dsk=[], clean_feed=False, extra_aux=0, browser_motion="static",
                         decode_mix="profile")
 # What the SDR 4:2:0 group's clips are coded as: the profile's choice (the qualified show; HLG clips
@@ -38,9 +49,11 @@ def current_settings(profile, settings):
     """Saved *settings* in the current shape, every program encode filled in. Saved before extra
     aux outputs, they had none; the browser frames in flight the page no longer sets go, and the show
     takes the frame rate's default (config.default_browser_frame_queue); one program bitrate_kbps
-    sets the SDR program and its clean copy, the HLG program in the defaults' ratio to it."""
+    sets the SDR program and its clean copy, the HLG program in the defaults' ratio to it; seven
+    weights, saved before MXL sources, have none."""
     if not isinstance(settings, dict):
         return settings
+    weights = settings.get("weights")
     encodes, legacy = settings.get("encodes", {}), settings.get("bitrate_kbps")
     if not isinstance(encodes, dict) or len(encodes) > 64:
         raise ValueError("encodes must map at most 64 output ids to their preset and bitrate_kbps")
@@ -55,7 +68,7 @@ def current_settings(profile, settings):
                for o, e in encodes.items()}
     return {"extra_aux": 0, "browser_motion": "static", "decode_mix": "profile",
             **{k: v for k, v in settings.items() if k not in ("browser_frame_queue", "browser_ring_size", "bitrate_kbps")},
-            "encodes": encodes}
+            "encodes": encodes, **({"weights": [*weights, 0]} if isinstance(weights, list) and len(weights) == 7 else {})}
 
 
 def extra_aux_limit(profile, cfg, encodes):
@@ -82,12 +95,12 @@ def source_counts(profile, total, weights, fps=25, reserved_browsers=0):
     """*reserved_browsers* are downstream-key pages: browser inputs outside the weighted mix."""
     counts = allocate(total, weights)
     fps = rate_weight(fps)
-    # P010 uses twice the upload bytes of NV12; SDR/HDR decode share NVDEC.
+    # P010 uses twice the upload bytes of NV12, an MXL input takes one unit; SDR/HDR decode share NVDEC.
     for indices, costs, limit, name in (
             ((2, 3), (1, 1), profile["hlg_v210"], "4:2:2 upload"),
             ((4,), (1,), browser_limit(profile, fps) - reserved_browsers, "Browser"),
             ((0, 1), (1, 1), profile["nvdec_decodes"][fps], "Combined NVDEC"),
-            ((5, 6), (1, 2), profile["raw_upload_units"][fps], "Raw 4:2:0 upload units")):
+            ((5, 6, 7), (1, 2, 1), profile["raw_upload_units"][fps], "Raw 4:2:0 upload units")):
         group = [(i, cost) for i, cost in zip(indices, costs) if i < len(weights)]
         if sum(counts[i] * cost for i, cost in group) > limit:
             size = min(limit, sum(counts[i] for i, _ in group))
@@ -152,8 +165,8 @@ def recipe_for(profile, settings):
             raise ValueError(f"encodes.{output}: bitrate_kbps must be an integer from {low} to {high}")
     weights = settings["weights"]
     most = max(profile["sources"].values())   # the page sends source counts as weights
-    if not isinstance(weights, list) or len(weights) != 7 or any(type(w) is not int or not 0 <= w <= most for w in weights):
-        raise ValueError(f"Provide seven integer source weights from 0 to {most}")
+    if not isinstance(weights, list) or len(weights) != 8 or any(type(w) is not int or not 0 <= w <= most for w in weights):
+        raise ValueError(f"Provide eight integer source weights from 0 to {most}")
     if settings["bit_depth"] == 8 and (any(weights[1:4]) or weights[6]):
         raise ValueError("8-bit mode supports SDR 4:2:0 and browser sources only")
     if settings["bit_depth"] == 8 and settings["chroma"] != "420":
@@ -163,6 +176,7 @@ def recipe_for(profile, settings):
     counts = source_counts(for_mode(profile, settings["bit_depth"], settings["chroma"]), settings["source_count"],
                            weights, settings["fps"], len(dsk))
     _check_hdr_decodes(profile, counts[1], settings["fps"])
+    _check_mxl(profile, counts[7], settings["fps"])
     width, height = PROGRAM_SIZE
     recipe = json.loads((DEMO_DIR / "demo.example.json").read_text())
     recipe["canvas"].update(profile.get("canvas", {}))
@@ -192,6 +206,8 @@ def recipe_for(profile, settings):
                              "chroma": "420", "storage": "nv12"})
     recipe["inputs"].append({"id": "hlg420_raw", "kind": "generated", "color": "hlg",
                              "chroma": "420", "storage": "p010"})
+    # Packed v210 loops, which the MXL writers copy into their flows (prepare_demo.plan).
+    recipe["inputs"].append({"id": "sdr_mxl", "kind": "generated", "color": "sdr", "chroma": "420", "mxl": True})
     for source, count in zip(recipe["inputs"], counts):
         source["weight"] = count
         if source["kind"] == "browser":
@@ -205,7 +221,7 @@ def recipe_for(profile, settings):
             layouts.update(pip=3, random=3)
             if counts[4] and sum(counts[:4]) + sum(counts[5:]):
                 layouts["alpha_overlay"] = 2
-                for index in (0, 5, 1, 6, 2, 3):
+                for index in (0, 5, 1, 6, 2, 3, 7):
                     if counts[index]:
                         source = recipe["inputs"][index]
                         recipe["alpha_background"] = source["id"] + ("_001" if counts[index] > 1 else "_000")
@@ -225,6 +241,30 @@ def _check_hdr_decodes(profile, count, fps):
         raise ValueError(f"HDR NVDEC inputs are limited to {maximum} at {rate_number(parse_rate(fps))} fps to reserve VRAM")
 
 
+def _check_mxl(profile, count, fps):
+    maximum = profile.get("mxl_sources", {}).get(rate_weight(parse_rate(fps)), 0)
+    if count > maximum:
+        raise ValueError(f"MXL inputs are limited to {maximum} at {rate_number(parse_rate(fps))} fps" if maximum else
+                         "MXL inputs are not available on this instance")
+
+
+def mxl_available(ffmpeg="ffmpeg"):
+    """Whether this image's FFmpeg has the MXL demuxer (Dockerfile.fedora44 WITH_MXL=1)."""
+    if not shutil.which(ffmpeg):
+        return False
+    demuxers = subprocess.run([ffmpeg, "-hide_banner", "-demuxers"], capture_output=True, text=True).stdout
+    return any(line.split()[1:2] == ["mxl"] for line in demuxers.splitlines())
+
+
+# The writers create every flow within seconds of their start.
+MXL_WRITERS_START_TIMEOUT_SEC = 120
+MXL_WRITERS_STOP_TIMEOUT_SEC = 10
+
+
+def _mxl_flows(show):
+    """The flow directory of each MXL source this setup's writers publish (those with a clip)."""
+    return [Path(s["url"]) / f"{s['flow']}.mxl-flow" for s in show.get("sources", []) if s.get("kind") == "mxl" and "clip" in s]
+
 
 class SetupRuntime(BaseSetupRuntime):
     # Synthetic clips use NVENC on the same GPU as the current show.
@@ -232,8 +272,77 @@ class SetupRuntime(BaseSetupRuntime):
 
     def __init__(self, media_dir, recipe_path, bridge, instance_type, *args, **kwargs):
         instance_type = InstanceType(instance_type)
-        super().__init__(media_dir, recipe_path, bridge, INSTANCE_PROFILES[instance_type], *args,
+        profile = INSTANCE_PROFILES[instance_type]
+        if mxl_available():   # the page offers MXL from this table, and the limits refuse it without
+            gpu = next(iter(_static_facts().values()), {})
+            profile = {**profile, "mxl_sources": mxl_sources(gpu.get("compute_capability"))}
+        # The MXL writers (mxl_writers.py): a process of their own beside the mixer, started before
+        # it and stopped after it, with the flows it publishes.
+        self.writers, self.writer_flows, self.writers_lock = None, [], threading.Lock()
+        super().__init__(media_dir, recipe_path, bridge, profile, *args,
                          instance_type=instance_type.value, config_name="mixer.demo.json", **kwargs)
+
+    def _start(self, config):
+        self._start_writers(config)
+        super()._start(config)
+
+    def _stop(self, *args, **kwargs):
+        super()._stop(*args, **kwargs)
+        self._stop_writers()
+
+    def _start_writers(self, config):
+        """One writer per MXL source of the show at *config*, replacing any still running (a mixer
+        restarted after it exited on its own has not stopped them). Returns once every flow exists:
+        a mixer that opens a missing flow fails its source."""
+        self._stop_writers()
+        flows = _mxl_flows(json.loads(config.read_text()))
+        if not flows:
+            return
+        with self.writers_lock:
+            for flow in flows:   # one left by a killed writer would pass for a started one
+                shutil.rmtree(flow, ignore_errors=True)
+            flows[0].parent.mkdir(parents=True, exist_ok=True)
+            process = self.writers = subprocess.Popen([sys.executable, "-u", "-m", "demos.mixer.mxl_writers", str(config)],
+                                                      start_new_session=True)
+            self.writer_flows = flows
+        log.info("MXL writers process %s started (%d flows)", process.pid, len(flows))
+        deadline = time.monotonic() + MXL_WRITERS_START_TIMEOUT_SEC
+        while not all(flow.exists() for flow in flows):
+            if process.poll() is not None or time.monotonic() > deadline or self.closing.wait(.5):
+                raise RuntimeError("MXL writers did not start; see container logs")
+        threading.Thread(target=self._watch_writers, args=(process, config), daemon=True).start()
+
+    def _watch_writers(self, process, config):
+        """Writers that exit on their own start again; the mixer repeats each source's last frame
+        meanwhile and reopens the flows the new writers create."""
+        code = process.wait()
+        # Checked after the pause: a stop or an Apply meanwhile owns the writers.
+        if not self.closing.wait(2) and self.writers is process:
+            log.warning("MXL writers exited (%s); restarting them", code)
+            try:
+                self._start_writers(config)
+            except Exception as exc:
+                log.error("%s", exc)
+
+    def _stop_writers(self):
+        with self.writers_lock:
+            process, self.writers = self.writers, None
+            if process:
+                # The whole group, whether or not the launcher still runs: writers outlive a launcher
+                # that died without them, and a second set would write the same flows.
+                with suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGINT)
+                    deadline = time.monotonic() + MXL_WRITERS_STOP_TIMEOUT_SEC
+                    while time.monotonic() < deadline:
+                        process.poll()   # reaped, so the launcher no longer counts as a member
+                        os.killpg(process.pid, 0)   # ProcessLookupError once every member has exited
+                        time.sleep(.1)
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.wait(timeout=10)
+                log.info("MXL writers exited (%s)", process.returncode)
+            for flow in self.writer_flows:
+                shutil.rmtree(flow, ignore_errors=True)
+            self.writer_flows = []
 
     def normalize_settings(self, settings):
         return current_settings(self.profile, settings)
@@ -257,5 +366,6 @@ class SetupRuntime(BaseSetupRuntime):
         cfg = parse(show)
         _check_hdr_decodes(self.profile, sum(s.kind == "video" and s.color_trc not in ("", TRANSFER_TAGS["sdr"])
                                             for s in cfg.sources), cfg.fps)
+        _check_mxl(self.profile, len(_mxl_flows(show)), cfg.fps)
         encodes = current_settings(self.profile, settings or self.settings or {})["encodes"]
         extra_aux_limit(self.profile, cfg, encodes)

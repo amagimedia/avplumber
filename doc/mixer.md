@@ -128,9 +128,9 @@ YUV colour contract and rejects packed RGB. The builder skips a colour filter
 only when its entire generated graph equals that source's `setparams` string;
 colour conversion, tone mapping, format changes and alpha handling still run.
 
-The application makes this promise automatically for raw NV12, P010 and v210
+The application makes this promise automatically for raw NV12, P010, v210 and MXL
 sources only when they have neither a user filter nor a `process_source`
-callback. The upload graph stamps tags without adding a node. Configured
+callback. The upload graph, or `raw_video_file_cuda` itself (`frame_color`), stamps tags without adding a node. Configured
 geometry transforms preserve frame properties. Other integrations must uphold
 the promise themselves; the default is `color_tagged=False`.
 
@@ -139,6 +139,62 @@ nodes and 32 eligible raw colour filters. These two changes remove 184 nodes and
 from that configuration. This is a derived count, not a newly measured deployed
 graph or a throughput claim. See the [cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/)
 for revision-specific evidence and the ranked optimization list.
+
+## MXL sources and outputs
+
+[MXL](https://github.com/dmf-mxl/mxl) flows carry uncompressed v210 (10-bit 4:2:2) video in
+shared memory; libmxl reads them and FFmpeg's `mxl` muxer writes them. Audio flows are not used.
+
+A source `{"kind": "mxl", "url": <domain directory>, "flow": <video flow id>, "width", "height"}`
+with a colour contract (`color` or the four tags; the grains carry none) is read by one
+`raw_video_file_cuda` node (`url: mxl://<url>?id=<flow>`, `pixel_format: v210`): it copies each grain
+once, out of the flow's ring into page-locked memory, the device takes it from there and unpacks it
+into `storage`, and `realtime` puts the frame on the host clock. CUDA does not register the ring's
+read-only shared mapping, so that one copy is the least a grain costs. All the readers of a process
+share one libmxl instance per domain. `canvas.mxl_reader: "demuxer"` is the earlier chain, kept to
+fall back on and to compare with: `input_rec` opens the same URL with FFmpeg's `mxl` demuxer,
+`dec_video` takes each grain as gray rows of the v210 stride and
+`hwupload_cuda=v210_width=<width>:v210_format=<storage>` unpacks it, which copies each grain twice on
+the CPU (into a packet, then into the filter's staging memory). A v210 file is read by that chain.
+Only progressive flows are read: an interlaced flow has a grain per field, and is refused.
+The unpack writes the canvas's storage itself (NV12, P010 or P210, one kernel pass and no
+colour node) when the source's colour is the canvas's and no transform, source filter or `process_source`
+hook reads the frames first; otherwise it writes P210, every 10-bit 4:2:2 sample, for that reader or the
+colour conversion.
+It takes `transform` and `filter` like the other raw kinds. The reader starts at the newest grain
+and returns to it when it falls out of the ring, whose `history_duration` therefore bounds how far
+behind the writer a stalled source can run. A reader whose writer stalls waits for it, and the
+compositor repeats the source's last frame meanwhile. When the writer recreates the flow, the reading
+node restarts the source's group (`auto_restart: group`); an `assume_video_format` with `ignore_eof`
+before the source's fan-out keeps that restart's EOF from ending the program. A grain the writer
+overwrites while the native reader copies it is dropped (the node's `stats` count these as `lapped`,
+its returns to the newest grain as `resets`); the demuxer does not check, and copies its grains too
+(inputs.py `MXL_READER_OPTIONS` says why its zero-copy stays off).
+
+A rendition `{"target": "mxl", "url": <domain directory>, "flow": <video flow id>}` publishes the
+program as that video flow. `width`, `height`, `fps`, `color` and `tonemap` work as for any
+rendition (colour defaults to the canvas's); the frames are converted to P210, `force_fps` fixes
+the flow's rate and `cuda_to_v210` packs each into a grain without NVENC, so `codec`,
+`bitrate_kbps`, `preset`, `profile`, `port` and `audio_port` do not apply. An AUX bus's one
+rendition may be an MXL target instead of Janus: SDR like every bus, with no web preview.
+
+```json
+"sources": [{"id": "cam1", "kind": "mxl", "url": "/dev/shm/mxl",
+             "flow": "5fbec3b1-1b0f-417d-9059-8b94a47197ed", "width": 1920, "height": 1080, "color": "sdr"}],
+"renditions": [{"id": "pgm", "target": "mxl", "url": "/dev/shm/mxl",
+                "flow": "b3bb5be7-9fe9-4324-a5bb-4c70e1084449"}]
+```
+
+The demo setup (`demos/mixer`) offers MXL as a source type on an image built `WITH_MXL=1`, for an
+instance whose profile has `mxl_sources`: the eighth source count, one upload unit each beside the
+raw NV12 and P010 files. Each MXL source has its own generated clip, a loop of packed v210 pictures,
+and its own writer (`demos/mixer/mxl_writers.py`: an FFmpeg that copies the loop's packets to the `mxl`
+muxer at the canvas rate), which like a producer outside the mixer uses no GPU: each picture goes
+from the page cache into the flow. A loop is `generation.seconds` long, 5.5 MB a 1080p
+picture: 332 MB of disk and page cache per source for 2 s at 30 fps, twice that at 60 fps.
+The writers are one process group beside the mixer, which the setup runtime starts
+before the mixer and stops after it; an Apply restarts both, and writers that exit on their own
+are started again.
 
 ## Input CPU and scheduling
 

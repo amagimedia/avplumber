@@ -52,6 +52,7 @@ import json
 from typing import Any, Dict, List, Optional, Tuple
 
 from pyplumber.node import (
+    AssumeVideoFormat,
     InternalNode,
     ClipCache,
     FilterVideo,
@@ -178,7 +179,7 @@ class MixerGraphBuilder:
         pre_otm_edge: str,
         input_group: str,
         *, color=None, pixel_format=None, packed_rgb=False, premultiplied_alpha=False,
-        color_tagged=False, fan_out_loop=None, picture=None,
+        color_tagged=False, fan_out_loop=None, picture=None, reconnects=None,
     ) -> "MixerGraphBuilder":
         """Register one camera source.
 
@@ -208,6 +209,11 @@ class MixerGraphBuilder:
         fan_out_loop:
             Name of an event loop to hand this source's frames out on (one_to_many_nb)
             instead of a thread of its own; typically the loop that paces the source.
+        reconnects:
+            (width, height) of a live source whose input group restarts when its writer
+            comes back (MXL). Stopping the group's colour stage sends an EOF, which would
+            end a program showing only this source; a format declaration that ignores EOF
+            drops it before the fan-out, also when it restarts with the group.
         """
         if self._built:
             raise RuntimeError("Cannot add sources after build()")
@@ -225,7 +231,8 @@ class MixerGraphBuilder:
                                                color=color, color_tagged=color_tagged,
                                                pixel_format=pixel_format, packed_rgb=packed_rgb,
                                                premultiplied_alpha=premultiplied_alpha,
-                                               fan_out_loop=fan_out_loop, picture=picture))
+                                               fan_out_loop=fan_out_loop, picture=picture,
+                                               reconnects=reconnects))
         self._source_index[name] = idx
         return self
 
@@ -623,8 +630,19 @@ class MixerGraphBuilder:
         prepared_edges = self._prepare_source_edges()
         initial_scene = self._initial_scene_def()
         pgm_slot_bit = 0 if self._initial_pgm_slot == "A" else 1
+        held = {}   # prepared edge -> the same frames past a reconnect-proof EOF stop
 
         for src in self._sources:
+            fan_out_src = prepared_edges[src.name]
+            if src.reconnects and src.route_router is None:
+                if fan_out_src not in held:
+                    held[fan_out_src] = self._e(f"{src.name}_live")
+                    self.avp.addNode(AssumeVideoFormat({
+                        "name": self._n(f"live_{src.name}"), "src": fan_out_src, "dst": held[fan_out_src],
+                        "ignore_eof": True, "width": src.reconnects[0], "height": src.reconnects[1],
+                        "pixel_format": "cuda", "real_pixel_format": self.working_format, "group": src.input_group,
+                    }))
+                fan_out_src = held[fan_out_src]
             is_in_initial = src.name in initial_scene.sources
             # Slot A = bit 0, slot B = bit 1.
             # Initial PGM is on the configured slot; sources in the scene
@@ -639,7 +657,7 @@ class MixerGraphBuilder:
                 "drop": True,
                     **({"event_loop": src.fan_out_loop} if src.fan_out_loop else {}),
                     "name": self._n(f"otm_{src.name}"),
-                    "src": prepared_edges[src.name],
+                    "src": fan_out_src,
                     "dst": [self._e(f"{src.name}_a"), self._e(f"{src.name}_b"), *aux_edges],
                     **({"subscribed_outputs": {edge: edge for edge in aux_edges}} if aux_edges else {}),
                     **({"frame_color": src.frame_color} if src.frame_color else {}),

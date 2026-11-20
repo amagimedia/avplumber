@@ -54,6 +54,8 @@ Every entry has an `id`, `kind` and `weight`.
 
 Generated 4:2:0 media defaults to H.264 for SDR and HEVC for HLG. Set `codec`
 to select encoded storage, or `storage: "nv12"` / `"p010"` for raw uploads.
+`mxl: true` on a 4:2:0 input without `storage` makes each of its sources an MXL flow that
+`mxl_writers.py` publishes from the source's clip, which is then stored as packed v210 (`codec` and `gop` do not apply) ([MXL sources](../../../doc/mixer.md#mxl-sources-and-outputs)).
 `codecs` (a list, like `patterns`) gives the group's sources codecs in turn, and
 `gop` or `gops` their reference structure: `low_delay` (the default: two references,
 no B-frames) or `b_frames` (three B-frames in a pyramid over four references). Setup's

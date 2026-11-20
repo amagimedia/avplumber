@@ -46,6 +46,7 @@ Clone with `--recursive`. Paste scripts from `examples/` into nc.
 | `HAVE_TENSORRT=1`, `TENSORRT_ROOT=` | Not read by core. Out-of-tree node fragments (`EXTRA_NODES_MK`) read them for the TensorRT include/library paths and `-lnvinfer`; keep passing both when building inference nodes |
 | `HAVE_JACK=1` | `jack_sink`. Links `-ljack` |
 | `HAVE_NVCC=1` | Compile CUDA PTX for CUDA processing nodes. Requires `nvcc` |
+| `HAVE_MXL=1` | `raw_video_file_cuda` reads live MXL flows (`url: mxl://...`), the mixer's default reader of `mxl` sources. Links `-lmxl` ([dmf-mxl](https://github.com/dmf-mxl/mxl) v1.1.0); needs `HAVE_CUDA=1 HAVE_NVCC=1`. Without it set `canvas.mxl_reader: "demuxer"` |
 | `EMBED_IN=obs` | OBS source plugin build |
 
 Feature gates (node only built when all conditions met):

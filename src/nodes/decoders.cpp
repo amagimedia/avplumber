@@ -487,7 +487,7 @@ protected:
 #endif
     }
 public:
-    template<typename ...Ts> Decoder(std::unique_ptr<Source<av::Packet>> &&source, std::unique_ptr<Sink<OutputFrame>> &&sink, av::Stream &stream, const std::string codec_name, av::Dictionary options, std::string pixel_format, std::shared_ptr<HWAccelDevice> hwaccel):
+    template<typename ...Ts> Decoder(std::unique_ptr<Source<av::Packet>> &&source, std::unique_ptr<Sink<OutputFrame>> &&sink, av::Stream &stream, const std::string codec_name, av::Dictionary options, std::string pixel_format, std::shared_ptr<HWAccelDevice> hwaccel, bool reinterpret = false):
         NodeSISO<av::Packet, OutputFrame>(std::move(source), std::move(sink)),
         codec_(codecFromName(codec_name)),
         hwaccel_(hwaccel)
@@ -502,6 +502,12 @@ public:
             dec_.raw()->width = stream.raw()->codecpar->width;
             dec_.raw()->height = stream.raw()->codecpar->height;
             dec_.raw()->pix_fmt = static_cast<AVPixelFormat>(stream.raw()->codecpar->format);
+        }
+        if (reinterpret) {
+            // Packets read as raw bytes: libavcodec refuses a foreign codec id, and rawdec would
+            // infer the pixel format from the stream's fourcc.
+            dec_.raw()->codec_id = AV_CODEC_ID_RAWVIDEO;
+            dec_.raw()->codec_tag = 0;
         }
         this->auto_eof_ = false;
         if (!pixel_format.empty()) {
@@ -905,7 +911,11 @@ public:
         if (params.count("options")) {
             options = parametersToDict(params["options"]);
         }
-        std::shared_ptr<Child> r = std::make_shared<Child>(src_edge->makeSource(), dst_edge->makeSink(), md->source_stream, codec_name, options, pixel_format, hwaccel);
+        // rawvideo forced onto another codec's video stream reads its packets as raw bytes, whose
+        // geometry and format come from options (video_size, pixel_format) when the decoder opens.
+        const bool reinterpret = codec_name == "rawvideo" && cpar.codec_type == AVMEDIA_TYPE_VIDEO &&
+                                 cpar.codec_id != AV_CODEC_ID_RAWVIDEO;
+        std::shared_ptr<Child> r = std::make_shared<Child>(src_edge->makeSource(), dst_edge->makeSink(), md->source_stream, codec_name, options, pixel_format, hwaccel, reinterpret);
         if (params.count("flush_magic")) {
             r->flush_magic_ = params["flush_magic"];
         }

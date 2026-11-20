@@ -275,6 +275,7 @@ RUN --mount=type=secret,id=tensorrt_url \
 FROM tensorrt-${WITH_TENSORRT} AS builder
 
 ARG WITH_TENSORRT
+ARG WITH_MXL
 ARG AVPLUMBER_REVISION=workspace
 ARG BUILD_JOBS=4
 
@@ -303,6 +304,7 @@ RUN make -j"${BUILD_JOBS}" python_module \
         HAVE_NVOF_FRUC=0 \
         HAVE_NVCC=1 \
         HAVE_NVJPEG=0 \
+        HAVE_MXL="${WITH_MXL}" \
         HAVE_TENSORRT="${WITH_TENSORRT}" \
         NEURAL_NET="${WITH_TENSORRT}" \
         TENSORRT_ROOT=/opt/tensorrt \
@@ -313,6 +315,7 @@ RUN make -j"${BUILD_JOBS}" python_module \
 RUN test -f /build/_avplumber"$(python3-config --extension-suffix)" \
     && ldd /build/_avplumber"$(python3-config --extension-suffix)" \
        | grep -q '/usr/local/lib/libavfilter' \
+    && if [ "${WITH_MXL}" = 1 ]; then ldd /build/_avplumber"$(python3-config --extension-suffix)" | grep -q libmxl; fi \
     && for node in ipc_dmabuf_source drm_prime_to_egl_image drm_prime_to_cuda \
                    egl_image_cuda_overlay; do \
            grep -q "\"${node}\"" /build/graph_factory.python.generated.cpp || exit 1; \

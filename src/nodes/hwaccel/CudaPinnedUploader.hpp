@@ -5,6 +5,10 @@
 // with a caller's allocator, a packet reassembler). The block holds one picture, or as many as
 // the caller wants to keep for showing again.
 //
+// With `v210` the block holds packed v210 rows (10-bit 4:2:2, v210Stride() bytes each) instead of
+// the planes of the frames' format: the device takes the packed picture as it is and unpacks it
+// there into the frame, so the CPU never touches a sample after the caller's one write.
+//
 // The sequence is the one FFmpeg's `hwupload_cuda=pinned=1` uses (deps/ffmpeg): copies run on a
 // private stream that first waits for work queued on the device's stream, and finish before the
 // frame is handed out.
@@ -18,10 +22,15 @@
 #include <algorithm>
 #include <atomic>
 
+#if HAVE_V210_KERNELS
+#include "../../../objs/src/nodes/hwaccel/v210_pack.ptx.h"
+#endif
+
 extern "C" {
 #include <libavutil/hwcontext.h>
 #include <libavutil/hwcontext_cuda.h>
 #include <libavutil/imgutils.h>
+#include <libavutil/pixdesc.h>
 }
 
 class CudaPinnedUploader {
@@ -68,6 +77,12 @@ class CudaPinnedUploader {
     CUstream stream_ = nullptr;
     CUevent readers_done_ = nullptr;
     void *block_ = nullptr;
+    // v210: the packed picture on the device, and the kernel that unpacks it into a frame.
+    CUdeviceptr packed_ = 0;
+    CUmodule module_ = nullptr;
+    CUfunction unpack_ = nullptr;
+    int unpack_rows_ = 0;   // picture rows one kernel block covers
+    int interlaced_ = 0;
 
     static bool failed(CUresult result, const char *call, std::string &error) {
         if (result == CUDA_SUCCESS) return false;
@@ -78,6 +93,8 @@ class CudaPinnedUploader {
         if (cuda_ && cuCtxPushCurrent(cuda_->cuda_ctx) == CUDA_SUCCESS) {
             if (stream_) cuStreamSynchronize(stream_);
             if (block_) cuMemFreeHost(block_);
+            if (packed_) cuMemFree(packed_);
+            if (module_) cuModuleUnload(module_);
             if (readers_done_) cuEventDestroy(readers_done_);
             if (stream_) cuStreamDestroy(stream_);
             CUcontext previous;
@@ -90,10 +107,14 @@ public:
     /// `write_combined`: the block is write-combined memory. Nothing may ever read it on the
     /// CPU then; whether filling it is cheaper depends on who writes it and is to be measured.
     /// `pictures`: how many pictures the block holds. `pool_frames`: at most that many device
-    /// frames, 0 for as many as are ever out at once.
+    /// frames, 0 for as many as are ever out at once. `v210`: the block holds packed v210 and
+    /// the frames are `sw_format` (p210le, p010le or nv12) unpacked from it; `interlaced`: its
+    /// rows are two woven fields, so 4:2:0 chroma is taken field by field.
     CudaPinnedUploader(std::shared_ptr<HWAccelDevice> device, AVPixelFormat sw_format, int width, int height,
-                       bool write_combined = false, size_t pictures = 1, int pool_frames = 0):
-        device_(std::move(device)), layout_(sw_format, width, height) {
+                       bool write_combined = false, size_t pictures = 1, int pool_frames = 0,
+                       bool v210 = false, bool interlaced = false):
+        device_(std::move(device)),
+        layout_(v210 ? AV_PIX_FMT_GRAY8 : sw_format, v210 ? v210Stride(width) : width, height), interlaced_(interlaced) {
         if (!device_ || device_->hardwarePixelFormat() != AV_PIX_FMT_CUDA)
             throw Error("pinned upload: a CUDA hwaccel is required");
         if (!pictures) throw Error("pinned upload: the block must hold at least one picture");
@@ -137,6 +158,21 @@ public:
                 failed(cuMemHostAlloc(&block_, block_bytes, write_combined ? CU_MEMHOSTALLOC_WRITECOMBINED : 0),
                        "cuMemHostAlloc", error))
                 error += " (" + std::to_string(block_bytes) + " bytes of page-locked memory)";
+            if (v210 && error.empty()) {
+#if HAVE_V210_KERNELS
+                const std::string name = std::string("unpack_v210_") + av_get_pix_fmt_name(sw_format);
+                // A kernel block is 32x8 threads; a thread unpacks 12 pixels of one picture row,
+                // or of the two a 4:2:0 chroma row spans.
+                unpack_rows_ = 8 << av_pix_fmt_desc_get(sw_format)->log2_chroma_h;
+                const std::string image(avpl_v210_pack_ptx, avpl_v210_pack_ptx + avpl_v210_pack_ptx_len);
+                if (!failed(cuMemAlloc(&packed_, size_t(layout_.frame_size)), "cuMemAlloc", error) &&
+                    !failed(cuModuleLoadDataEx(&module_, image.c_str(), 0, nullptr, nullptr), "cuModuleLoadDataEx", error) &&
+                    failed(cuModuleGetFunction(&unpack_, module_, name.c_str()), "cuModuleGetFunction", error))
+                    error += " (v210 unpacks to p210le, p010le or nv12)";
+#else
+                error = "v210 needs the CUDA kernels of a HAVE_NVCC=1 build";
+#endif
+            }
             CUcontext previous;
             cuCtxPopCurrent(&previous);
         }
@@ -181,11 +217,22 @@ private:
         std::string error;
         if (failed(cuCtxPushCurrent(cuda_->cuda_ctx), "cuCtxPushCurrent", error))
             throw Error("pinned upload: " + error);
+        // The packed picture is a buffer of this uploader alone, so its transfer need not wait.
+        bool stop = unpack_ && failed(cuMemcpyHtoDAsync(packed_, block(picture), size_t(layout_.frame_size), stream_),
+                                      "cuMemcpyHtoDAsync", error);
         // A reader on the device's stream may have let go of this pool frame with its read
-        // still queued: the copies wait for everything queued there so far.
-        bool stop = failed(cuEventRecord(readers_done_, cuda_->stream), "cuEventRecord", error) ||
-                    failed(cuStreamWaitEvent(stream_, readers_done_, 0), "cuStreamWaitEvent", error);
-        for (int i = 0; !stop && i < 4 && layout_.row_bytes[i]; ++i) {
+        // still queued: the writes wait for everything queued there so far.
+        stop = stop || failed(cuEventRecord(readers_done_, cuda_->stream), "cuEventRecord", error) ||
+               failed(cuStreamWaitEvent(stream_, readers_done_, 0), "cuStreamWaitEvent", error);
+        if (!stop && unpack_) {
+            AVFrame *frame = out.raw();
+            void *args[] = {&packed_, &layout_.row_bytes[0], &frame->width, &frame->height, &interlaced_,
+                            &frame->data[0], &frame->linesize[0], &frame->data[1], &frame->linesize[1]};
+            stop = failed(cuLaunchKernel(unpack_, (frame->width + 12 * 32 - 1) / (12 * 32),
+                                         (frame->height + unpack_rows_ - 1) / unpack_rows_, 1, 32, 8, 1, 0,
+                                         stream_, args, nullptr), "cuLaunchKernel", error);
+        }
+        for (int i = 0; !stop && !unpack_ && i < 4 && layout_.row_bytes[i]; ++i) {
             CUDA_MEMCPY2D copy{};
             copy.srcMemoryType = CU_MEMORYTYPE_HOST;
             copy.srcHost = block(picture) + layout_.plane_offset[i];

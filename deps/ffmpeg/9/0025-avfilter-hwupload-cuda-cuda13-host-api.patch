@@ -15,10 +15,10 @@ every header version.
  1 file changed, 16 insertions(+), 2 deletions(-)
 
 diff --git a/libavfilter/vf_hwupload_cuda.c b/libavfilter/vf_hwupload_cuda.c
-index 22468d2f52..7fc5371e46 100644
+index 25ccc6d59b..0e60fc6dd6 100644
 --- a/libavfilter/vf_hwupload_cuda.c
 +++ b/libavfilter/vf_hwupload_cuda.c
-@@ -39,6 +39,12 @@ enum {
+@@ -40,6 +40,12 @@ enum {
      CUDAUPLOAD_FMT_NB,
  };
  
@@ -31,7 +31,7 @@ index 22468d2f52..7fc5371e46 100644
  typedef struct CudaUploadContext {
      const AVClass *class;
      int device_idx;
-@@ -50,6 +56,8 @@ typedef struct CudaUploadContext {
+@@ -52,6 +58,8 @@ typedef struct CudaUploadContext {
      AVCUDADeviceContext *cuda;
      CUstream upload_stream;
      CUevent readers_done;
@@ -40,7 +40,7 @@ index 22468d2f52..7fc5371e46 100644
      uint8_t *staging;
      uint8_t *planes[4];
      int linesizes[4];
-@@ -114,7 +122,7 @@ static void pinned_uninit(AVFilterContext *ctx)
+@@ -116,7 +124,7 @@ static void pinned_uninit(AVFilterContext *ctx)
      s->packed = 0;
      s->module = NULL;
      if (s->staging)
@@ -49,7 +49,7 @@ index 22468d2f52..7fc5371e46 100644
      if (s->readers_done)
          CHECK_CU(cu->cuEventDestroy(s->readers_done));
      if (s->upload_stream)
-@@ -140,6 +148,12 @@ static int pinned_init(AVFilterContext *ctx, AVHWFramesContext *frames)
+@@ -142,6 +150,12 @@ static int pinned_init(AVFilterContext *ctx, AVHWFramesContext *frames)
      size = av_image_get_buffer_size(input->format, input->w, input->h, 1);
      if (size < 0)
          return size;
@@ -62,7 +62,7 @@ index 22468d2f52..7fc5371e46 100644
      ret = CHECK_CU(cu->cuCtxPushCurrent(s->cuda->cuda_ctx));
      if (ret < 0)
          return ret;
-@@ -147,7 +161,7 @@ static int pinned_init(AVFilterContext *ctx, AVHWFramesContext *frames)
+@@ -149,7 +163,7 @@ static int pinned_init(AVFilterContext *ctx, AVHWFramesContext *frames)
      if (ret >= 0)
          ret = CHECK_CU(cu->cuEventCreate(&s->readers_done, CU_EVENT_DISABLE_TIMING));
      if (ret >= 0)

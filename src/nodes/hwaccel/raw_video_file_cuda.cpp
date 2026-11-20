@@ -2,6 +2,7 @@
 #include "../../frame_color_tags.hpp"
 #include "CudaPinnedUploader.hpp"
 #include "device_memory_wait.hpp"
+#include "mxl_flow_reader.hpp"
 
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -25,6 +26,11 @@ extern "C" {
 // on one thread where that chain has four. Nothing is kept between passes: every picture shown
 // was read from the file and transferred for that showing.
 //
+// `pixel_format` v210 is packed 10-bit 4:2:2: the device takes the packed picture and unpacks it
+// into `storage` there. Its pictures also come from a live MXL flow (`url` mxl://...), each grain
+// copied once out of the flow's ring into that same memory; see mxl_flow_reader.hpp for what a
+// stalled, lapping or restarted writer does.
+//
 // `resident` keeps a looped file's pictures in that memory instead: each is read when it is
 // first shown and only transferred after that, and the file is read again once it has changed.
 // The memory is the size of the file and cannot be swapped out.
@@ -33,7 +39,9 @@ class RawVideoFileCuda: public NodeSingleOutput<av::VideoFrame>, public ReportsF
                         public IReturnsObjects {
 protected:
     std::string path_;
-    AVPixelFormat sw_format_ = AV_PIX_FMT_NONE;
+    AVPixelFormat sw_format_ = AV_PIX_FMT_NONE;   // of the frames: v210 is unpacked into it
+    bool v210_ = false;
+    int field_flags_ = 0;   // AV_FRAME_FLAG_INTERLACED and the field order, for woven fields
     int width_ = 0;
     int height_ = 0;
     av::Rational frame_rate_;
@@ -49,6 +57,7 @@ protected:
 
     int fd_ = -1;
     std::unique_ptr<RawFrameIndex> index_;
+    std::unique_ptr<MxlFlowReader> flow_;   // the pictures' source instead of the file
     std::unique_ptr<CudaPinnedUploader> uploader_;
     uint64_t next_ = 0;   // pictures emitted since start
     std::vector<bool> held_;   // resident: the pictures already in the block
@@ -92,39 +101,58 @@ public:
 
     void init(EdgeManager &edges, const Parameters &params) override {
         NodeSingleOutput::init(edges, params);
+        const auto makeUploader = [&](size_t pictures) {
+            uploader_ = std::make_unique<CudaPinnedUploader>(hwaccel_, sw_format_, width_, height_, write_combined_,
+                                                             pictures, pool_frames_, v210_, field_flags_ != 0);
+        };
+        if (isMxlUrl(path_)) {
+            flow_ = std::make_unique<MxlFlowReader>(path_, width_, height_);
+            // Timestamps count the flow's grains, at its own rate whatever `framerate` says.
+            frame_rate_ = flow_->frameRate();
+            time_base_ = av::Rational(frame_rate_.getDenominator(), frame_rate_.getNumerator());
+            return makeUploader(1);
+        }
         fd_ = open(path_.c_str(), O_RDONLY | O_CLOEXEC);
         if (fd_ < 0) throw Error("raw_video_file_cuda: cannot open " + path_ + ": " + std::strerror(errno));
         const struct stat st = fileStatus();
         modified_ = st.st_mtim;
         try {
-            index_ = std::make_unique<RawFrameIndex>(sw_format_, width_, height_, frame_rate_.getValue(), st.st_size);
+            index_ = std::make_unique<RawFrameIndex>(v210_ ? AV_PIX_FMT_GRAY8 : sw_format_, v210_ ? v210Stride(width_) : width_,
+                                                     height_, frame_rate_.getValue(), st.st_size);
         } catch (const std::invalid_argument &e) {
             throw Error("raw_video_file_cuda: " + path_ + ": " + e.what());
         }
         if (st.st_size % index_->frame_size)
             logstream << "raw_video_file_cuda: " << path_ << " ends with part of a picture, which is not shown";
         if (resident_) held_.assign(size_t(index_->frames), false);
-        uploader_ = std::make_unique<CudaPinnedUploader>(hwaccel_, sw_format_, width_, height_, write_combined_,
-                                                         resident_ ? held_.size() : 1, pool_frames_);
+        makeUploader(resident_ ? held_.size() : 1);
     }
 
     void process() override {
-        const int64_t offset = index_->offsetOf(next_, loop_);
-        if (offset < 0) {
-            if (send_eof_) this->emitEof();
-            markFinished();
-            return;
-        }
         using Clock = std::chrono::steady_clock;
         const auto microseconds = [](Clock::duration d) {
             return uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(d).count());
         };
-        const size_t slot = resident_ ? size_t(offset / index_->frame_size) : 0;
-        if (resident_ && slot == 0 && next_) forgetChangedFile();
-        const auto started = Clock::now();
-        if (!resident_ || !held_[slot]) {
-            readPicture(offset, slot);
-            if (resident_) held_[slot] = true;
+        size_t slot = 0;
+        int64_t pts = 0;
+        auto started = Clock::now();
+        if (flow_) {
+            // `started` becomes the start of the copy: the wait for a grain is not reading.
+            if (!flow_->read(uploader_->block(), pts, started)) return;   // no grain yet, or one to leave out
+        } else {
+            const int64_t offset = index_->offsetOf(next_, loop_);
+            if (offset < 0) {
+                if (send_eof_) this->emitEof();
+                markFinished();
+                return;
+            }
+            if (resident_) slot = size_t(offset / index_->frame_size);
+            if (resident_ && slot == 0 && next_) forgetChangedFile();
+            if (!resident_ || !held_[slot]) {
+                readPicture(offset, slot);
+                if (resident_) held_[slot] = true;
+            }
+            pts = index_->ptsOf(next_, loop_, loop_continuous_ts_);
         }
         const auto was_read = Clock::now();
         av::VideoFrame frame;
@@ -154,10 +182,10 @@ public:
 
         AVFrame *raw = frame.raw();
         frame.setTimeBase(time_base_);
-        raw->pts = index_->ptsOf(next_, loop_, loop_continuous_ts_);
+        raw->pts = pts;
         raw->duration = 1;
         raw->sample_aspect_ratio = {1, 1};
-        raw->flags |= AV_FRAME_FLAG_KEY;
+        raw->flags |= AV_FRAME_FLAG_KEY | field_flags_;
         color_.apply(raw);
         frame.setComplete(true);
         ++next_;
@@ -180,12 +208,14 @@ public:
     Parameters getObject(const std::string key) override {
         if (key != "stats") throw Error("raw_video_file_cuda: unknown object " + key);
         const uint64_t frames = frames_.load();
-        return {{"frames", frames}, {"passes", index_ ? frames / uint64_t(index_->frames) : 0},
+        Parameters stats = {{"frames", frames}, {"passes", index_ ? frames / uint64_t(index_->frames) : 0},
                 {"file_reads", file_reads_.load()}, {"frames_allocated", uploader_ ? uploader_->framesAllocated() : 0},
                 {"read_us", read_us_.load()}, {"upload_us", upload_us_.load()},
                 // Device-frame shortages: how often a picture waited for one, whether one waits
                 // now (the source repeats its last picture), and the longest wait.
                 {"frame_waits", frame_waits_.load()}, {"waiting", waiting_.load()}, {"longest_wait_ms", longest_wait_ms_.load()}};
+        if (flow_) stats.update(flow_->stats());
+        return stats;
     }
 
     ~RawVideoFileCuda() {
@@ -201,12 +231,23 @@ public:
         auto r = std::make_shared<RawVideoFileCuda>(make_unique<EdgeSink<av::VideoFrame>>(dst));
         r->path_ = params["url"].get<std::string>();
         const std::string format = params["pixel_format"].get<std::string>();
-        r->sw_format_ = av_get_pix_fmt(format.c_str());
-        if (r->sw_format_ != AV_PIX_FMT_NV12 && r->sw_format_ != AV_PIX_FMT_P010LE)
-            throw Error("raw_video_file_cuda: pixel_format must be nv12 or p010le, not " + format);
+        r->v210_ = format == "v210";
+        const std::string storage = r->v210_ ? params.value("storage", "p210le") : format;
+        r->sw_format_ = av_get_pix_fmt(storage.c_str());
+        if (r->sw_format_ != AV_PIX_FMT_NV12 && r->sw_format_ != AV_PIX_FMT_P010LE &&
+            !(r->v210_ && r->sw_format_ == AV_PIX_FMT_P210LE))
+            throw Error("raw_video_file_cuda: pixel_format must be nv12, p010le or v210 (storage p210le, p010le or nv12), not " +
+                        format + (r->v210_ ? " to " + storage : ""));
+        if (isMxlUrl(r->path_) && !r->v210_)
+            throw Error("raw_video_file_cuda: an MXL flow is v210; pixel_format must say so");
+        const std::string fields = params.value("field_order", "progressive");
+        if (fields != "progressive" && fields != "tff" && fields != "bff")
+            throw Error("raw_video_file_cuda: field_order must be progressive, tff or bff, not " + fields);
+        if (fields != "progressive")
+            r->field_flags_ = AV_FRAME_FLAG_INTERLACED | (fields == "tff" ? AV_FRAME_FLAG_TOP_FIELD_FIRST : 0);
         const std::string size = params["video_size"].get<std::string>();
-        if (av_parse_video_size(&r->width_, &r->height_, size.c_str()) < 0)
-            throw Error("raw_video_file_cuda: video_size must be WIDTHxHEIGHT, not " + size);
+        if (av_parse_video_size(&r->width_, &r->height_, size.c_str()) < 0 || (r->v210_ && r->width_ % 2))
+            throw Error("raw_video_file_cuda: video_size must be WIDTHxHEIGHT (an even width for v210), not " + size);
         r->frame_rate_ = parseRatio(params["framerate"].get<std::string>());
         if (r->frame_rate_.getNumerator() <= 0 || r->frame_rate_.getDenominator() <= 0)
             throw Error("raw_video_file_cuda: framerate must be positive");

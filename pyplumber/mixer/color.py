@@ -114,7 +114,9 @@ def default_codec(pixel_format):
 
 
 def rendition_format(canvas_format, codec, color, profile=""):
-    """Keep HEVC's canvas depth unless its SDR output explicitly requests Main8."""
+    """Keep HEVC's canvas depth unless its SDR output explicitly requests Main8. v210 is 10-bit 4:2:2."""
+    if codec == "v210":
+        return "p210le"
     ten_bit = Color.parse(color).transfer != "sdr" or (
         canvas_format in TEN_BIT_FORMATS and "hevc" in codec and profile != "main")
     return "p010le" if ten_bit else "nv12"
@@ -122,7 +124,7 @@ def rendition_format(canvas_format, codec, color, profile=""):
 
 def rendition_color(canvas, codec, requested=None, tonemap=""):
     canvas = Color.parse(canvas)
-    if codec not in ("h264_nvenc", "hevc_nvenc"):
+    if codec not in ("h264_nvenc", "hevc_nvenc", "v210"):
         raise ValueError(f"unsupported mixer output codec {codec!r}")
     color = Color.parse(requested) if requested is not None else (Color() if tonemap or codec == "h264_nvenc" else canvas)
     if codec == "h264_nvenc" and color.transfer != "sdr":

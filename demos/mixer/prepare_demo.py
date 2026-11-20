@@ -19,6 +19,7 @@ import random
 import shutil
 import subprocess
 import tempfile
+import uuid
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
@@ -193,6 +194,10 @@ def per_source(spec, name, index, choices):
     return values[index % len(values)] if values else None
 
 
+# The MXL domain the demo's writers (mxl_writers.py) publish in and the mixer reads from: both run
+# in one container (setup_runtime.py), whose /dev/shm must hold every flow's ring (compose.yaml).
+MXL_DOMAIN = "/dev/shm/mxl"
+
 # NVENC codes frames only: FFmpeg's h264_nvenc and hevc_nvenc set no field or MBAFF mode, and no
 # bitstream filter turns a progressive stream into a field-coded one.
 INTERLACED_SAMPLE = ("interlaced inputs cannot be generated here: supply one as a file input with "
@@ -276,15 +281,15 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
                 if color == "hlg" and codec != "hevc":
                     raise ValueError(f"{name}: codec must be h264 or hevc; HLG requires hevc")
                 gop = per_source(spec, "gop", index, tuple(GOP_SHAPES)) or "low_delay"
-                if any(key in spec for key in ("codec", "codecs", "gop", "gops")) and (raw or chroma == "422"):
-                    raise ValueError(f"{name}: codec and gop apply only to encoded 4:2:0 inputs")
-                encoder = f"{codec}_nvenc"
+                if any(key in spec for key in ("codec", "codecs", "gop", "gops", "mxl")) and (raw or chroma == "422"):
+                    raise ValueError(f"{name}: codec and gop apply only to encoded 4:2:0 inputs, as does mxl")
+                encoder = "v210" if spec.get("mxl") else f"{codec}_nvenc"
                 storage = raw or ("v210" if chroma == "422" else encoder)
                 # Version cache names when changing generation semantics. Every
                 # source has its own file, with its id burned in (id_overlay), so
                 # no two inputs share decode input or page cache; the name holds
                 # all that shapes the content, so re-applying reuses the file.
-                extension = raw or ("v210" if chroma == "422" else "mp4")
+                extension = raw or ("v210" if storage == "v210" else "mp4")
                 version = 5 if extension == "mp4" else 4   # low-DPB encodes; raw pixels are unchanged
                 shape = f"_{input_kbps(index)}k" + ("" if gop == "low_delay" else f"_{gop}") if extension == "mp4" else ""
                 path = (media_dir / "assets" / f"synthetic_v{version}_{size}_{fps_name}_{seconds}s" /
@@ -304,7 +309,13 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
                 jobs[path] = writer
                 source.update(kind=raw or ("v210" if chroma == "422" else "video"),
                               path=runtime_path(path), width=asset_width, height=asset_height)
-                if source["kind"] == "video":
+                if spec.get("mxl"):
+                    # The mixer reads this source as an MXL flow. A writer outside the mixer
+                    # (mxl_writers.py) loops the source's own clip, packed v210 pictures rendered
+                    # above, into that flow; "clip" is the writer's key, which the mixer ignores.
+                    source.update(kind="mxl", url=MXL_DOMAIN, flow=str(uuid.uuid5(uuid.NAMESPACE_URL, source["id"])),
+                                  clip=source.pop("path"))
+                elif source["kind"] == "video":
                     # These clips are ours: 8-bit SDR or 10-bit HLG, 4:2:0, which NVDEC hands out as
                     # NV12 or P010. Saying so lets a source that matches the canvas skip its colour filter.
                     source["decoded_format"] = "nv12" if color == "sdr" else "p010le"
@@ -358,6 +369,14 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
         wipes.append({"id": pattern, "name": name, "path": runtime_path(wipe), "duration_seconds": 2})
     scene_list = scenes(sources, width, height, scene_count, recipe["layouts"], seed,
                         alpha_background=recipe.get("alpha_background"))
+    # The MXL sources also get one scene of their own, on program at start, so they are easy to find.
+    mxl = [s["id"] for s in sources if s.get("kind") == "mxl"]
+    if mxl:
+        side = math.ceil(math.sqrt(len(mxl)))
+        w, h = width // side // 2 * 2, height // side // 2 * 2
+        scene_list.insert(0, {"id": "mxl", "items": [
+            {"source": sid, "dst": {"x": i % side * w, "y": i // side * h, "w": w, "h": h}, "fit": "contain"}
+            for i, sid in enumerate(mxl)]})
     # Keys are added after scene generation: ordinary sources that scenes could
     # use, but generated layouts should not scatter graphics into grids.
     pages = recipe.get("dsk", [])

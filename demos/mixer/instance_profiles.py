@@ -89,7 +89,7 @@ INSTANCE_PROFILES = {
         # Main10 surfaces use more VRAM: bound their count even when NVDEC has throughput left.
         "nvdec_hdr_decodes": {25: 53, 30: 53, 50: 32, 60: 27},
         "browser_windows": 40,
-        "raw_upload_units": {25: 47, 30: 47, 50: 22, 60: 19},   # NV12 = 1, P010 = 2
+        "raw_upload_units": {25: 47, 30: 47, 50: 22, 60: 19},   # NV12 = 1, P010 = 2, MXL = 1
         # Beside 44 decodes and the browsers at 60 fps (88 inputs): NVDEC 84%, GPU 75%. Eight ran
         # NVDEC at 86% and the GPU at 81%, 98% while cutting.
         "hlg_v210": 4,
@@ -171,3 +171,18 @@ INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY]["canvas"] = {
     # the budget.
     "decoder_park_limit": 12,
 }
+
+
+def mxl_sources(compute_capability):
+    """How many of the raw upload units may be MXL inputs on a GPU of this compute capability
+    (nvidia-smi's compute_cap, such as "8.9"), cloud and desktop alike, in two classes for now.
+    Ada Lovelace and newer (8.9 up: L4, L40S, RTX 40 and 50, Hopper, Blackwell) take the big setup,
+    measured on the L4 beside the full 192-source show at 1080p30 with the demo's CPU writers on the
+    same host (2026-11-20); Turing and Ampere (T4, A10, RTX 20 and 30), or an unknown GPU, the small
+    one, not measured. 50/60 fps halve it (not measured)."""
+    try:
+        big = float(compute_capability) >= 8.9
+    except (TypeError, ValueError):
+        big = False
+    n = 16 if big else 8
+    return {25: n, 30: n, 50: n // 2, 60: n // 2}

@@ -16,6 +16,14 @@ HAVE_NVCC = 0
 HAVE_NVJPEG ?= 0
 # Shareable CUDA VMM pools require the CUDA Driver API SDK headers.
 HAVE_CUDA_VMM_IPC ?= 0
+# raw_video_file_cuda reads live MXL flows with libmxl (https://github.com/dmf-mxl/mxl), whose
+# grains are v210: it also needs HAVE_CUDA and HAVE_NVCC.
+HAVE_MXL ?= 0
+ifeq ($(HAVE_MXL),1)
+ifneq ($(HAVE_CUDA)$(HAVE_NVCC),11)
+$(error HAVE_MXL=1 needs HAVE_CUDA=1 HAVE_NVCC=1)
+endif
+endif
 # Build the retained drawing, tracking and reframing nodes. Model inference and
 # its TensorRT flags live in out-of-tree nodes (see EXTRA_NODES_MK below).
 # HAVE_TENSORRT and TENSORRT_ROOT are not read here; those fragments read them.
@@ -203,6 +211,14 @@ $(foreach kernel,draw_bbox draw_text draw_keypoints draw_trail ml_debug,objs/$(S
 endif
 
 ifeq ($(HAVE_CUDA)$(HAVE_NVCC),11)
+NODES_SRC += $(SRCDIR)/nodes/hwaccel/cuda_to_v210.cpp
+$(eval $(call ptx_kernel,$(SRCDIR)/nodes/hwaccel/v210_pack.cu,avpl_v210_pack_ptx,objs/src/nodes/hwaccel/cuda_to_v210.o objs/src/nodes/hwaccel/raw_video_file_cuda.o))
+# CudaPinnedUploader's v210 unpack, which raw_video_file_cuda offers as pixel_format v210.
+override CXXFLAGS += -DHAVE_V210_KERNELS=1
+ifeq ($(HAVE_MXL),1)
+override CXXFLAGS += -DHAVE_MXL=1
+override LIBS_FLAGS += -lmxl
+endif
 override CXXFLAGS += -DHAVE_CUDA_RECT_SCALE=1
 $(eval $(call ptx_kernel,$(SRCDIR)/nodes/hwaccel/cuda_rect_scale.cu,avpl_rect_scale_ptx,objs/src/nodes/hwaccel/cuda_rect_draw.o))
 objs/$(SRCDIR)/nodes/hwaccel/cuda_rect_scale.ptx: $(SRCDIR)/nodes/hwaccel/cuda_rect_table.h $(SRCDIR)/nodes/hwaccel/graphic_color.h

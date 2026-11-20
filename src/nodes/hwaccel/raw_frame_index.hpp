@@ -10,6 +10,11 @@ extern "C" {
 #include <libavutil/rational.h>
 }
 
+/// Bytes of a v210 row at the standard stride: 48 pixels to 128 bytes, the last group padded.
+/// libavutil has no pixel format for v210, so nothing there lays it out; a picture of it is
+/// described here as GRAY8 rows of this many bytes.
+inline int v210Stride(int width) { return (width + 47) / 48 * 128; }
+
 /// One picture as contiguous planes, each row exactly its samples.
 struct RawPictureLayout {
     int64_t frame_size = 0;
