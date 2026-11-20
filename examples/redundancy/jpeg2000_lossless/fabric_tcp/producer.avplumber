@@ -1,0 +1,20 @@
+# GPU-only lossless 4:4:4 JPEG 2000 over fabric TCP.
+# Requires a build with HAVE_CUDA=1 HAVE_NVJPEG2K=1.
+queue.plan_capacity * 4
+queue.plan_capacity v_packet 16
+queue.plan_capacity v_dec_cuda 4
+queue.plan_capacity v_rt 1
+queue.plan_capacity v_444 4
+queue.plan_capacity v_j2k 4
+
+hwaccel.init { "name": "@gpu", "type": "cuda" }
+
+node.add { "type": "input", "url": "/home/fedora/nba.mp4", "dst": "in_mux0", "group": "tx", "name": "NbaInput", "auto_restart": "panic", "initial_timeout": 20, "timeout": 10 }
+node.add { "type": "demux", "src": "in_mux0", "routing": { "?v:0": "v_packet" }, "group": "tx", "name": "Demux", "auto_restart": "panic", "wait_for_keyframe": false }
+node.add { "type": "dec_video", "src": "v_packet", "dst": "v_dec_cuda", "group": "tx", "name": "NbaNVDEC", "auto_restart": "panic", "pixel_format": "?cuda", "hwaccel": "@gpu", "codec_map": { "h264": "h264_cuvid" }, "hwaccel_only_for_codecs": ["h264"] }
+node.add { "type": "realtime<av::VideoFrame>", "src": "v_dec_cuda", "dst": "v_rt", "group": "tx", "name": "FrameRealtime", "auto_restart": "panic", "speed": 1.0, "set_pts": false, "negative_time_tolerance": 0.007, "jitter_margin": 0, "discontinuity_threshold": 3 }
+node.add { "type": "filter_video", "graph": "scale_cuda=w=1280:h=720:format=yuv444p", "src": "v_rt", "dst": "v_444", "group": "tx", "name": "ToYuv444", "auto_restart": "panic", "hwaccel": "@gpu", "dst_width": 1280, "dst_height": 720, "dst_pixel_format": "cuda" }
+node.add { "type": "nvjpeg2k_enc", "src": "v_444", "dst": "v_j2k", "group": "tx", "name": "LosslessJpeg2000", "auto_restart": "panic", "lossless": true, "stream_type": "j2k", "num_resolutions": 6, "code_block_w": 64, "code_block_h": 64 }
+node.add { "type": "fabric_sink", "src": "v_j2k", "group": "tx", "name": "Jpeg2000FabricOut", "provider": "tcp", "remote_host": "127.0.0.1", "remote_port": "5592", "stream_id": "main", "replica_id": 1, "generation": 1, "media_type": "video", "codec": "jpeg2000", "width": 1280, "height": 720, "pixel_format": "cuda", "real_pixel_format": "yuv444p", "require_keyframes": true, "max_payload_bytes": 33554432, "queue_depth": 64, "completion_batch": 16, "backpressure": "block", "header_crc": true, "payload_crc": false }
+
+group.start tx

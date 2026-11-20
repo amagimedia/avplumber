@@ -1,0 +1,16 @@
+# GPU-only lossless intra HEVC consumer: receive, decode with NVDEC, drain frames.
+queue.plan_capacity * 4
+queue.plan_capacity v_fabric 8
+queue.plan_capacity v_encoded 8
+queue.plan_capacity v_dec_cuda 4
+
+hwaccel.init { "name": "@gpu", "type": "cuda" }
+
+node.add { "type": "fabric_source", "dst": "v_fabric", "group": "rx", "name": "HevcFabricIn", "provider": "tcp", "bind_port": "5590", "stream_id": "main", "media_type": "video", "codec": "hevc_intra", "width": 1280, "height": 720, "pixel_format": "cuda", "real_pixel_format": "yuv444p", "time_base": "1/30000", "frame_rate": "30000/1001", "max_payload_bytes": 16777216, "queue_depth": 64 }
+node.add { "type": "fabric_unpack", "src": "v_fabric", "dst": "v_encoded", "group": "rx", "name": "UnpackHevcFabric", "auto_restart": "panic" }
+node.add { "type": "dec_video", "src": "v_encoded", "dst": "v_dec_cuda", "group": "rx", "name": "HEVC_CUVID_Decode", "auto_restart": "panic", "pixel_format": "?cuda", "hwaccel": "@gpu", "codec_map": { "hevc": "hevc_cuvid" }, "hwaccel_only_for_codecs": ["hevc"] }
+node.add { "type": "null_sink<av::VideoFrame>", "src": "v_dec_cuda", "group": "rx", "name": "FakeSink", "auto_restart": "panic" }
+
+stats.subscribe { "url": "", "name": "hevc_lossless_fabric_tcp_consumer_decode_null", "interval": 1, "streams": { "video": [ { "q_pre_dec": "v_encoded", "q_post_dec": "v_dec_cuda", "decoder": "HEVC_CUVID_Decode" } ] } }
+
+group.start rx

@@ -121,7 +121,7 @@ Required parameters:
 | `replica_id` | uint32 | Producer instance identity |
 | `generation` | uint64 | Controller epoch; static for MVP |
 | `media_type` | string | Initially `video` |
-| `codec` | string | Initially `h264_intra` |
+| `codec` | string | `h264_intra`, `hevc_intra`, `jpeg`/`jpeg444`, `jpeg2000`/`j2k` |
 | `width` | uint32 | Encoded video width; may be discovered from upstream metadata |
 | `height` | uint32 | Encoded video height; may be discovered from upstream metadata |
 | `pixel_format` | string | Source/encoded frame pixel format, for example `cuda` or `nv12` |

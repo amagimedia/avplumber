@@ -109,6 +109,7 @@ The build is driven by Makefile variables. Set them on the `make` command line, 
     -   Release sets compiler flags to more optimization.
 -   HAVE_CUDA=1: enable CUDA support and CUDA-based nodes. Uses dynlink loader, so does not require anything during compilation and lack of CUDA libraries in runtime is non-fatal (nodes not using CUDA will work normally)
 -   HAVE_NVJPEG=1: enable `nvjpeg_enc`. Requires `HAVE_CUDA=1` plus nvJPEG and CUDA runtime development libraries. Disabled by default.
+-   HAVE_NVJPEG2K=1: enable `nvjpeg2k_enc` and `nvjpeg2k_dec`. Requires `HAVE_CUDA=1` plus nvJPEG2000 and CUDA runtime development libraries. Disabled by default.
 -   HAVE_GL=1: enable OpenGL & EGL dependency, required by `drm_prime_to_cuda`, `cuda_to_egl_image`
 -   HAVE_VAAPI=1: enable VAAPI paths (and implicitly OpenGL/EGL). Links `-lva -lGL -lEGL -lGLESv2`. Requires `libva-dev` and GL/EGL development packages.
 -   HAVE_DRM=1: enable DMA-BUF IPC source and DRM-dependent paths. Requires `libdrm-dev`.
@@ -122,6 +123,7 @@ Feature gates:
 -   `cuda_to_egl_image` builds only when `HAVE_CUDA=1 HAVE_GL=1 HAVE_NVCC=1`.
 -   `drm_prime_to_cuda` builds only when `HAVE_CUDA=1 HAVE_GL=1 HAVE_DRM=1`.
 -   `nvjpeg_enc` builds only when `HAVE_CUDA=1 HAVE_NVJPEG=1`.
+-   `nvjpeg2k_enc` and `nvjpeg2k_dec` build only when `HAVE_CUDA=1 HAVE_NVJPEG2K=1`.
 -   `luma_diff` and `hog_diff` build only when `HAVE_CUDA=1 HAVE_NVCC=1`.
 -   `cuda_camera_motion` builds only when `HAVE_CUDA=1 HAVE_NVOF=1` and the dense NVOF headers are available; `HAVE_NVCC=1` additionally enables its GPU IRLS backend.
 -   `HAVE_GL` is auto-enabled when `HAVE_VAAPI=1`

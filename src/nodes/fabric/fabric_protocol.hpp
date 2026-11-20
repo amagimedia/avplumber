@@ -17,6 +17,8 @@ inline constexpr uint16_t MSG_FRAME_STATUS = 2;
 inline constexpr uint32_t FLAG_KEYFRAME = 1u << 0;
 inline constexpr uint32_t CODEC_H264_INTRA = 1;
 inline constexpr uint32_t CODEC_JPEG = 2;
+inline constexpr uint32_t CODEC_HEVC_INTRA = 3;
+inline constexpr uint32_t CODEC_JPEG2000 = 4;
 
 struct __attribute__((packed)) WireHeader {
     uint32_t magic;
@@ -64,15 +66,35 @@ inline std::string hexPrefix(const uint8_t *data, size_t size, size_t max_bytes 
     return os.str();
 }
 
+// jpeg444/nvjpeg444 are labels for a JPEG bitstream whose SOF carries 4:4:4 sampling.
+// The wire codec stays CODEC_JPEG because the JPEG headers describe the stream itself.
+inline bool isJpegCodecName(const std::string &codec) {
+    return codec == "jpeg" || codec == "mjpeg" || codec == "nvjpeg" ||
+           codec == "jpeg444" || codec == "nvjpeg444" ||
+           codec == "ljpeg" || codec == "jpeg_lossless";
+}
+
+inline bool isHevcCodecName(const std::string &codec) {
+    return codec == "hevc_intra" || codec == "hevc_lossless" || codec == "h265_intra";
+}
+
+inline bool isJpeg2000CodecName(const std::string &codec) {
+    return codec == "jpeg2000" || codec == "j2k" || codec == "nvjpeg2k";
+}
+
 inline AVCodecID codecIdFromName(const std::string &codec) {
     if (codec == "h264_intra") return AV_CODEC_ID_H264;
-    if (codec == "jpeg" || codec == "mjpeg" || codec == "nvjpeg") return AV_CODEC_ID_MJPEG;
+    if (isHevcCodecName(codec)) return AV_CODEC_ID_HEVC;
+    if (isJpegCodecName(codec)) return AV_CODEC_ID_MJPEG;
+    if (isJpeg2000CodecName(codec)) return AV_CODEC_ID_JPEG2000;
     throw Error("fabric unsupported codec: " + codec);
 }
 
 inline AVCodecID codecIdFromWire(uint32_t codec) {
     if (codec == CODEC_H264_INTRA) return AV_CODEC_ID_H264;
+    if (codec == CODEC_HEVC_INTRA) return AV_CODEC_ID_HEVC;
     if (codec == CODEC_JPEG) return AV_CODEC_ID_MJPEG;
+    if (codec == CODEC_JPEG2000) return AV_CODEC_ID_JPEG2000;
     return AV_CODEC_ID_NONE;
 }
 

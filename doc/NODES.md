@@ -718,6 +718,33 @@ Runtime control (via `node.object.set` / `node.object.get`):
 -   `node.object.get <name> pending` — bool, `true` if a trigger has been
     requested but not yet applied to a frame.
 
+### `nvjpeg2k_enc`
+
+GPU-only JPEG 2000 encoder. Requires `HAVE_CUDA=1 HAVE_NVJPEG2K=1`.
+
+1 input: `av::VideoFrame` (CUDA `yuv444p`, `yuv444p10le`, `yuv444p12le` or `yuv444p16le`),
+1 output: `av::Packet` (`AV_CODEC_ID_JPEG2000`).
+
+-   `lossless` (bool, default `true`) - reversible 5/3 wavelet. When `false`, the
+    encoder uses the irreversible 9/7 wavelet and `psnr`.
+-   `psnr` (float, default `50`) - target PSNR in dB, used only when `lossless` is `false`.
+-   `stream_type` (`j2k` or `jp2`, default `j2k`) - raw codestream or JP2 container.
+-   `num_resolutions` (int, default `6`) - clamped to what the image dimensions allow.
+-   `code_block_w` / `code_block_h` (int, default `64`) - JPEG 2000 code-block size.
+-   `real_pixel_format` (string) - optional override when the upstream metadata does not
+    describe the planar 4:4:4 CUDA frame.
+
+### `nvjpeg2k_dec`
+
+GPU-only JPEG 2000 decoder. Requires `HAVE_CUDA=1 HAVE_NVJPEG2K=1`.
+
+1 input: `av::Packet`, 1 output: `av::VideoFrame` (CUDA, planar 4:4:4).
+
+-   `hwaccel` (string) - mandatory, name of a `hwaccel.init` CUDA device.
+-   `width` / `height` (int) - optional before the first frame arrives.
+-   `real_pixel_format` (string, default from upstream) - `yuv444p`, `yuv444p10le`,
+    `yuv444p12le` or `yuv444p16le`. Updated from the bitstream precision after the first frame.
+
 ### `enc_video`, `enc_audio`
 
 Encodes video or audio frames.

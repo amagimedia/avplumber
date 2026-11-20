@@ -33,6 +33,8 @@ constexpr uint16_t AVPF_MSG_FRAME_STATUS = 2;
 constexpr uint32_t AVPF_MEDIA_VIDEO = 1;
 constexpr uint32_t AVPF_CODEC_H264_INTRA = 1;
 constexpr uint32_t AVPF_CODEC_JPEG = 2;
+constexpr uint32_t AVPF_CODEC_HEVC_INTRA = 3;
+constexpr uint32_t AVPF_CODEC_JPEG2000 = 4;
 constexpr uint32_t AVPF_PACKET_FORMAT_PASSTHROUGH = 1;
 constexpr uint32_t AVPF_FLAG_KEYFRAME = 1u << 0;
 constexpr uint32_t AVPF_FLAG_EOF = 1u << 1;
@@ -77,7 +79,9 @@ static std::string hexPrefix(const uint8_t *data, size_t size, size_t max_bytes 
 
 uint32_t codecId(const std::string &codec) {
     if (codec == "h264_intra") return AVPF_CODEC_H264_INTRA;
-    if (codec == "jpeg" || codec == "mjpeg" || codec == "nvjpeg") return AVPF_CODEC_JPEG;
+    if (avp_fabric::isHevcCodecName(codec)) return AVPF_CODEC_HEVC_INTRA;
+    if (avp_fabric::isJpegCodecName(codec)) return AVPF_CODEC_JPEG;
+    if (avp_fabric::isJpeg2000CodecName(codec)) return AVPF_CODEC_JPEG2000;
     throw Error("fabric_sink unsupported codec: " + codec);
 }
 

@@ -14,6 +14,8 @@ HAVE_NVCC = 0
 # The NV12 encoder API used by nvjpeg_enc is unavailable in older CUDA
 # toolkits. Enable the node independently from the other CUDA nodes.
 HAVE_NVJPEG ?= 0
+# nvJPEG2000 is a separate CUDA library (headers + libnvjpeg2k).
+HAVE_NVJPEG2K ?= 0
 # Shareable CUDA VMM pools require the CUDA Driver API SDK headers.
 HAVE_CUDA_VMM_IPC ?= 0
 # Build the retained drawing, tracking and reframing nodes. Model inference and
@@ -246,6 +248,15 @@ override LIBS_FLAGS += -lnvjpeg -lcudart
 endif
 else
 NODES_SRC := $(filter-out $(SRCDIR)/nodes/nvjpeg_enc.cpp,$(NODES_SRC))
+endif
+
+ifeq ($(HAVE_CUDA)$(HAVE_NVJPEG2K),11)
+ifneq (,$(wildcard $(SRCDIR)/nodes/nvjpeg2k_enc.cpp))
+override CXXFLAGS += -DHAVE_NVJPEG2K=1
+override LIBS_FLAGS += -lnvjpeg2k -lcudart
+endif
+else
+NODES_SRC := $(filter-out $(SRCDIR)/nodes/nvjpeg2k_enc.cpp $(SRCDIR)/nodes/nvjpeg2k_dec.cpp,$(NODES_SRC))
 endif
 
 # NvOFFRUC (Frame Rate Up-Conversion) node, built only when headers are present
