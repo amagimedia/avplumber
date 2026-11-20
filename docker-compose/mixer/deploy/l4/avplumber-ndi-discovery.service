@@ -1,0 +1,13 @@
+[Unit]
+Description=Avahi discovery socket for the AVP NDI container
+Requires=avahi-daemon.service
+After=avahi-daemon.service
+
+[Service]
+RuntimeDirectory=avplumber-ndi-discovery
+RuntimeDirectoryMode=0700
+ExecStart=/usr/bin/xdg-dbus-proxy unix:path=/run/dbus/system_bus_socket /run/avplumber-ndi-discovery/system_bus_socket --filter --talk=org.freedesktop.Avahi
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

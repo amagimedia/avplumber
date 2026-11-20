@@ -22,6 +22,13 @@ elif args[:3] == ["compute", "instances", "create"]:
     sys.exit(int(args[args.index("--zone") + 1] == os.environ.get("MOCK_FAIL_ZONE")))
 elif args[:2] == ["compute", "ssh"]:
     command = args[args.index("--command") + 1]
+    if "sudo bash docker-compose/mixer/deploy/l4/setup-ndi.sh" in command:
+        import tarfile
+        with tarfile.open(fileobj=sys.stdin.buffer, mode="r|gz") as archive:
+            assert {item.name for item in archive} == {
+                "deps/ffmpeg/install-ndi-sdk.sh", "docker-compose/mixer/deploy/l4/setup-ndi.sh",
+                "docker-compose/mixer/deploy/l4/avplumber-ndi-discovery.service"}
+        sys.exit(0)
     command = command.replace("/var/lib/avplumber-host/", str(root) + "/")
     command = command.replace("/proc/sys/kernel/random/boot_id", str(root / "boot_id"))
     result = subprocess.run(["bash", "-c", command])
@@ -48,7 +55,7 @@ class CreateHostTests(unittest.TestCase):
             (root / "boot_id").write_text("current-boot\n")
             (root / "ready-boot-id").write_text("old-boot\n" if stale_ready else "current-boot\n")
             env = os.environ.copy()
-            for key in ("HOST_SETUP_MODE", "IMAGE_NAME", "IMAGE_FAMILY", "IMAGE_PROJECT",
+            for key in ("ENABLE_NDI", "HOST_SETUP_MODE", "IMAGE_NAME", "IMAGE_FAMILY", "IMAGE_PROJECT",
                         "MACHINE_TYPE", "GPU", "DISK_GB", "NVIDIA_DRIVER_VERSION",
                         "DISABLE_MITIGATIONS", "DISABLE_AUTO_UPGRADES"):
                 env.pop(key, None)
@@ -96,6 +103,11 @@ class CreateHostTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(sum(args[:2] == ["compute", "ssh"] for args in calls), 2)
 
+    def test_ndi_setup_after_host_ready(self):
+        result, calls = self.run_creator(ENABLE_NDI="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("setup-ndi.sh", calls[-1][-1])
+
     def test_zone_failure_falls_back(self):
         result, calls = self.run_creator(MOCK_FAIL_ZONE="test-zone-a")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -109,7 +121,7 @@ class CreateHostTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
 
     def test_invalid_settings_fail_before_cloud_calls(self):
-        for overrides in ({"HOST_SETUP_MODE": "unexpected"}, {"DISABLE_MITIGATIONS": "yes"},
+        for overrides in ({"ENABLE_NDI": "yes"}, {"HOST_SETUP_MODE": "unexpected"}, {"DISABLE_MITIGATIONS": "yes"},
                           {"NVIDIA_DRIVER_VERSION": "580.178.04"},
                           {"HOST_SETUP_MODE": "install", "NVIDIA_DRIVER_VERSION": ""}):
             with self.subTest(overrides=overrides):

@@ -4,4 +4,9 @@ services:
       args:
         ENABLE_NDI: "1"
     volumes:
-      - /run/dbus/system_bus_socket:/run/dbus/system_bus_socket:ro
+      - type: bind
+        source: /run/avplumber-ndi-discovery
+        target: /run/dbus
+        read_only: true
+        bind:
+          create_host_path: false

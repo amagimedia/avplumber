@@ -199,7 +199,7 @@ RUN cd /tmp/ffmpeg \
     && if [ "${ENABLE_NDI}" = 1 ]; then \
            ndi=--enable-libndi_newtek; \
            export C_INCLUDE_PATH=/opt/ndi/6.4/include LIBRARY_PATH=/opt/ndi/6.4/lib; \
-       else ndi=; fi \
+       else ndi=--disable-libndi_newtek; fi \
     && ./configure \
         --prefix=/usr/local \
         --libdir=/usr/local/lib \
@@ -240,7 +240,7 @@ RUN cd /tmp/ffmpeg \
     done \
     && make install \
     && ldconfig \
-    && if [ "${WITH_MXL}" = 1 ]; then make TARGET_PATH="$PWD" fate-mxl-video-encdec; fi \
+    && if [ "${WITH_MXL}" = 1 ]; then make TARGET_PATH="$PWD" fate-mxl-video-encdec fate-mxl-audio-encdec fate-mxl-av-encdec; fi \
     && rm -rf /tmp/ffmpeg
 
 # Required mixer filters: color/storage conversion and transitions.
@@ -318,7 +318,8 @@ RUN git init --quiet /build \
 # sm_75 to sm_89 plus PTX, so the driver never JIT-compiles avplumber's own
 # kernels. NEURAL_NET and HAVE_TENSORRT follow WITH_TENSORRT; the Makefile
 # ignores TENSORRT_ROOT when they are off.
-RUN make -j"${BUILD_JOBS}" python_module \
+RUN set -e; for target in avplumber python_module; do \
+    make -j"${BUILD_JOBS}" "$target" \
         BUILD_TYPE=Release \
         HAVE_CUDA=1 \
         HAVE_DRM=1 \
@@ -332,7 +333,8 @@ RUN make -j"${BUILD_JOBS}" python_module \
         TENSORRT_ROOT=/opt/tensorrt \
         PKG_CONFIG_PATH=/usr/local/lib/pkgconfig \
         CXXFLAGS+=" ${HARDENING_FLAGS}" \
-        LFLAGS+=' -Wl,--disable-new-dtags'
+        LFLAGS+=' -Wl,--disable-new-dtags'; \
+    done
 
 RUN test -f /build/_avplumber"$(python3-config --extension-suffix)" \
     && ldd /build/_avplumber"$(python3-config --extension-suffix)" \
@@ -387,6 +389,7 @@ COPY --from=builder /usr/local/lib/libav*.so* /usr/local/lib/libsw*.so* /usr/loc
 COPY --from=builder /opt/tensorrt /opt/tensorrt
 COPY --from=builder /opt/mxl /opt/mxl
 COPY --from=builder /opt/ndi/6.4/lib /opt/ndi/6.4/lib
+COPY --from=builder /build/avplumber /usr/local/bin/
 COPY --from=builder /build/_avplumber*.so /build/
 COPY --from=builder /build/pyplumber /build/pyplumber
 COPY demos/mixer /build/demos/mixer
