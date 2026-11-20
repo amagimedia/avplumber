@@ -1,48 +1,73 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: avplumber patches <patches@local>
 Date: Mon, 16 Nov 2026 14:40:00 +0100
-Subject: [PATCH] avfilter/hwupload_cuda: guard pinned staging on nv-codec-headers >= 13.1
+Subject: [PATCH] avfilter/hwupload_cuda: take the host-pin calls from the
+ driver library
 
-CUDA 13.0 (driver 595.x) dropped cuMemHostAlloc/cuMemFreeHost from the driver
-API; 13.1 restored them. Compile the pinned-staging opt-in only when the
-headers provide the calls, and refuse the option otherwise. The recorder
-pipeline is GPU-native and never enables pinned upload, so the default path
-is unaffected.
+nv-codec-headers before 13.1 do not load cuMemHostAlloc/cuMemFreeHost into
+the CUDA function table, although every driver exports them. Pinned staging,
+and the v210 unpack that implies it, therefore only built against 13.1
+headers, which a driver with NVENC API 13.0 cannot use. Resolve the two calls
+from the driver library the table already holds, so one code path serves
+every header version.
 ---
+ libavfilter/vf_hwupload_cuda.c | 18 ++++++++++++++++--
+ 1 file changed, 16 insertions(+), 2 deletions(-)
+
 diff --git a/libavfilter/vf_hwupload_cuda.c b/libavfilter/vf_hwupload_cuda.c
-index 22468d2..36b7c0a 100644
+index 22468d2f52..7fc5371e46 100644
 --- a/libavfilter/vf_hwupload_cuda.c
 +++ b/libavfilter/vf_hwupload_cuda.c
-@@ -113,8 +113,12 @@ static void pinned_uninit(AVFilterContext *ctx)
-         CHECK_CU(cu->cuModuleUnload(s->module));
+@@ -39,6 +39,12 @@ enum {
+     CUDAUPLOAD_FMT_NB,
+ };
+ 
++/* nv-codec-headers before 13.1 do not load the page-locked host allocator.
++ * Every CUDA driver exports it, so take it from the driver library the
++ * function table already holds instead of depending on the header version. */
++typedef CUresult CUDAAPI HostAlloc(void **host, size_t size, unsigned int flags);
++typedef CUresult CUDAAPI HostFree(void *host);
++
+ typedef struct CudaUploadContext {
+     const AVClass *class;
+     int device_idx;
+@@ -50,6 +56,8 @@ typedef struct CudaUploadContext {
+     AVCUDADeviceContext *cuda;
+     CUstream upload_stream;
+     CUevent readers_done;
++    HostAlloc *host_alloc;
++    HostFree *host_free;
+     uint8_t *staging;
+     uint8_t *planes[4];
+     int linesizes[4];
+@@ -114,7 +122,7 @@ static void pinned_uninit(AVFilterContext *ctx)
      s->packed = 0;
      s->module = NULL;
-+#if defined(NVENCAPI_MAJOR_VERSION) && (NVENCAPI_MAJOR_VERSION > 13 \
-+    || (NVENCAPI_MAJOR_VERSION == 13 && NVENCAPI_MINOR_VERSION >= 1))
-+    /* CUDA 13.0 dropped the legacy host-pin driver APIs; 13.1 restored them. */
      if (s->staging)
-         CHECK_CU(cu->cuMemFreeHost(s->staging));
-+#endif
+-        CHECK_CU(cu->cuMemFreeHost(s->staging));
++        CHECK_CU(s->host_free(s->staging));
      if (s->readers_done)
          CHECK_CU(cu->cuEventDestroy(s->readers_done));
      if (s->upload_stream)
-@@ -146,8 +150,19 @@ static int pinned_init(AVFilterContext *ctx, AVHWFramesContext *frames)
-     ret = CHECK_CU(cu->cuStreamCreate(&s->upload_stream, CU_STREAM_NON_BLOCKING));
+@@ -140,6 +148,12 @@ static int pinned_init(AVFilterContext *ctx, AVHWFramesContext *frames)
+     size = av_image_get_buffer_size(input->format, input->w, input->h, 1);
+     if (size < 0)
+         return size;
++    s->host_alloc = (HostAlloc *)FFNV_SYM_FUNC(cu->lib, "cuMemHostAlloc");
++    s->host_free  = (HostFree *)FFNV_SYM_FUNC(cu->lib, "cuMemFreeHost");
++    if (!s->host_alloc || !s->host_free) {
++        av_log(ctx, AV_LOG_ERROR, "The CUDA driver exports no page-locked host allocator\n");
++        return AVERROR(ENOSYS);
++    }
+     ret = CHECK_CU(cu->cuCtxPushCurrent(s->cuda->cuda_ctx));
+     if (ret < 0)
+         return ret;
+@@ -147,7 +161,7 @@ static int pinned_init(AVFilterContext *ctx, AVHWFramesContext *frames)
      if (ret >= 0)
          ret = CHECK_CU(cu->cuEventCreate(&s->readers_done, CU_EVENT_DISABLE_TIMING));
-+#if defined(NVENCAPI_MAJOR_VERSION) && (NVENCAPI_MAJOR_VERSION > 13 \
-+    || (NVENCAPI_MAJOR_VERSION == 13 && NVENCAPI_MINOR_VERSION >= 1))
-+    /* CUDA 13.0 dropped the legacy host-pin driver APIs; 13.1 restored them.
-+     * The recorder pipeline is GPU-native and never enables pinned upload, so
-+     * refusing the option on older headers keeps the default path intact. */
      if (ret >= 0)
-         ret = CHECK_CU(cu->cuMemHostAlloc((void **)&s->staging, size, 0));
-+#else
-+    if (s->pinned) {
-+        av_log(ctx, AV_LOG_ERROR, "pinned staging needs nv-codec-headers >= 13.1\n");
-+        ret = AVERROR(ENOSYS);
-+    }
-+#endif
+-        ret = CHECK_CU(cu->cuMemHostAlloc((void **)&s->staging, size, 0));
++        ret = CHECK_CU(s->host_alloc((void **)&s->staging, size, 0));
  #if CONFIG_CUDA_NVCC || CONFIG_CUDA_LLVM
      if (ret >= 0 && s->v210_width) {
          extern const unsigned char ff_vf_hwupload_cuda_ptx_data[];

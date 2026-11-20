@@ -1,0 +1,110 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: AVPlumber contributors <avplumber@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 13:09:46 +0100
+Subject: [PATCH] avformat/mxl: respect the SDK reserved ring slot in tail
+ reads
+
+SDK v1.1.0 reserves the slot following headIndex for the writer. Start at the first readable grain when selecting the tail. Size the 50 Hz FATE ring for five readers-visible frames plus that reserved slot. Generate native yuv422p10le test video so transport checksums do not depend on the default scaling conversion. Reference values also match direct v210 encode and decode.
+---
+ libavformat/mxldec.c            |  6 ++++--
+ tests/fate/mxl.mak              | 12 +++++-------
+ tests/ref/fate/mxl-av-encdec    | 10 +++++-----
+ tests/ref/fate/mxl-video-encdec | 10 +++++-----
+ 4 files changed, 19 insertions(+), 19 deletions(-)
+
+diff --git a/libavformat/mxldec.c b/libavformat/mxldec.c
+index 681170bd6f..3c2911af82 100644
+--- a/libavformat/mxldec.c
++++ b/libavformat/mxldec.c
+@@ -1270,8 +1270,10 @@ static int read_video_packet(AVFormatContext *s, AVStream *st, AVPacket *pkt,
+                  stream_ctx->flow.video.mxl_grain_index);
+             break;
+         case GRAIN_INDEX_INIT_TAIL:
+-            stream_ctx->flow.video.mxl_grain_index = flow_info->runtime.headIndex -
+-                flow_info->config.discrete.grainCount + 1;
++            // SDK 1.1 reserves headIndex+1's ring slot for the writer.
++            stream_ctx->flow.video.mxl_grain_index =
++                flow_info->runtime.headIndex >= flow_info->config.discrete.grainCount
++                ? flow_info->runtime.headIndex - flow_info->config.discrete.grainCount + 2 : 0;
+             logv(s, "init video grain index = %"PRIu64", policy: tail index\n",
+                  stream_ctx->flow.video.mxl_grain_index);
+             break;
+diff --git a/tests/fate/mxl.mak b/tests/fate/mxl.mak
+index c7a23d68cc..af850bbb4e 100644
+--- a/tests/fate/mxl.mak
++++ b/tests/fate/mxl.mak
+@@ -14,12 +14,10 @@ fate-mxl-diag: libavformat/tests/mxl_diag$(EXESUF)
+ fate-mxl-diag: CMD = run libavformat/tests/mxl_diag$(EXESUF)
+ FATE-yes += $(if $(filter yes,$(CONFIG_MXL_DEMUXER)),fate-mxl-diag)
+
+-# Note: MXL_OPTIONS is defined explicitly (even though it matches the
+-# default MXL value) to make the test's dependency on this
+-# history_duration setting unambiguous and intentional.
+-
++# Five readable video frames at 50 Hz plus the SDK's reserved writer slot.
+ MXL_TMP_DIR := $(TARGET_PATH)/tests/data/tmp/mxl
+-MXL_OPTIONS := "{"\"urn:x-mxl:option:history_duration/v1.0\"":100000000}"
++MXL_OPTIONS := "{"\"urn:x-mxl:option:history_duration/v1.0\"":120000000}"
++MXL_TEST_VIDEO := testsrc2=size=1920x1080:rate=50,format=yuv422p10le
+ MXL_VIDEO_FLOW_ID := 717f834b-4224-4c9b-8a64-ecb7726803b8
+ MXL_AUDIO_FLOW_ID := ff39f65b-d760-4a7c-808d-4f2778de5658
+ MXL_AUDIO_MAX_SAMPLES := 2559
+@@ -104,7 +102,7 @@ fate-mxl-video-encdec: CMD = \
+     $(call MXL_MUX_DEMUX_TEST, \
+         mxl-video-encdec, \
+         $(TARGET_PATH)/ffmpeg -hide_banner -v error -re \
+-            -f lavfi -i testsrc2=size=1920x1080:rate=50 -frames:v 5 -c:v v210 \
++            -f lavfi -i $(MXL_TEST_VIDEO) -frames:v 5 -c:v v210 \
+             -f mxl -video_flow_id $(MXL_VIDEO_FLOW_ID) \
+             -teardown_sync_file sentinel -teardown_sync_timeout $(MXL_SENTINEL_TIMEOUT) \
+             domain, \
+@@ -141,7 +139,7 @@ fate-mxl-av-encdec: CMD = \
+     $(call MXL_MUX_DEMUX_TEST, \
+         mxl-av-encdec, \
+         $(TARGET_PATH)/ffmpeg -hide_banner -v error -re \
+-            -f lavfi -i testsrc2=size=1920x1080:rate=50 \
++            -f lavfi -i $(MXL_TEST_VIDEO) \
+             -f lavfi -i "anoisesrc=sample_rate=48000:nb_samples=$(MXL_AUDIO_SAMPLES_PER_PACKET):seed=0$(COMMA)aformat=sample_fmts=flt:channel_layouts=stereo$(COMMA)atrim=end_sample=$(MXL_AUDIO_MAX_SAMPLES)" \
+             -map 0:v:0 -map 1:a:0 -frames:v 5 \
+             -c:v v210 -c:a pcm_f32le \
+diff --git a/tests/ref/fate/mxl-av-encdec b/tests/ref/fate/mxl-av-encdec
+index 1c37877a66..b69d7b647c 100644
+--- a/tests/ref/fate/mxl-av-encdec
++++ b/tests/ref/fate/mxl-av-encdec
+@@ -12,13 +12,13 @@
+ #sample_rate 1: 48000
+ #channel_layout_name 1: stereo
+ #stream#, dts,        pts, duration,     size, hash
+-0,          0,          0,        1,  8294400, 687ba6aecec048f446ee3cbe03f611b3
++0,          0,          0,        1,  8294400, 4c571ac818f22b3bcef04c7a5d273f01
+ 1,          0,          0,      512,     2048, 53bec1b67fed459ad5cae29e678ea3b2
+ 1,        512,        512,      512,     2048, d79f812809c33e70086b4fcf4fb929af
+-0,          1,          1,        1,  8294400, fa8087d706277bffe0181b862c9e8252
++0,          1,          1,        1,  8294400, 6ff5a2c792e2ed88817b845334fd6fca
+ 1,       1024,       1024,      512,     2048, 0d07cdebfd31e4dc50fd606d150a8070
+ 1,       1536,       1536,      512,     2048, 673b3cffcac431e42d0ceabfceae6bb1
+-0,          2,          2,        1,  8294400, 19190a35fe54888aa56367a6672cb02d
++0,          2,          2,        1,  8294400, c71ae13956f89e31df9ea6c8046a489e
+ 1,       2048,       2048,      511,     2044, 3b4f890dc442919fe145dbe84796f30c
+-0,          3,          3,        1,  8294400, 13b4e70275b3e18080ea2411a1c7e47c
+-0,          4,          4,        1,  8294400, 34c7f0e53d40f8da58a1d48510d425a8
++0,          3,          3,        1,  8294400, 8897f55f75e8ec62735c6ffdc22bd524
++0,          4,          4,        1,  8294400, 931ecf685a6fbffbf897a599233c0099
+diff --git a/tests/ref/fate/mxl-video-encdec b/tests/ref/fate/mxl-video-encdec
+index c94fd9fdd8..0e06b5d4c5 100644
+--- a/tests/ref/fate/mxl-video-encdec
++++ b/tests/ref/fate/mxl-video-encdec
+@@ -7,8 +7,8 @@
+ #dimensions 0: 1920x1080
+ #sar 0: 1/1
+ #stream#, dts,        pts, duration,     size, hash
+-0,          0,          0,        1,  8294400, 687ba6aecec048f446ee3cbe03f611b3
+-0,          1,          1,        1,  8294400, fa8087d706277bffe0181b862c9e8252
+-0,          2,          2,        1,  8294400, 19190a35fe54888aa56367a6672cb02d
+-0,          3,          3,        1,  8294400, 13b4e70275b3e18080ea2411a1c7e47c
+-0,          4,          4,        1,  8294400, 34c7f0e53d40f8da58a1d48510d425a8
++0,          0,          0,        1,  8294400, 4c571ac818f22b3bcef04c7a5d273f01
++0,          1,          1,        1,  8294400, 6ff5a2c792e2ed88817b845334fd6fca
++0,          2,          2,        1,  8294400, c71ae13956f89e31df9ea6c8046a489e
++0,          3,          3,        1,  8294400, 8897f55f75e8ec62735c6ffdc22bd524
++0,          4,          4,        1,  8294400, 931ecf685a6fbffbf897a599233c0099
