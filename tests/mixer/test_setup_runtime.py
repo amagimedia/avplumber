@@ -1723,6 +1723,51 @@ def test_mxl_writers_plan_one_v210_flow_per_mxl_source_with_a_clip():
     assert mxl_writers.FlowConfigInfo.discrete.offset == 128
 
 
+def test_mxl_writers_follow_the_clock_within_the_ring_and_release_the_flows(tmp_path, monkeypatch, capsys):
+    import ctypes
+    from demos.mixer import mxl_writers
+    config = tmp_path / "mixer.demo.json"
+    config.write_text(json.dumps({"canvas": {"fps": 30}, "sources": [{
+        "id": "sdr_mxl_000", "kind": "mxl", "url": "/domain", "flow": "f1", "clip": "clip.v210", "width": 48, "height": 2}]}))
+    grain_bytes = 2 * mxl_writers.v210_row_stride(48)
+    clip, ring = ctypes.create_string_buffer(b"".join(bytes([picture]) * grain_bytes for picture in range(3))), ctypes.create_string_buffer(grain_bytes)
+    monkeypatch.setattr(mxl_writers, "map_clip", lambda path, size: (ctypes.addressof(clip), 3))
+    handlers = {}
+    monkeypatch.setattr(mxl_writers.signal, "signal", handlers.__setitem__)
+    def run(clock, commit_status=0, location=0):
+        written, closed, clock = [], [], iter(clock)
+        def create(instance, definition, options, writer, info, created):
+            info._obj.common.format, info._obj.common.payloadLocation = 1, location
+            info._obj.discrete.sliceSizes[0], info._obj.discrete.grainCount = grain_bytes // 2, 6   # a ring of 4 to catch up in
+            return 0
+        def open_grain(writer, index, info, payload):
+            info._obj.grainSize, payload._obj.value = grain_bytes, ctypes.addressof(ring)
+            return 0
+        def commit(writer, info):
+            written.append((info._obj.validSlices == info._obj.totalSlices, ring.raw))
+            if len(written) == 3:
+                handlers[mxl_writers.signal.SIGTERM]()
+            return commit_status
+        monkeypatch.setattr(mxl_writers, "load_mxl", lambda: SimpleNamespace(
+            mxlCreateInstance=lambda domain, options: 7, mxlDestroyInstance=closed.append, mxlCreateFlowWriter=create,
+            mxlReleaseFlowWriter=lambda instance, writer: closed.append("flow"), mxlFlowWriterOpenGrain=open_grain,
+            mxlFlowWriterCommitGrain=commit, mxlGetCurrentIndex=lambda rate: next(clock), mxlGetNsUntilIndex=lambda index, rate: 0,
+            mxlSleepForNs=lambda ns: None))
+        try:
+            mxl_writers.main(config)
+        finally:
+            assert closed == ["flow", 7]
+        return written
+    # Two periods late (grain 101 at 103) is made up for; ten late, more than the ring holds, is not:
+    # grains 100, 101 and 114 (pictures 1, 2 and 0 of the loop), not 102 to 113.
+    assert run([100, 103, 114, 115]) == [(True, bytes([picture]) * grain_bytes) for picture in (1, 2, 0)]
+    assert "1 flows closed, 12 grain periods skipped" in capsys.readouterr().out
+    with pytest.raises(RuntimeError, match="f1: cannot commit grain 100"):
+        run([100], commit_status=1)
+    with pytest.raises(RuntimeError, match="f1: it is not video in host memory"):   # the mixer's reader would refuse it
+        run([100], location=1)
+
+
 def test_mxl_writers_start_before_the_mixer_and_stop_after_it(tmp_path, monkeypatch):
     import demos.mixer.setup_runtime as demo
     events, stopped = [], threading.Event()

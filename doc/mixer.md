@@ -192,8 +192,8 @@ and its own flow, written by `demos/mixer/mxl_writers.py`: one process for all f
 loops and at every grain of the MXL clock copies each flow's next picture into its ring through
 libmxl. Like a producer outside the mixer it uses no GPU: each picture goes from the page cache
 into the flow in one copy, all flows on one thread, so the copies of all flows have to fit in a
-grain period (a late grain is written as soon as it can be, and none is left out unless the writer
-is over a second behind). A loop is `generation.seconds` long, 5.5 MB a 1080p
+grain period (a late grain is written as soon as it can be; a writer further behind than a flow's
+ring holds skips to the clock and leaves a hole, which the mixer's reader passes over). A loop is `generation.seconds` long, 5.5 MB a 1080p
 picture: 332 MB of disk and page cache per source for 2 s at 30 fps, twice that at 60 fps.
 The writer is a process beside the mixer, which the setup runtime starts
 before the mixer and stops after it; an Apply restarts both, and a writer that exits on its own

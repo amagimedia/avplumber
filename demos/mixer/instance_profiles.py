@@ -177,8 +177,8 @@ def mxl_sources(compute_capability):
     """How many of the raw upload units may be MXL inputs on a GPU of this compute capability
     (nvidia-smi's compute_cap, such as "8.9"), cloud and desktop alike, in two classes for now.
     Ada Lovelace and newer (8.9 up: L4, L40S, RTX 40 and 50, Hopper, Blackwell) take the big setup,
-    measured on the L4 beside the full 192-source show at 1080p30 with the demo's CPU writers on the
-    same host (2026-11-20); Turing and Ampere (T4, A10, RTX 20 and 30), or an unknown GPU, the small
+    measured on the L4 beside the full 192-source show at 1080p30 with the demo's earlier writers, an
+    FFmpeg per flow on the CPUs of the same host (2026-11-20); Turing and Ampere (T4, A10, RTX 20 and 30), or an unknown GPU, the small
     one, not measured. 50/60 fps halve it (not measured)."""
     try:
         big = float(compute_capability) >= 8.9

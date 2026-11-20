@@ -4,10 +4,10 @@ the mixer and stops it after). It stands in for the producers outside the mixer,
 and decodes nothing: each source's own clip (the source's "clip" in the show, a file of packed v210
 pictures at the canvas rate that prepare_demo.plan renders once) is mapped from the page cache, and
 at every grain of the MXL clock one thread copies each flow's next picture straight into its ring
-through libmxl: one copy a picture, where an FFmpeg per flow also read() each into a packet. Every
-grain index is written, a late one as soon as it can be; a writer over a second behind skips to the
-clock. The flows are removed at SIGINT or SIGTERM, and a flow that cannot be written ends the
-process with an error (the setup starts it again).
+through libmxl: one copy a picture, where an FFmpeg per flow also read() each into a packet. A
+late grain is written as soon as it can be; a writer further behind than the smallest ring holds
+skips to the clock, leaving a hole. The flows are removed at SIGINT or SIGTERM, and a flow that
+cannot be written ends the process with an error (the setup starts it again).
 
 usage: python3 -m demos.mixer.mxl_writers <mixer config>"""
 import ctypes
@@ -90,18 +90,18 @@ def load_mxl():
 
 def map_clip(path, grain_bytes):
     """The address and picture count of the loop at *path*, mapped read-only and shared with the
-    page cache. Through libc: Python's mmap gives no address for a read-only mapping."""
+    page cache. Through libc: Python's mmap gives no address for a read-only mapping. The whole
+    loop is read in before this returns (MAP_POPULATE, Linux only): a page read from the disk in
+    the copy would stall every flow."""
     libc = ctypes.CDLL(None, use_errno=True)
     libc.mmap.restype, libc.mmap.argtypes = c_void_p, (c_void_p, c_size_t, c_int, c_int, c_int, ctypes.c_long)
-    libc.madvise.argtypes = (c_void_p, c_size_t, c_int)
     with open(path, "rb") as clip:
         size = os.fstat(clip.fileno()).st_size
         if size < grain_bytes:
             raise OSError(f"{path} holds no whole picture of {grain_bytes} bytes")
-        address = libc.mmap(None, size, mmap.PROT_READ, mmap.MAP_SHARED, clip.fileno(), 0)
+        address = libc.mmap(None, size, mmap.PROT_READ, mmap.MAP_SHARED | getattr(mmap, "MAP_POPULATE", 0), clip.fileno(), 0)
     if address == c_void_p(-1).value:
         raise OSError(ctypes.get_errno(), f"cannot map {path}")
-    libc.madvise(address, size, mmap.MADV_WILLNEED)
     return address, size // grain_bytes
 
 
@@ -116,7 +116,7 @@ def main(config):
         if not ok:
             raise RuntimeError(f"MXL flow {flow['definition']['id']}: {what}")
 
-    instances, writers, skipped = {}, [], 0
+    instances, writers, skipped, catch_up = {}, [], 0, sys.maxsize
     try:
         for flow in flows:
             domain = flow["domain"]
@@ -129,7 +129,10 @@ def main(config):
                                              byref(writer), byref(config_info), byref(created))
             check(status == 0, f"cannot create it (status {status})", flow)
             writers.append((instances[domain], writer, flow, clip, frames))
-            check(config_info.discrete.sliceSizes[0] == flow["stride"], "its slices are not v210 rows", flow)
+            # What the mixer's reader requires too: MXL_DATA_FORMAT_VIDEO, MXL_PAYLOAD_LOCATION_HOST_MEMORY.
+            check(config_info.common.format == 1 and config_info.common.payloadLocation == 0 and
+                  config_info.discrete.sliceSizes[0] == flow["stride"], "it is not video in host memory with v210 rows as slices", flow)
+            catch_up = min(catch_up, max(0, config_info.discrete.grainCount - 2))
         info, payload = GrainInfo(), c_void_p()
         index = mxl.mxlGetCurrentIndex(rate)
         while writers and not stop:
@@ -141,10 +144,12 @@ def main(config):
                 info.validSlices = info.totalSlices
                 status = mxl.mxlFlowWriterCommitGrain(writer, byref(info))
                 check(status == 0, f"cannot commit grain {index} (status {status})", flow)
-            # A late period is made up for at once: the flows have no holes, which the mxl demuxer
-            # does not pass over. Only after a stall of over a second does the clock's index follow.
+            # A late period is made up for at once, but only as far behind the clock as every
+            # flow's ring keeps grains readable (grainCount - 2 behind its head); older ones would
+            # be a burst that no reader shows. Further behind, the clock's index follows and the
+            # flows have a hole, which the mixer's reader passes over.
             index += 1
-            if (behind := mxl.mxlGetCurrentIndex(rate) - index) > rate.numerator // rate.denominator:
+            if (behind := mxl.mxlGetCurrentIndex(rate) - index) > catch_up:
                 index, skipped = index + behind, skipped + behind
     finally:   # releasing a writer removes its flow
         for instance, writer, *_ in writers:
