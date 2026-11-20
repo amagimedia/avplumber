@@ -297,7 +297,11 @@
 
     async function startPeerConnection(offer) {
       const transport = janus;
-      peer = new RTCPeerConnection({ iceServers: [] });
+      // Janus is the controlling ICE agent and is directly reachable (no NAT on its
+      // side), but a viewer behind NAT never offers a usable candidate without this:
+      // without STUN the browser only gathers a private host candidate, which Janus
+      // cannot reach, so every connectivity check fails and the page retries forever.
+      peer = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
       const connection = peer;
       peer.ontrack = event => {
         if (peer !== connection) return;
