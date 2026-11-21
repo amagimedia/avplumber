@@ -1,0 +1,28 @@
+# GPU-only key/fill OVER FABRIC consumer: the fill arrives on dst, the key on alpha_dst, and each
+# plane is decoded on its own chain. Each edge carries its own stream metadata, so fabric_unpack
+# describes the key with alpha_codec/alpha_pixel_format rather than the fill's format.
+#
+# Recombining the two decoded planes into one yuva* frame is a compositing step with no node in
+# this tree yet; until one exists the chains end in null sinks, which is enough to prove that both
+# planes arrive and decode. Give each plane its own redundancy_selector if this becomes redundant.
+queue.plan_capacity * 4
+queue.plan_capacity v_fabric 8
+queue.plan_capacity v_fabric_key 8
+queue.plan_capacity v_fill_enc 8
+queue.plan_capacity v_key_enc 8
+queue.plan_capacity v_fill_dec 4
+queue.plan_capacity v_key_dec 4
+
+hwaccel.init { "name": "@gpu", "type": "cuda" }
+
+node.add { "type": "fabric_source", "dst": "v_fabric", "alpha_dst": "v_fabric_key", "group": "rx", "name": "AlphaFabricIn", "provider": "tcp", "bind_port": "5592", "stream_id": "main", "media_type": "video", "codec": "hevc_intra", "width": 1280, "height": 720, "pixel_format": "cuda", "real_pixel_format": "yuv444p", "alpha_codec": "hevc_intra", "alpha_pixel_format": "cuda", "time_base": "1/1000", "frame_rate": "30/1", "max_payload_bytes": 4194304, "queue_depth": 64 }
+node.add { "type": "fabric_unpack", "src": "v_fabric", "dst": "v_fill_enc", "group": "rx", "name": "UnpackFill" }
+node.add { "type": "dec_video", "src": "v_fill_enc", "dst": "v_fill_dec", "group": "rx", "name": "DecodeFill", "pixel_format": "?cuda", "hwaccel": "@gpu", "codec_map": { "hevc": "hevc_cuvid" }, "hwaccel_only_for_codecs": ["hevc"] }
+node.add { "type": "null_sink<av::VideoFrame>", "src": "v_fill_dec", "group": "rx", "name": "DropFill" }
+node.add { "type": "fabric_unpack", "src": "v_fabric_key", "dst": "v_key_enc", "group": "rx", "name": "UnpackKey" }
+node.add { "type": "dec_video", "src": "v_key_enc", "dst": "v_key_dec", "group": "rx", "name": "DecodeKey", "pixel_format": "?cuda", "hwaccel": "@gpu", "codec_map": { "hevc": "hevc_cuvid" }, "hwaccel_only_for_codecs": ["hevc"] }
+node.add { "type": "null_sink<av::VideoFrame>", "src": "v_key_dec", "group": "rx", "name": "DropKey" }
+
+stats.subscribe { "url": "", "name": "hevc_lossless_fabric_tcp_alpha_consumer", "interval": 1, "streams": { "video": [ { "q_pre_dec": "v_fill_enc", "q_post_dec": "v_fill_dec", "decoder": "DecodeFill" }, { "q_pre_dec": "v_key_enc", "q_post_dec": "v_key_dec", "decoder": "DecodeKey" } ] } }
+
+group.start rx

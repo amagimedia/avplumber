@@ -121,7 +121,7 @@ Required parameters:
 | `replica_id` | uint32 | Producer instance identity |
 | `generation` | uint64 | Controller epoch; static for MVP |
 | `media_type` | string | Initially `video` |
-| `codec` | string | `hevc_intra` (default), `h264_intra`, `jpeg`/`jpeg444`, `jpeg2000`/`j2k` - see "Codec Mode Performance" |
+| `codec` | string | `hevc_intra` (default), `h264_intra`, `jpeg`/`jpeg444`, `jpeg2000`/`j2k`, `prores`/`prores4444` - see "Codec Mode Performance" |
 | `width` | uint32 | Encoded video width; may be discovered from upstream metadata |
 | `height` | uint32 | Encoded video height; may be discovered from upstream metadata |
 | `pixel_format` | string | Source/encoded frame pixel format, for example `cuda` or `nv12` |
@@ -150,6 +150,36 @@ Optional parameters:
 | `payload_crc` | bool | `false` | Compute payload CRC; useful for debugging |
 | `header_crc` | bool | `true` | Compute header CRC |
 | `stats_interval_ms` | uint32 | `1000` | Periodic stats log/export interval |
+| `alpha_src` | string | unset | Second encoded edge carrying the key plane; enables key/fill |
+| `alpha_codec` | string | `codec` | Wire codec of the key plane |
+| `alpha_pixel_format` | string | `gray` | Pixel format stored in the key plane's media header |
+| `alpha_real_pixel_format` | string | `gray` for a `cuda` key plane, else `alpha_pixel_format` | Software layout behind a `cuda` key plane |
+
+## Alpha (Key/Fill)
+
+With `alpha_src` set, the sink sends two media records per frame in the same session: the fill from
+`src` and the key from `alpha_src`. Both carry the same identity, PTS and geometry and are told
+apart by `plane` in the media header; nothing in the wire pairs them. A sink without `alpha_src`
+sends `plane=fill` only.
+
+The receiver side needs `alpha_dst` on `fabric_source`. Each plane then travels its own
+`redundancy_selector` -> `fabric_unpack` -> decoder chain, and a `plane=alpha` record that reaches a
+`fabric_source` without `alpha_dst` fails the node. A REPAIR request for a PTS re-sends every stored
+plane of that frame.
+
+```text
+producer: fill encoder -> fabric_sink.src
+          key encoder  -> fabric_sink.alpha_src
+consumer: fabric_source.dst       -> selector -> fabric_unpack -> decoder
+          fabric_source.alpha_dst -> selector -> fabric_unpack -> decoder
+```
+
+NVENC can encode an HEVC alpha layer (base layer plus an auxiliary layer in one access unit), but no
+FFmpeg release exposes it: `libavcodec/nvenc.c` has no alpha-layer support in 7.1, 8.1, 9.1 or current
+master, so `enc_video` cannot enable it. Using it would need a direct NVENC encoder and a consumer-side
+splitter that separates the layer-1 NALs and rewrites their layer ids. It also requires 8-bit
+NV12/ARGB/ABGR input, so the fill could not be 4:4:4 or 10-bit. Key/fill is therefore the alpha path
+this tree uses.
 
 Future controller-managed parameters:
 
@@ -254,7 +284,7 @@ Fixed wire header:
 ```cpp
 struct AvpFabricWireHeader {
     uint32_t magic;          // "AVPF"
-    uint16_t version;        // 1
+    uint16_t version;        // 2
     uint16_t header_bytes;   // wire + media + extensions
     uint16_t message_type;   // media, heartbeat, eof, config
     uint16_t flags;
@@ -279,9 +309,10 @@ struct AvpFabricMediaHeader {
 
     uint32_t media_type;
     uint32_t codec;
+    uint32_t plane;          // 0 fill, 1 alpha
+    uint32_t packet_format;
     uint32_t packet_flags;
-    uint32_t duration_num;
-    uint32_t duration_den;
+    int64_t duration;
 
     uint32_t width;
     uint32_t height;
@@ -377,6 +408,13 @@ Optional controller parameters:
 If `controller_host` is not configured, the MVP sink does not need to send
 heartbeats. The media header still carries enough identity for point-to-point
 transport tests.
+
+The media path has no timer-driven heartbeat by design. Liveness there is record
+cadence: media records from an active replica, status-only records from a
+standby. The selector applies `active_timeout_ms` to that cadence and promotes a
+standby when the active stops delivering, so a heartbeat that stayed alive while
+media stalled would defeat the stall policy (`examples/redundancy/EDGE_CASES.md`,
+"Active Stalls Without Death"). The parameters above are a controller feature.
 
 Heartbeat payload should include:
 
@@ -610,6 +648,45 @@ Option C: include codec extradata extension in every keyframe until acknowledged
 For the first MVP, use the actual packets emitted by avplumber/FFmpeg and
 verify the receiver can decode the resulting packet stream. If not, add a
 `config` message type before building redundancy features.
+
+## Receiver Lifetime
+
+`fabric_source` binds its ports and never closes them while the node runs, so a
+producer that leaves and comes back needs no reconnect step: the returning
+producer's records arrive on the same endpoint. Two things bound that wait:
+
+- A provider that reports the peer's connection ending (`FI_ECONNRESET`,
+  `FI_ECONNREFUSED`, `FI_ENOTCONN`, `FI_ESHUTDOWN`, `FI_ETIMEDOUT`,
+  `FI_ECONNABORTED`) is logged as `peer closed` and the receiver stays open.
+  Before this, such an error threw and killed the node. A record that arrives
+  afterwards logs `peer back`.
+- `idle_timeout_ms` (default `0`, wait forever) ends the session after that many
+  milliseconds without a record: the source sends EOF on every output edge and
+  the node finishes, so downstream decoders terminate instead of waiting. The
+  timer starts at the first record, so a consumer started before its producer
+  still waits. A non-zero value gives up the ability to survive a producer
+  restart, because the node is finished when the restart arrives.
+
+The receiver also counts `peer_closes` and reports it in its summary line. The
+tcp provider does not report a clean or idle peer close for an RDM endpoint: its
+per-peer connection endpoints are created without the application's EQ, so the
+`FI_SHUTDOWN` it generates is handled internally, and the receive CQ reports an
+error only when a posted receive tears mid-record. It also does not enable TCP
+keepalive for RDM peer connections, so a half-open peer stays invisible. `peer
+closed` is therefore diagnostic, not the liveness signal; record cadence and
+`idle_timeout_ms` are (see "Control And Heartbeat Path").
+
+The EOF the source sends on its outputs is a normal `FabricPacket` marker
+(`complete == false`). `fabric_unpack` and `redundancy_selector` leave that
+marker in the queue for the framework's `consumeEofIfPresent` to forward; a
+node that pops it inside `process()` would drop the end of the stream. The
+selector handles the marker itself (it must, because the multi-input base class
+only flushes and never forwards), sending EOF to its own output once every
+input edge has ended.
+`rx_buffers` (default 16) sizes the receive pool per port. When a burst outruns
+the decoder the pool runs low and the receiver copies payloads instead of
+lending its buffers, reported as `copied_under_pressure`; the copies are
+correct but cost memory bandwidth, so raise `rx_buffers` for bursty sources.
 
 ## Testing Plan
 

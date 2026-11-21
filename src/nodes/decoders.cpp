@@ -35,6 +35,9 @@ protected:
     size_t dec_errors_ = 0;   // consecutive packets that failed to decode
     av::Timestamp last_pts_ = NOTS;
     av::PixelFormat pixel_format_ = AV_PIX_FMT_NONE;
+    // What a codec-only context's stream metadata said, kept across avcodec_open2 clearing
+    // pix_fmt; the stream it was built from has no codecpar to ask.
+    av::PixelFormat metadata_pixel_format_ = AV_PIX_FMT_NONE;
     bool pixel_format_optional_ = false;
     std::shared_ptr<HWAccelDevice> hwaccel_;
     av::Timestamp discard_until_ = NOTS;
@@ -502,6 +505,9 @@ public:
             dec_.raw()->width = stream.raw()->codecpar->width;
             dec_.raw()->height = stream.raw()->codecpar->height;
             dec_.raw()->pix_fmt = static_cast<AVPixelFormat>(stream.raw()->codecpar->format);
+            // avcodec_open2 may clear pix_fmt, and this context keeps no stream to read it back
+            // from, so hold on to what the metadata said the stream carries.
+            metadata_pixel_format_ = av::PixelFormat(static_cast<AVPixelFormat>(stream.raw()->codecpar->format));
         }
         this->auto_eof_ = false;
         if (!pixel_format.empty()) {
@@ -953,21 +959,23 @@ public:
         AVCodecContext* cc = this->dec_.raw();
         if (cc->sw_pix_fmt != AV_PIX_FMT_NONE) {
             return cc->sw_pix_fmt;
-        } else {
+        }
+        // A decoder built from codec-only metadata has no stream: every fabric stream describes
+        // itself as encoding-direction, so every fabric decode takes that path and has no stream
+        // until it is opened. Answer with what the codec context was configured with instead of
+        // dereferencing the missing stream, which is what upstream metadata readers (a filter's
+        // preliminary init, an encoder opening) ask for before the first packet arrives.
+        const av::Stream &stream = this->dec_.stream();
+        if (stream.isValid() && stream.raw()->codecpar) {
             logstream << "realPixelFormat(): sw_pix_fmt none, falling back to stream pixel format";
+            return av::PixelFormat(static_cast<AVPixelFormat>(stream.raw()->codecpar->format));
         }
-        #if 0
-        if (cc && cc->hw_frames_ctx && cc->hw_frames_ctx->data) {
-            AVHWFramesContext *frmctx = (AVHWFramesContext *)(cc->hw_frames_ctx->data);
-            logstream << "have hw frames context in decoder, sw_format " << av::PixelFormat(frmctx->sw_format);
-            if (frmctx->sw_format != AV_PIX_FMT_NONE) {
-                return frmctx->sw_format;
-            } else {
-                logstream << "falling back to stream pixel format";
-            }
+        if (metadata_pixel_format_ != AV_PIX_FMT_NONE) {
+            logstream << "realPixelFormat(): sw_pix_fmt none and no stream, using the pixel format the stream metadata declared";
+            return metadata_pixel_format_;
         }
-        #endif
-        return av::PixelFormat(static_cast<AVPixelFormat>(this->dec_.stream().raw()->codecpar->format));
+        logstream << "realPixelFormat(): sw_pix_fmt none and no stream, falling back to codec context format";
+        return av::PixelFormat(static_cast<AVPixelFormat>(cc->pix_fmt));
     }
     virtual av::Rational frameRate() {
         return this->dec_.stream().frameRate();

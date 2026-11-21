@@ -27,6 +27,11 @@ public:
     void process() override {
         FabricPacket *ptr = this->source_->peek();
         if (ptr == nullptr) return;
+        if (isEofMarker(*ptr)) {
+            // Leave the marker at the head: consumeEofIfPresent() forwards it as EOF through
+            // NodeSISO::onEofConsumed(). Popping it here would drop the end of the stream.
+            return;
+        }
         FabricPacket fp = *ptr;
         this->source_->pop();
         if (!fp.complete || fp.message_type != avp_fabric::MSG_MEDIA) return;

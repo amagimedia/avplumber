@@ -7,6 +7,7 @@ examples/redundancy/h264_intra/
 examples/redundancy/nvjpeg/
 examples/redundancy/hevc_lossless/
 examples/redundancy/jpeg2000_lossless/
+examples/redundancy/prores4444/
 ```
 
 Each codec folder keeps its own active-active, active-standby, and
@@ -58,6 +59,12 @@ Point-to-point smoke test:
 examples/redundancy/hevc_lossless/fabric_tcp/
 ```
 
+Point-to-point key/fill smoke test (`alpha_src`/`alpha_dst`, two decoders, no GPU alpha):
+
+```text
+examples/redundancy/hevc_lossless/fabric_tcp_alpha/
+```
+
 ## Lossless JPEG 2000
 
 Bit-exact 4:4:4 on the GPU through nvJPEG2000, so it needs a build with
@@ -70,6 +77,96 @@ Point-to-point smoke test:
 ```text
 examples/redundancy/jpeg2000_lossless/fabric_tcp/
 ```
+
+## ProRes 4444 (single-stream alpha)
+
+ProRes 4444 carries alpha inside the payload, so one stream is the whole picture - no key/fill
+pair, no merge step, and the stock libavcodec `prores` decoder returns the alpha plane.
+`codec` accepts `prores` / `prores4444`, which travel as one wire code (`CODEC_PRORES`).
+`prores_ks` encodes on the CPU (`{"profile": "4444"}` over a `yuva444p10le` input);
+[ProresNV](https://github.com/siml1169/ProresNV)'s CUDA `prores_nv` produces the same bitstream
+and can replace it later without a protocol change.
+
+Point-to-point smoke test, which writes the received payloads to a MOV so the alpha plane can be
+checked offline:
+
+```text
+examples/redundancy/prores4444/fabric_tcp/
+```
+
+Measured on the QA host, 640x360p30, 180 frames: the sink sent 180 frames (~95.6 MB, ~124 Mb/s of
+a noise-heavy alpha-ramp test pattern, an upper bound; real footage is much smaller), the consumer
+decoded/wrote 180 of 180 with 0 dropped, and the alpha ramp the producer stamped arrived intact
+(0..65407 across the frame). ProRes is several times the bytes of lossless key/fill and is
+near-lossless rather than bit-exact, so pick it when a single alpha-bearing stream matters more
+than bandwidth or exactness. Decoding is CPU only - no GPU ProRes decoder exists.
+
+## Alpha (key/fill)
+
+A frame can travel as two records in the same fabric session: the fill (the picture) and the alpha
+(its key). Both carry the same `stream_id`, `replica_id`, `generation`, PTS, timebase and geometry,
+and the media header's `plane` field says which one a record is, so a consumer pairs them by PTS.
+A producer without `alpha_src` sends `plane=fill` only, as it did before the plane field existed.
+
+Producer graph:
+
+```text
+video -> fill encoder -> fabric_sink.src
+alpha -> key encoder  -> fabric_sink.alpha_src
+```
+
+Alpha is a normal encoded stream - encode the key plane as `gray` (or whatever the consumer's
+decoder expects) and hand the packets to `alpha_src`. `alpha_codec` defaults to `codec` and
+`alpha_pixel_format` to `gray`; `alpha_real_pixel_format` describes the software layout behind a
+`cuda` alpha plane. The key takes the fill's geometry, and an alpha edge that advertises a
+different size fails the node.
+
+Consumer graph, one chain per plane:
+
+```text
+fabric_source.dst       -> selector -> fabric_unpack -> decoder -> fill frames
+fabric_source.alpha_dst -> selector -> fabric_unpack -> decoder -> key frames
+```
+
+`alpha_dst` is optional on `fabric_source`, and each edge carries its own stream metadata
+(`alpha_codec`, `alpha_pixel_format`) so `fabric_unpack` describes the key correctly. A record with
+`plane=alpha` arriving at a `fabric_source` without `alpha_dst` is an error, not a dropped packet.
+Each plane needs its own `redundancy_selector`: a selector that sees both planes on its inputs
+throws. Recombining decoded fill and key frames into a `yuva*` frame is a compositing step that has
+no node in this tree yet.
+
+Both halves of a demo run keep running after the source ends: the group stays alive, and a
+`fabric_source` waiting for the next record does not notice that its peer process exited. Run the
+pair under `timeout` (or stop the groups from the control port) and compare the summary counters,
+as the smoke tests do.
+
+A `fabric_source` can end its own session when the producer goes quiet: set `idle_timeout_ms` and
+the node sends EOF on every output after that many milliseconds without a record, so the decoders
+and the rest of the consumer graph finish normally. The timer starts at the first record, so a
+consumer started before its producer still waits. Leaving `idle_timeout_ms` at its default `0`
+keeps the receiver waiting forever, which is what a consumer needs to survive a producer restart -
+the same port accepts the returning producer without any reconnect step. A provider that reports
+the peer's connection loss is no longer fatal: `fabric_source` logs `peer closed` and keeps its
+endpoint, so either choice works. That report is best effort: the `tcp` provider does not surface a
+clean or idle close on an RDM endpoint, and it does not enable TCP keepalive for RDM peer
+connections, so a half-open producer stays invisible (see "Receiver Lifetime" in
+`doc/specs/fabric-sink.md`). Record cadence is the liveness signal instead: `idle_timeout_ms` for
+the source, and the selector's `active_timeout_ms` for failover. A standby stays eligible only while
+its input keeps producing status records, so keep that input flowing. If the new producer starts
+before the old one's records have drained, give it a new `generation` (or leave `generation: 0`) so
+the selector resets instead of dropping the new frames.
+
+The consumer process only exits when its group stops, so pair `idle_timeout_ms` with a group policy
+that stops on a finished node (`auto_restart: "panic"` on the nodes, as the non-alpha consumer
+does); otherwise the finished chains leave the process running and the outer `timeout` still
+applies. `fabric_unpack` and `redundancy_selector` forward the EOF marker to their outputs, so a
+chain that ends on the source's EOF ends all the way to the null sink.
+
+NVENC can encode an HEVC alpha layer (base layer plus an auxiliary layer in one access unit), but no
+FFmpeg release exposes it: `libavcodec/nvenc.c` has no alpha-layer support in 7.1, 8.1, 9.1 or current
+master, so `enc_video` cannot enable it. A direct NVENC encoder plus a consumer-side splitter that
+separates the layer-1 NALs and rewrites their layer ids would be needed, and the feature only accepts
+8-bit NV12/ARGB/ABGR input. That is why key/fill is the alpha path in this tree.
 
 ## Codec Mode Performance
 

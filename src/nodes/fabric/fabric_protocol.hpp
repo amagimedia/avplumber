@@ -13,9 +13,9 @@ namespace avp_fabric {
 
 inline constexpr uint32_t MAGIC = 0x46505641;
 // The layout of WireHeader and MediaHeader below. Adding a codec code or a message type does not
-// change it; bump this only when an existing field moves, changes width, or changes meaning, and
-// expect every peer to be rebuilt.
-inline constexpr uint16_t VERSION = 1;
+// change it; bump this only when an existing field moves, changes width, or changes meaning (or a
+// field is added to either struct), and expect every peer to be rebuilt.
+inline constexpr uint16_t VERSION = 2;
 inline constexpr uint16_t MSG_MEDIA = 1;
 inline constexpr uint16_t MSG_FRAME_STATUS = 2;
 inline constexpr uint32_t FLAG_KEYFRAME = 1u << 0;
@@ -23,6 +23,14 @@ inline constexpr uint32_t CODEC_H264_INTRA = 1;
 inline constexpr uint32_t CODEC_JPEG = 2;
 inline constexpr uint32_t CODEC_HEVC_INTRA = 3;
 inline constexpr uint32_t CODEC_JPEG2000 = 4;
+inline constexpr uint32_t CODEC_PRORES = 5;
+
+// Key/fill transport: one frame travels as two media records, the fill (the picture) and the alpha
+// (its key). Both carry the same stream identity, PTS, timebase and geometry, so a consumer pairs
+// them by PTS; nothing in the wire pairs them, and a consumer that never configured an alpha path
+// fails on the first alpha record instead of decoding it as a picture.
+inline constexpr uint32_t PLANE_FILL = 0;
+inline constexpr uint32_t PLANE_ALPHA = 1;
 
 struct __attribute__((packed)) WireHeader {
     uint32_t magic;
@@ -45,6 +53,7 @@ struct __attribute__((packed)) MediaHeader {
     int32_t time_base_den;
     uint32_t media_type;
     uint32_t codec;
+    uint32_t plane;
     uint32_t packet_format;
     uint32_t packet_flags;
     int64_t duration;
@@ -70,6 +79,24 @@ inline std::string hexPrefix(const uint8_t *data, size_t size, size_t max_bytes 
     return os.str();
 }
 
+inline const char *planeName(uint32_t plane) {
+    if (plane == PLANE_FILL) return "fill";
+    if (plane == PLANE_ALPHA) return "alpha";
+    return "unknown";
+}
+
+/// Throws on a plane this build does not know rather than routing it somewhere: a record from a
+/// newer producer, or a corrupt header, would otherwise land on the fill output and be decoded as
+/// a picture.
+inline void validatePlane(uint32_t plane, const std::string &node_name) {
+    if (plane != PLANE_FILL && plane != PLANE_ALPHA) {
+        throw Error(node_name + " received wire plane " + std::to_string(plane) +
+                    ", which this build does not know (known: " + std::to_string(PLANE_FILL) +
+                    " fill, " + std::to_string(PLANE_ALPHA) + " alpha): the producer is newer " +
+                    "than this consumer.");
+    }
+}
+
 // jpeg444/nvjpeg444 are labels for a JPEG bitstream whose SOF carries 4:4:4 sampling.
 // The wire codec stays CODEC_JPEG because the JPEG headers describe the stream itself.
 // Lossless JPEG is deliberately absent: CODEC_JPEG cannot distinguish a SOF3 lossless codestream
@@ -88,11 +115,19 @@ inline bool isJpeg2000CodecName(const std::string &codec) {
     return codec == "jpeg2000" || codec == "j2k" || codec == "nvjpeg2k";
 }
 
+// One wire code for every ProRes profile: the frame header carries the profile, so the fill and the
+// 4444 alpha profiles are told apart by the payload, and the pixel format travels in the media
+// header. The names exist so a graph reads like the profile it encodes.
+inline bool isProresCodecName(const std::string &codec) {
+    return codec == "prores" || codec == "prores4444" || codec == "prores_4444";
+}
+
 inline AVCodecID codecIdFromName(const std::string &codec) {
     if (codec == "h264_intra") return AV_CODEC_ID_H264;
     if (isHevcCodecName(codec)) return AV_CODEC_ID_HEVC;
     if (isJpegCodecName(codec)) return AV_CODEC_ID_MJPEG;
     if (isJpeg2000CodecName(codec)) return AV_CODEC_ID_JPEG2000;
+    if (isProresCodecName(codec)) return AV_CODEC_ID_PRORES;
     throw Error("fabric unsupported codec: " + codec);
 }
 
@@ -103,6 +138,7 @@ inline uint32_t codecToWire(const std::string &codec) {
     if (isHevcCodecName(codec)) return CODEC_HEVC_INTRA;
     if (isJpegCodecName(codec)) return CODEC_JPEG;
     if (isJpeg2000CodecName(codec)) return CODEC_JPEG2000;
+    if (isProresCodecName(codec)) return CODEC_PRORES;
     throw Error("fabric unsupported codec: " + codec);
 }
 
@@ -116,9 +152,10 @@ inline AVCodecID codecIdFromWire(uint32_t codec, const std::string &node_name) {
     if (codec == CODEC_HEVC_INTRA) return AV_CODEC_ID_HEVC;
     if (codec == CODEC_JPEG) return AV_CODEC_ID_MJPEG;
     if (codec == CODEC_JPEG2000) return AV_CODEC_ID_JPEG2000;
+    if (codec == CODEC_PRORES) return AV_CODEC_ID_PRORES;
     throw Error(node_name + " received wire codec " + std::to_string(codec) +
                 ", which this build does not know (highest known is " +
-                std::to_string(CODEC_JPEG2000) + "): the producer is newer than this consumer.");
+                std::to_string(CODEC_PRORES) + "): the producer is newer than this consumer.");
 }
 
 inline void validateWireRecord(const WireHeader &wire, size_t len, size_t max_payload_bytes, const std::string &node_name) {

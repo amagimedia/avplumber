@@ -5,6 +5,7 @@
 #include "fabric_protocol.hpp"
 #include "fabric_rdm_receiver.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -26,8 +27,21 @@ class FabricSourceNode: public NodeSingleOutput<FabricPacket>,
     size_t max_payload_bytes_ = 4 * 1024 * 1024;
     size_t queue_depth_ = 64;
     size_t rx_buffers_ = 16;
+    // 0 keeps waiting for a peer forever (a receiver that survives producer restarts).
+    // > 0 ends the session after that many ms without a record, as if the producer sent EOF.
+    // Record silence is the only liveness signal the tcp provider gives a receive-only endpoint:
+    // it does not report a clean peer close.
+    int idle_timeout_ms_ = 0;
+    uint64_t last_message_ns_ = 0;
+    bool session_ended_ = false;
     av::FormatContext format_ctx_;
     av::Stream stream_;
+    // Owns the alpha output edge's stream metadata: a fill stream describes the picture, not its
+    // key, so the alpha edge gets a stream of its own with the alpha codec and pixel format.
+    av::FormatContext alpha_format_ctx_;
+    av::Stream alpha_stream_;
+    bool alpha_enabled_ = false;
+    std::unique_ptr<Sink<FabricPacket>> alpha_sink_;
     std::vector<std::unique_ptr<avp_fabric::RdmReceiver>> receivers_;
     size_t next_receiver_ = 0;
     std::atomic_bool stopping_{false};
@@ -58,6 +72,10 @@ public:
         // Receive buffers posted per port. Packets downstream hold theirs until freed, so this must
         // exceed the output queue plus what the selector and decoder hold.
         rx_buffers_ = params.value("rx_buffers", rx_buffers_);
+        idle_timeout_ms_ = params.value("idle_timeout_ms", idle_timeout_ms_);
+        if (idle_timeout_ms_ < 0) {
+            throw Error("fabric_source idle_timeout_ms must be >= 0 (0 = wait forever)");
+        }
 
         if (params.count("reference_url")) {
             av::Dictionary opts;
@@ -102,6 +120,26 @@ public:
             cp->height = height;
             cp->format = real_pixel_format.get();
         }
+        if (params.count("alpha_dst")) {
+            // Geometry and timing are the fill's: a key plane covers the picture it keys.
+            alpha_enabled_ = true;
+            const std::string alpha_codec = params.value("alpha_codec", params.value("codec", std::string("hevc_intra")));
+            const std::string alpha_pixel_format_name = params.value("alpha_pixel_format", std::string("gray"));
+            const av::PixelFormat alpha_pixel_format(alpha_pixel_format_name);
+            if (alpha_pixel_format == AV_PIX_FMT_NONE) {
+                throw Error("fabric_source unknown alpha_pixel_format: " + alpha_pixel_format_name);
+            }
+            alpha_stream_ = alpha_format_ctx_.addStream();
+            alpha_stream_.setTimeBase(stream_.timeBase());
+            alpha_stream_.setFrameRate(stream_.frameRate());
+            alpha_stream_.setAverageFrameRate(stream_.frameRate());
+            AVCodecParameters *cp = alpha_stream_.raw()->codecpar;
+            cp->codec_type = AVMEDIA_TYPE_VIDEO;
+            cp->codec_id = avp_fabric::codecIdFromName(alpha_codec);
+            cp->width = stream_.raw()->codecpar->width;
+            cp->height = stream_.raw()->codecpar->height;
+            cp->format = alpha_pixel_format.get();
+        }
     }
 
     void init(EdgeManager &edges, const Parameters &params) override {
@@ -109,6 +147,16 @@ public:
         auto edge = edges.find<FabricPacket>(params["dst"]);
         auto md = edge->metadata<InputStreamMetadata>(true);
         md->source_stream = stream_;
+
+        if (alpha_enabled_) {
+            auto alpha_edge = edges.find<FabricPacket>(params["alpha_dst"]);
+            if (params["alpha_dst"].get<std::string>() == params["dst"].get<std::string>()) {
+                throw Error("fabric_source alpha_dst must be a different edge from dst");
+            }
+            alpha_edge->metadata<InputStreamMetadata>(true)->source_stream = alpha_stream_;
+            alpha_edge->setProducer(shared_from_this());
+            alpha_sink_ = alpha_edge->makeSink();
+        }
 
         const size_t max_msg = sizeof(avp_fabric::WireHeader) + sizeof(avp_fabric::MediaHeader) + max_payload_bytes_;
         for (size_t i = 0; i < bind_ports_.size(); ++i) {
@@ -118,12 +166,23 @@ public:
         }
     }
 
+    // The alpha output is an output like any other: EOF, stop and drain reach it through here.
+    void forEachOutput(std::function<void(Sink<FabricPacket> *)> cb) override {
+        NodeSingleOutput<FabricPacket>::forEachOutput(cb);
+        if (alpha_sink_) cb(alpha_sink_.get());
+    }
+
     void process() override {
         if (stopping_.load(std::memory_order_acquire)) return;
         FabricPacket pkt;
         if (!receiveOne(pkt)) return;
+        Sink<FabricPacket> *out = pkt.plane == avp_fabric::PLANE_ALPHA ? alpha_sink_.get() : &this->sink();
+        if (out == nullptr) {
+            throw Error(std::string("fabric_source received a plane=alpha record but has no alpha_dst output: "
+                                    "configure alpha_dst, or stop the producer sending an alpha plane"));
+        }
         if (pkt.complete) {
-            this->sink_->put(pkt);
+            out->put(pkt);
         }
     }
 
@@ -164,8 +223,13 @@ private:
                 if (receivers_[idx]->tryNext(m)) {
                     receiver_idx = idx;
                     next_receiver_ = (idx + 1) % receivers_.size();
+                    last_message_ns_ = avp_fabric::monotonicNs();
                     return true;
                 }
+            }
+            if (idleExpired()) {
+                endSession();
+                return false;
             }
             std::vector<pollfd> fds;
             bool can_block = true;
@@ -175,10 +239,47 @@ private:
                 all_fd = all_fd && r->hasWaitFd();
             }
             if (!can_block) continue;
-            ::poll(fds.data(), fds.size(), all_fd ? 100 : 1);
+            ::poll(fds.data(), fds.size(), all_fd ? pollTimeoutMs() : 1);
             for (auto &r: receivers_) r->consumeWake();
         }
         return false;
+    }
+
+    // The idle timer starts at the first record: a source that has never received waits forever,
+    // so a consumer may be started before its producer.
+    bool idleExpired() const {
+        if (idle_timeout_ms_ <= 0 || last_message_ns_ == 0) return false;
+        const uint64_t now = avp_fabric::monotonicNs();
+        return now - last_message_ns_ >= static_cast<uint64_t>(idle_timeout_ms_) * 1000000ull;
+    }
+
+    // Poll timeout bounded by the idle timeout, so the deadline is not overshot by a full poll.
+    int pollTimeoutMs() const {
+        if (idle_timeout_ms_ <= 0 || last_message_ns_ == 0) return 100;
+        const uint64_t now = avp_fabric::monotonicNs();
+        const uint64_t deadline = last_message_ns_ + static_cast<uint64_t>(idle_timeout_ms_) * 1000000ull;
+        if (now >= deadline) return 0;
+        const uint64_t remaining_ms = (deadline - now + 999999ull) / 1000000ull;
+        return static_cast<int>(std::min<uint64_t>(remaining_ms, 100));
+    }
+
+    // The peer went quiet for idle_timeout_ms: end the session as if the producer had sent EOF,
+    // so downstream nodes finish instead of waiting for records that never come. A record that
+    // arrives after this cannot be delivered (the node is finished), so a receiver that must
+    // survive producer restarts leaves idle_timeout_ms at 0.
+    void endSession() {
+        if (session_ended_) return;
+        session_ended_ = true;
+        stopping_.store(true, std::memory_order_release);
+        uint64_t peer_closes = 0;
+        for (auto &r: receivers_) peer_closes += r->peerCloses();
+        logstream << "fabric_source session ended: no record for " << idle_timeout_ms_ << " ms"
+                  << " total_frames=" << frames_received_
+                  << " total_bytes=" << bytes_received_
+                  << " peer_closes=" << peer_closes;
+        emitEof();
+        finished_ = true;
+        for (auto &r: receivers_) r->stop();
     }
 
     bool receiveOne(FabricPacket &out) {
@@ -197,6 +298,7 @@ private:
             msg.data + sizeof(avp_fabric::WireHeader));
         try {
             avp_fabric::validateWireRecord(*wire, len, max_payload_bytes_, "fabric_source");
+            avp_fabric::validatePlane(media->plane, "fabric_source");
         } catch (...) {
             receiver->release(msg);
             throw;
@@ -218,6 +320,7 @@ private:
         out.time_base_den = media->time_base_den;
         out.media_type = media->media_type;
         out.codec = media->codec;
+        out.plane = media->plane;
         out.packet_format = media->packet_format;
         out.packet_flags = media->packet_flags;
         out.duration = media->duration;
@@ -244,6 +347,7 @@ private:
         if (frames_received_ < 5) {
             logstream << "fabric_source received"
                       << " type=" << (message_type == avp_fabric::MSG_MEDIA ? "media" : "status")
+                      << " plane=" << avp_fabric::planeName(out.plane)
                       << " replica_id=" << out.replica_id
                       << " generation=" << out.generation
                       << " pts=" << out.raw_pts

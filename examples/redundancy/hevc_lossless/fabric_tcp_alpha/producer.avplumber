@@ -1,0 +1,40 @@
+# GPU-only key/fill OVER FABRIC producer: a lossless intra HEVC fill and its key travel as two
+# records per frame in one fabric session. NVENC has no monochrome mode, so the key is the luma of
+# the source carried in a neutral-chroma 4:4:4 picture.
+#
+# The two encoders must see the same PTS: both branches are split from one decoded frame stream and
+# nothing between the split and the encoders rewrites timestamps. That is what lets a consumer pair
+# the planes, and it is also why this graph deliberately has no `realtime` node: pacing two planes
+# separately would give them different PTS. A live source paces itself.
+#
+# The source is synthetic so the demo runs anywhere. To run it against a file instead, replace
+# TestSrc and Decode with an input and an NVDEC decode that lands in CUDA frames directly.
+queue.plan_capacity * 4
+queue.plan_capacity in 4
+queue.plan_capacity v_packet 16
+queue.plan_capacity v_frames 8
+queue.plan_capacity v_fill_frames 4
+queue.plan_capacity v_key_frames 4
+queue.plan_capacity v_fill_cuda 4
+queue.plan_capacity v_key_cuda 4
+queue.plan_capacity v_fill_enc 8
+queue.plan_capacity v_key_enc 8
+
+hwaccel.init { "name": "@gpu", "type": "cuda" }
+
+node.add { "type": "input", "format": "lavfi", "url": "testsrc2=size=1280x720:rate=30:duration=6", "dst": "in", "group": "tx", "name": "TestSrc", "auto_restart": "off", "timeout": -1 }
+node.add { "type": "demux", "src": "in", "routing": { "v:0": "v_packet" }, "group": "tx", "name": "Demux" }
+node.add { "type": "dec_video", "src": "v_packet", "dst": "v_frames", "group": "tx", "name": "Decode" }
+node.add { "type": "split", "src": "v_frames", "dst": ["v_fill_frames", "v_key_frames"], "group": "tx", "name": "Split" }
+node.add { "type": "filter_video", "graph": "format=yuv444p,hwupload_cuda", "src": "v_fill_frames", "dst": "v_fill_cuda", "group": "tx", "name": "FillUpload", "hwaccel": "@gpu", "dst_width": 1280, "dst_height": 720, "dst_pixel_format": "cuda", "dst_frame_rate": "30/1" }
+node.add { "type": "assume_video_format", "src": "v_fill_cuda", "dst": "v_fill_fmt", "group": "tx", "name": "FillFormat", "width": 1280, "height": 720, "pixel_format": "cuda", "real_pixel_format": "yuv444p" }
+node.add { "type": "filter_video", "graph": "format=gray,format=yuv444p,hwupload_cuda", "src": "v_key_frames", "dst": "v_key_cuda", "group": "tx", "name": "KeyUpload", "hwaccel": "@gpu", "dst_width": 1280, "dst_height": 720, "dst_pixel_format": "cuda", "dst_frame_rate": "30/1" }
+node.add { "type": "assume_video_format", "src": "v_key_cuda", "dst": "v_key_fmt", "group": "tx", "name": "KeyFormat", "width": 1280, "height": 720, "pixel_format": "cuda", "real_pixel_format": "yuv444p" }
+node.add { "type": "enc_video", "src": "v_fill_fmt", "dst": "v_fill_enc", "group": "tx", "name": "FillHevc", "codec": "hevc_nvenc", "hwaccel": "@gpu", "options": { "preset": "p1", "tune": "lossless", "rc": "constqp", "qp": 0, "g": 1, "bf": 0, "forced-idr": 1, "profile": "rext", "rc-lookahead": 0, "lookahead_level": 0, "zerolatency": 1, "delay": 0, "surfaces": 2, "multipass": "disabled", "spatial-aq": 0, "temporal-aq": 0, "aud": 1 } }
+node.add { "type": "enc_video", "src": "v_key_fmt", "dst": "v_key_enc", "group": "tx", "name": "KeyHevc", "codec": "hevc_nvenc", "hwaccel": "@gpu", "options": { "preset": "p1", "tune": "lossless", "rc": "constqp", "qp": 0, "g": 1, "bf": 0, "forced-idr": 1, "profile": "rext", "rc-lookahead": 0, "lookahead_level": 0, "zerolatency": 1, "delay": 0, "surfaces": 2, "multipass": "disabled", "spatial-aq": 0, "temporal-aq": 0, "aud": 1 } }
+# alpha_src is the key plane: it shares this session, stream identity, PTS and geometry with src.
+# alpha_pixel_format describes the key's wire format; alpha_real_pixel_format is the layout behind
+# the cuda frames. max_payload_bytes bounds one compressed plane in either direction.
+node.add { "type": "fabric_sink", "src": "v_fill_enc", "alpha_src": "v_key_enc", "group": "tx", "name": "AlphaFabricOut", "provider": "tcp", "remote_host": "127.0.0.1", "remote_port": "5592", "stream_id": "main", "replica_id": 1, "generation": 1, "media_type": "video", "codec": "hevc_intra", "width": 1280, "height": 720, "pixel_format": "cuda", "real_pixel_format": "yuv444p", "alpha_codec": "hevc_intra", "alpha_pixel_format": "cuda", "alpha_real_pixel_format": "yuv444p", "require_keyframes": true, "max_payload_bytes": 4194304, "queue_depth": 64, "completion_batch": 16, "backpressure": "block", "header_crc": true, "payload_crc": false }
+
+group.start tx

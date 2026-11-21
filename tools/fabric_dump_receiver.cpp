@@ -30,17 +30,15 @@ struct __attribute__((packed)) AvpFabricWireHeader {
 
 struct __attribute__((packed)) AvpFabricMediaHeader {
     uint64_t stream_id_hash;
-    uint32_t track_id;
     uint32_t replica_id;
     uint64_t generation;
-    uint64_t sequence;
-    uint64_t frame_group_id;
     int64_t pts;
     int64_t dts;
     int32_t time_base_num;
     int32_t time_base_den;
     uint32_t media_type;
     uint32_t codec;
+    uint32_t plane;
     uint32_t packet_format;
     uint32_t packet_flags;
     int64_t duration;
@@ -157,12 +155,12 @@ public:
         const bool magic_ok = wire->magic == AVPF_MAGIC;
         std::cout << "frame=" << index
                   << " len=" << len
+                  << " version=" << wire->version
                   << " magic_ok=" << magic_ok
                   << " payload_bytes=" << wire->payload_bytes
-                  << " sequence=" << media->sequence
-                  << " frame_group_id=" << media->frame_group_id
                   << " pts=" << media->pts
                   << " tb=" << media->time_base_num << "/" << media->time_base_den
+                  << " plane=" << (media->plane == 1 ? "alpha" : media->plane == 0 ? "fill" : "unknown")
                   << " replica_id=" << media->replica_id
                   << " generation=" << media->generation
                   << " size=" << media->width << "x" << media->height

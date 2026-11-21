@@ -51,6 +51,9 @@ private:
     uint32_t current_active_replica_id_ = 1;
     uint64_t playout_delay_frames_ = 0;
     uint64_t promote_after_misses_ = 1;
+    // Liveness horizon: a replica counts as live only while its records keep arriving within this
+    // window. This is the selector's heartbeat contract for both failover and strict playout
+    // gating; the records can be media or status-only.
     uint64_t active_timeout_ms_ = 50;
     uint64_t repair_grace_ns_ = 0;
     bool strict_frame_identity_ = false;
