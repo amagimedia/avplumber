@@ -1,20 +1,34 @@
-# GPU-only lossless 4:4:4 JPEG 2000 over fabric TCP.
+# GPU-only lossless 4:4:4 JPEG 2000 over fabric TCP producer smoke test.
 # Requires a build with HAVE_CUDA=1 HAVE_NVJPEG2K=1.
+#
+# The source is synthetic so the demo runs anywhere, which is also why the frames start on the
+# CPU and are uploaded once. To run it against a file instead, replace TestSrc and RawVideoDecode
+# with an input and an NVDEC decode that lands in CUDA frames directly, and drop UploadCuda444:
+#   node.add { "type": "input", "url": "<path>", "dst": "in_testsrc", "group": "tx", "name": "FileInput", "auto_restart": "panic", "initial_timeout": 20, "timeout": 10 }
+#   node.add { "type": "dec_video", "src": "v_packet", "dst": "v_dec_cuda", "group": "tx", "name": "NVDEC", "auto_restart": "panic", "pixel_format": "?cuda", "hwaccel": "@gpu", "codec_map": { "h264": "h264_cuvid" }, "hwaccel_only_for_codecs": ["h264"] }
+#   node.add { "type": "filter_video", "graph": "scale_cuda=w=1280:h=720:format=yuv444p", "src": "v_dec_cuda", "dst": "v_cuda444", ... }
 queue.plan_capacity * 4
 queue.plan_capacity v_packet 16
-queue.plan_capacity v_dec_cuda 4
+queue.plan_capacity v_cpu 4
+queue.plan_capacity v_cuda444 4
 queue.plan_capacity v_rt 1
-queue.plan_capacity v_444 4
 queue.plan_capacity v_j2k 4
 
 hwaccel.init { "name": "@gpu", "type": "cuda" }
 
-node.add { "type": "input", "url": "/home/fedora/nba.mp4", "dst": "in_mux0", "group": "tx", "name": "NbaInput", "auto_restart": "panic", "initial_timeout": 20, "timeout": 10 }
-node.add { "type": "demux", "src": "in_mux0", "routing": { "?v:0": "v_packet" }, "group": "tx", "name": "Demux", "auto_restart": "panic", "wait_for_keyframe": false }
-node.add { "type": "dec_video", "src": "v_packet", "dst": "v_dec_cuda", "group": "tx", "name": "NbaNVDEC", "auto_restart": "panic", "pixel_format": "?cuda", "hwaccel": "@gpu", "codec_map": { "h264": "h264_cuvid" }, "hwaccel_only_for_codecs": ["h264"] }
-node.add { "type": "realtime<av::VideoFrame>", "src": "v_dec_cuda", "dst": "v_rt", "group": "tx", "name": "FrameRealtime", "auto_restart": "panic", "speed": 1.0, "set_pts": false, "negative_time_tolerance": 0.007, "jitter_margin": 0, "discontinuity_threshold": 3 }
-node.add { "type": "filter_video", "graph": "scale_cuda=w=1280:h=720:format=yuv444p", "src": "v_rt", "dst": "v_444", "group": "tx", "name": "ToYuv444", "auto_restart": "panic", "hwaccel": "@gpu", "dst_width": 1280, "dst_height": 720, "dst_pixel_format": "cuda" }
-node.add { "type": "nvjpeg2k_enc", "src": "v_444", "dst": "v_j2k", "group": "tx", "name": "LosslessJpeg2000", "auto_restart": "panic", "lossless": true, "stream_type": "j2k", "num_resolutions": 6, "code_block_w": 64, "code_block_h": 64 }
-node.add { "type": "fabric_sink", "src": "v_j2k", "group": "tx", "name": "Jpeg2000FabricOut", "provider": "tcp", "remote_host": "127.0.0.1", "remote_port": "5592", "stream_id": "main", "replica_id": 1, "generation": 1, "media_type": "video", "codec": "jpeg2000", "width": 1280, "height": 720, "pixel_format": "cuda", "real_pixel_format": "yuv444p", "require_keyframes": true, "max_payload_bytes": 33554432, "queue_depth": 64, "completion_batch": 16, "backpressure": "block", "header_crc": true, "payload_crc": false }
+node.add { "type": "input", "format": "lavfi", "url": "testsrc2=size=1280x720:rate=30", "dst": "in_testsrc", "group": "tx", "name": "TestSrc", "auto_restart": "panic", "timeout": -1 }
+node.add { "type": "demux", "src": "in_testsrc", "routing": { "v:0": "v_packet" }, "group": "tx", "name": "Demux", "auto_restart": "panic" }
+node.add { "type": "dec_video", "src": "v_packet", "dst": "v_cpu", "group": "tx", "name": "RawVideoDecode", "auto_restart": "panic" }
+node.add { "type": "filter_video", "graph": "format=yuv444p,hwupload_cuda", "src": "v_cpu", "dst": "v_cuda444", "group": "tx", "name": "UploadCuda444", "auto_restart": "panic", "hwaccel": "@gpu", "dst_width": 1280, "dst_height": 720, "dst_pixel_format": "cuda" }
+node.add { "type": "assume_video_format", "src": "v_cuda444", "dst": "v_cuda444_fmt", "group": "tx", "name": "AssumeCuda444", "auto_restart": "panic", "width": 1280, "height": 720, "pixel_format": "cuda", "real_pixel_format": "yuv444p" }
+node.add { "type": "realtime<av::VideoFrame>", "src": "v_cuda444_fmt", "dst": "v_rt", "group": "tx", "name": "FrameRealtime", "auto_restart": "panic", "speed": 1.0, "set_pts": true, "negative_time_tolerance": 0.007, "jitter_margin": 0, "discontinuity_threshold": 3 }
+# Part 1 JPEG 2000 by default. Add "high_throughput": true for the HTJ2K block coder, which is
+# what makes J2K keep up at video rates, at a few percent in size; only nvjpeg2k_dec and other
+# HT-capable decoders can read the result.
+node.add { "type": "nvjpeg2k_enc", "src": "v_rt", "dst": "v_j2k", "group": "tx", "name": "LosslessJpeg2000", "auto_restart": "panic", "lossless": true, "stream_type": "j2k", "num_resolutions": 6, "code_block_w": 64, "code_block_h": 64 }
+# max_payload_bytes bounds one compressed frame, and a lossless codec is bounded by the
+# uncompressed one: 1280x720 4:4:4 8-bit is 2.64 MiB, so 4 MiB leaves half again. It also sizes
+# the consumer's receive pool (max_payload_bytes x rx_buffers), so keep it close to the real size.
+node.add { "type": "fabric_sink", "src": "v_j2k", "group": "tx", "name": "Jpeg2000FabricOut", "provider": "tcp", "remote_host": "127.0.0.1", "remote_port": "5592", "stream_id": "main", "replica_id": 1, "generation": 1, "media_type": "video", "codec": "jpeg2000", "width": 1280, "height": 720, "pixel_format": "cuda", "real_pixel_format": "yuv444p", "require_keyframes": true, "max_payload_bytes": 4194304, "queue_depth": 64, "completion_batch": 16, "backpressure": "block", "header_crc": true, "payload_crc": false }
 
 group.start tx
