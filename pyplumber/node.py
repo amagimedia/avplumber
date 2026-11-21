@@ -305,6 +305,14 @@ class NvjpegEnc(InternalNode):
     TYPE = "nvjpeg_enc"
 
 
+class Nvjpeg2kEnc(InternalNode):
+    TYPE = "nvjpeg2k_enc"
+
+
+class Nvjpeg2kDec(InternalNode):
+    TYPE = "nvjpeg2k_dec"
+
+
 class Bsf(InternalNode):
     TYPE = "bsf"
 

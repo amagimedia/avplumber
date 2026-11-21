@@ -39,6 +39,7 @@ Clone with `--recursive`. Paste scripts from `examples/` into nc.
 | `BUILD_TYPE=Release` | Optimization flags (default: `Debug`, enables jittergen/delaygen) |
 | `HAVE_CUDA=1` | CUDA nodes; dynlink loader – no compile-time CUDA needed |
 | `HAVE_NVJPEG=1` | `nvjpeg_enc`; opt-in and requires CUDA plus nvJPEG/CUDA runtime development libraries |
+| `HAVE_NVJPEG2K=1` | `nvjpeg2k_enc`, `nvjpeg2k_dec`; opt-in and requires CUDA plus nvJPEG2000/CUDA runtime development libraries |
 | `HAVE_GL=1` | OpenGL/EGL; required by `drm_prime_to_cuda`, `cuda_to_egl_image` |
 | `HAVE_VAAPI=1` | VAAPI (implies GL). Links `-lva -lGL -lEGL -lGLESv2` |
 | `HAVE_DRM=1` | DMA-BUF IPC source and DRM paths. Requires `libdrm-dev` |
@@ -53,6 +54,7 @@ Feature gates (node only built when all conditions met):
 - `cuda_to_egl_image`: `HAVE_CUDA=1 HAVE_GL=1 HAVE_NVCC=1`
 - `drm_prime_to_cuda`: `HAVE_CUDA=1 HAVE_GL=1 HAVE_DRM=1`
 - `nvjpeg_enc`: `HAVE_CUDA=1 HAVE_NVJPEG=1`
+- `nvjpeg2k_enc`, `nvjpeg2k_dec`: `HAVE_CUDA=1 HAVE_NVJPEG2K=1`
 - `luma_diff`, `hog_diff`: `HAVE_CUDA=1 HAVE_NVCC=1`
 - `cuda_camera_motion`: `HAVE_CUDA=1 HAVE_NVOF=1` plus dense NVOF headers; `HAVE_NVCC=1` enables GPU IRLS
 - `HAVE_GL` auto-enabled by `HAVE_VAAPI=1`
