@@ -27,14 +27,9 @@
 #include <vector>
 
 constexpr uint32_t AVPF_MAGIC = 0x46505641; // "AVPF", little-endian.
-constexpr uint16_t AVPF_VERSION = 1;
 constexpr uint16_t AVPF_MSG_MEDIA = 1;
 constexpr uint16_t AVPF_MSG_FRAME_STATUS = 2;
 constexpr uint32_t AVPF_MEDIA_VIDEO = 1;
-constexpr uint32_t AVPF_CODEC_H264_INTRA = 1;
-constexpr uint32_t AVPF_CODEC_JPEG = 2;
-constexpr uint32_t AVPF_CODEC_HEVC_INTRA = 3;
-constexpr uint32_t AVPF_CODEC_JPEG2000 = 4;
 constexpr uint32_t AVPF_PACKET_FORMAT_PASSTHROUGH = 1;
 constexpr uint32_t AVPF_FLAG_KEYFRAME = 1u << 0;
 constexpr uint32_t AVPF_FLAG_EOF = 1u << 1;
@@ -75,14 +70,6 @@ static std::string hexPrefix(const uint8_t *data, size_t size, size_t max_bytes 
         os << std::hex << std::setw(2) << std::setfill('0') << static_cast<unsigned>(data[i]);
     }
     return os.str();
-}
-
-uint32_t codecId(const std::string &codec) {
-    if (codec == "h264_intra") return AVPF_CODEC_H264_INTRA;
-    if (avp_fabric::isHevcCodecName(codec)) return AVPF_CODEC_HEVC_INTRA;
-    if (avp_fabric::isJpegCodecName(codec)) return AVPF_CODEC_JPEG;
-    if (avp_fabric::isJpeg2000CodecName(codec)) return AVPF_CODEC_JPEG2000;
-    throw Error("fabric_sink unsupported codec: " + codec);
 }
 
 uint32_t mediaTypeId(const std::string &media_type) {
@@ -300,7 +287,7 @@ class FabricPacketSink: public NodeSingleInput<av::Packet>, public ReportsFinish
     uint32_t replica_id_ = 0;
     uint64_t generation_ = 0;
     uint32_t media_type_ = AVPF_MEDIA_VIDEO;
-    uint32_t codec_ = AVPF_CODEC_H264_INTRA;
+    uint32_t codec_ = avp_fabric::CODEC_H264_INTRA;
     uint32_t width_ = 0;
     uint32_t height_ = 0;
     av::PixelFormat pixel_format_{AV_PIX_FMT_NONE};
@@ -360,7 +347,7 @@ public:
                       << " replica_id=" << replica_id_;
         }
         media_type_ = mediaTypeId(params.value("media_type", "video"));
-        codec_ = codecId(params.value("codec", "h264_intra"));
+        codec_ = avp_fabric::codecToWire(params.value("codec", "hevc_intra"));
         require_keyframes_ = params.value("require_keyframes", true);
         header_crc_ = params.value("header_crc", true);
         payload_crc_ = params.value("payload_crc", false);
@@ -536,7 +523,7 @@ private:
         avp_fabric::WireHeader wire = {};
         avp_fabric::MediaHeader media = {};
         wire.magic = AVPF_MAGIC;
-        wire.version = 1;
+        wire.version = avp_fabric::VERSION;
         wire.header_bytes = sizeof(wire) + sizeof(media);
         wire.message_type = message_type;
         wire.flags = 0;

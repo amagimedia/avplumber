@@ -97,7 +97,7 @@ public:
             stream_.setAverageFrameRate(frame_rate);
             AVCodecParameters *cp = stream_.raw()->codecpar;
             cp->codec_type = AVMEDIA_TYPE_VIDEO;
-            cp->codec_id = avp_fabric::codecIdFromName(params.value("codec", std::string("h264_intra")));
+            cp->codec_id = avp_fabric::codecIdFromName(params.value("codec", std::string("hevc_intra")));
             cp->width = width;
             cp->height = height;
             cp->format = real_pixel_format.get();

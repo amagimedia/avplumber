@@ -45,8 +45,8 @@ public:
         pkt.setKeyPacket((fp.packet_flags & avp_fabric::FLAG_KEYFRAME) != 0);
         pkt.setComplete(true);
 
-        const AVCodecID codec_id = avp_fabric::codecIdFromWire(fp.codec);
-        if (codec_id != AV_CODEC_ID_NONE && source_stream_.raw()->codecpar->codec_id != codec_id) {
+        const AVCodecID codec_id = avp_fabric::codecIdFromWire(fp.codec, "fabric_unpack");
+        if (source_stream_.raw()->codecpar->codec_id != codec_id) {
             source_stream_.raw()->codecpar->codec_id = codec_id;
             codec_ = av::findEncodingCodec(codec_id);
         }

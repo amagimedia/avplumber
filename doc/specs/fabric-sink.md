@@ -121,7 +121,7 @@ Required parameters:
 | `replica_id` | uint32 | Producer instance identity |
 | `generation` | uint64 | Controller epoch; static for MVP |
 | `media_type` | string | Initially `video` |
-| `codec` | string | `h264_intra`, `hevc_intra`, `jpeg`/`jpeg444`, `jpeg2000`/`j2k` |
+| `codec` | string | `hevc_intra` (default), `h264_intra`, `jpeg`/`jpeg444`, `jpeg2000`/`j2k` - see "Codec Mode Performance" |
 | `width` | uint32 | Encoded video width; may be discovered from upstream metadata |
 | `height` | uint32 | Encoded video height; may be discovered from upstream metadata |
 | `pixel_format` | string | Source/encoded frame pixel format, for example `cuda` or `nv12` |
@@ -134,7 +134,7 @@ Optional parameters:
 | `mode` | string | `connect` | MVP sender connects to receiver |
 | `time_base` | rational string | packet timebase | Override packet timestamp timebase if needed |
 | `remote_addr_file` | string | empty | Optional binary endpoint address file for providers such as `shm` that need out-of-band address exchange |
-| `require_keyframes` | bool | `true` for `h264_intra` | Warn/fail on non-key packets |
+| `require_keyframes` | bool | `true` | Warn/fail on non-key packets; every supported mode is all-intra |
 | `keyframe_violation` | string | `warn` | `warn`, `drop`, or `fail` |
 | `max_payload_bytes` | uint32 | `4194304` | Reject payloads larger than this |
 | `queue_depth` | uint32 | `64` | Number of in-flight send buffers |
@@ -165,6 +165,12 @@ heartbeat_interval_ms
 ```
 
 These should not be required for the first point-to-point node.
+
+## Codec Mode Performance
+
+Measured figures for each `codec` mode, and the reasoning behind the
+`hevc_intra` default, live with the demos that exercise them:
+`examples/redundancy/README.md`.
 
 ## SHM Address Exchange
 
