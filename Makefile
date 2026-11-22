@@ -54,6 +54,11 @@ override LIBS_FLAGS += -lopentelemetry_api -lopentelemetry_sdk -lopentelemetry_c
 endif
 # Build libfabric-backed fabric_source/fabric_sink implementations.
 HAVE_LIBFABRIC ?= 0
+# Build the CUDA<->Vulkan zero-copy shim (src/nodes/hwaccel/VulkanCudaInterop.cpp). It hands CUDA
+# VMM allocations to Vulkan compute through VK_KHR_external_memory_fd, so it needs the VMM
+# allocator on as well; multi-plane YUV formats are not shareable on the NVIDIA driver, which the
+# shim reports per format instead of failing at submit.
+HAVE_VULKAN ?= 0
 NVCC ?= /usr/local/cuda/bin/nvcc
 ifeq ($(HAVE_VAAPI),1)
 HAVE_GL = 1
@@ -259,6 +264,18 @@ override CPPSRC += nodes/hwaccel/CudaVmmMemory.cpp
 # The VMM adapter uses the CUDA SDK headers, while existing nodes use the bundled loader.
 objs/src/nodes/hwaccel/CudaVmmMemory.o: override CXXFLAGS += -fno-lto
 endif
+
+# The shim is compiled in every build so its symbols exist; without Vulkan or the VMM allocator it
+# reports sharing as unavailable and callers stage through host memory.
+ifeq ($(HAVE_VULKAN),1)
+ifneq ($(HAVE_CUDA_VMM_IPC),1)
+$(error HAVE_VULKAN=1 requires HAVE_CUDA_VMM_IPC=1)
+endif
+override LIBS_FLAGS += -lvulkan
+endif
+override CPPSRC += nodes/hwaccel/VulkanCudaInterop.cpp
+objs/src/nodes/hwaccel/VulkanCudaInterop.o: override CXXFLAGS += \
+    -DHAVE_VULKAN=$(HAVE_VULKAN) -DHAVE_VULKAN_CUDA=$(if $(filter 1,$(HAVE_CUDA_VMM_IPC)),1,0)
 
 ifeq ($(HAVE_CUDA)$(HAVE_NVJPEG),11)
 ifneq (,$(wildcard $(SRCDIR)/nodes/nvjpeg_enc.cpp))
