@@ -17,6 +17,12 @@ inline constexpr uint32_t CODEC_JPEG = 2;
 inline constexpr uint32_t CODEC_HEVC_INTRA = 3;
 inline constexpr uint32_t CODEC_JPEG2000 = 4;
 inline constexpr uint32_t CODEC_PRORES = 5;
+// FFV1 is carried only as bitstream version 1 (`level: 1` in the encoder options). From version 2
+// on - libavcodec's default - the configuration record (coder, quantisation tables, bit depth)
+// lives in AVCodecContext.extradata instead of the frames, and this wire carries media packets
+// only: a consumer would reject every frame with "read_quant_table error". Version 1 repeats the
+// record in-band on every keyframe, which every fabric packet already is.
+inline constexpr uint32_t CODEC_FFV1 = 6;
 
 // Key/fill transport: one frame travels as two media records, the fill (the picture) and the alpha
 // (its key). Both carry the same stream identity, PTS, timebase and geometry, so a consumer pairs

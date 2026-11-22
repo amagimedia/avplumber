@@ -69,12 +69,17 @@ inline bool isProresCodecName(const std::string &codec) {
     return codec == "prores" || codec == "prores4444" || codec == "prores_4444";
 }
 
+inline bool isFfv1CodecName(const std::string &codec) {
+    return codec == "ffv1";
+}
+
 inline AVCodecID codecIdFromName(const std::string &codec) {
     if (codec == "h264_intra") return AV_CODEC_ID_H264;
     if (isHevcCodecName(codec)) return AV_CODEC_ID_HEVC;
     if (isJpegCodecName(codec)) return AV_CODEC_ID_MJPEG;
     if (isJpeg2000CodecName(codec)) return AV_CODEC_ID_JPEG2000;
     if (isProresCodecName(codec)) return AV_CODEC_ID_PRORES;
+    if (isFfv1CodecName(codec)) return AV_CODEC_ID_FFV1;
     throw Error("fabric unsupported codec: " + codec);
 }
 
@@ -94,6 +99,7 @@ inline uint32_t codecToWire(AVCodecID codec) {
         case AV_CODEC_ID_MJPEG: return CODEC_JPEG;
         case AV_CODEC_ID_JPEG2000: return CODEC_JPEG2000;
         case AV_CODEC_ID_PRORES: return CODEC_PRORES;
+        case AV_CODEC_ID_FFV1: return CODEC_FFV1;
         default: throw Error(std::string("fabric unsupported upstream codec: ") + avcodec_get_name(codec));
     }
 }
@@ -109,9 +115,10 @@ inline AVCodecID codecIdFromWire(uint32_t codec, const std::string &node_name) {
     if (codec == CODEC_JPEG) return AV_CODEC_ID_MJPEG;
     if (codec == CODEC_JPEG2000) return AV_CODEC_ID_JPEG2000;
     if (codec == CODEC_PRORES) return AV_CODEC_ID_PRORES;
+    if (codec == CODEC_FFV1) return AV_CODEC_ID_FFV1;
     throw Error(node_name + " received wire codec " + std::to_string(codec) +
                 ", which this build does not know (highest known is " +
-                std::to_string(CODEC_PRORES) + "): the producer is newer than this consumer.");
+                std::to_string(CODEC_FFV1) + "): the producer is newer than this consumer.");
 }
 
 inline void validateWireRecord(const WireHeader &wire, size_t len, size_t max_payload_bytes, const std::string &node_name) {

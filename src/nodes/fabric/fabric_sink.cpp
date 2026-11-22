@@ -321,6 +321,11 @@ class FabricPacketSink: public NodeMultiInput<av::Packet>,
     uint64_t report_last_bytes_ = 0;
     uint64_t report_last_frames_ = 0;
     std::unique_ptr<FabricRdmSender> sender_;
+    // Best-effort FFV1 self-containment check (see checkFfv1SelfContained): the encoder's
+    // parameters are reachable only when the graph also feeds a muxer, because nothing else calls
+    // IEncoder::setOutput.
+    std::array<std::shared_ptr<IEncoder>, 2> plane_encoders_;
+    std::array<bool, 2> ffv1_checked_{};
 
     std::vector<std::unique_ptr<TxOp>> ops_;
     std::vector<TxOp *> free_;
@@ -555,7 +560,10 @@ public:
         std::shared_ptr<Edge<av::Packet>> fill_edge = edges.find<av::Packet>(params["src"]);
         std::shared_ptr<Edge<av::Packet>> alpha_edge;
         if (params.count("alpha_src")) alpha_edge = edges.find<av::Packet>(params["alpha_src"]);
-        return std::make_shared<FabricPacketSink>(params, fill_edge, alpha_edge);
+        std::shared_ptr<FabricPacketSink> sink = std::make_shared<FabricPacketSink>(params, fill_edge, alpha_edge);
+        sink->plane_encoders_[avp_fabric::PLANE_FILL] = fill_edge->findNodeUp<IEncoder>();
+        if (alpha_edge) sink->plane_encoders_[avp_fabric::PLANE_ALPHA] = alpha_edge->findNodeUp<IEncoder>();
+        return sink;
     }
 
 private:
@@ -563,6 +571,26 @@ private:
         if (idx == 0) return avp_fabric::PLANE_FILL;
         if (idx == 1) return avp_fabric::PLANE_ALPHA;
         throw Error("fabric_sink has more input edges than planes");
+    }
+
+    // An FFV1 stream is decodable here only while it is self-describing: from bitstream version 2
+    // on, the configuration record (coder, quantisation tables, bit depth) lives in
+    // AVCodecContext.extradata, which this wire does not carry, so the consumer rejects every
+    // frame with "read_quant_table error". Version 1 repeats it in-band on every keyframe.
+    // Rejecting a level >= 2 (or extrasized) stream at the producer names the cause; when the
+    // encoder's parameters are unreachable, the docs carry the rule instead.
+    void checkFfv1SelfContained(uint32_t plane) {
+        if (planes_[plane].codec != avp_fabric::CODEC_FFV1 || ffv1_checked_[plane]) return;
+        ffv1_checked_[plane] = true;
+        IEncoder *encoder = plane_encoders_[plane].get();
+        const AVCodecParameters *cp = encoder ? encoder->codecParameters() : nullptr;
+        if (cp == nullptr || cp->codec_id != AV_CODEC_ID_FFV1) return;
+        if (cp->level < 2 && cp->extradata_size == 0) return;
+        throw Error(std::string("fabric_sink ") + avp_fabric::planeName(plane) + " FFV1 stream is not "
+                    "self-contained (encoder level " + std::to_string(cp->level) + ", extradata " +
+                    std::to_string(cp->extradata_size) + " bytes): encode with options "
+                    "{\"level\": 1, \"g\": 1}. From bitstream version 2 on FFV1 keeps its "
+                    "configuration in extradata, which the fabric wire does not carry");
     }
 
     void sendPacket(const av::Packet &pkt, uint32_t plane) {
@@ -578,6 +606,7 @@ private:
             throw Error(std::string("fabric_sink require_keyframes=true but ") + avp_fabric::planeName(plane) +
                         " packet is not keyframe");
         }
+        checkFfv1SelfContained(plane);
 
         if (free_.empty() && backpressure_ == "fail") {
             reap(0);

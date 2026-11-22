@@ -111,6 +111,62 @@ decoded/wrote 180 of 180 with 0 dropped, and the alpha ramp the producer stamped
 near-lossless rather than bit-exact, so pick it when a single alpha-bearing stream matters more
 than bandwidth or exactness. Decoding is CPU only - no GPU ProRes decoder exists.
 
+## FFV1 (lossless, CPU, single-stream alpha)
+
+`codec` accepts `ffv1`, which travels as its own wire code (6) and maps to libavcodec's
+`AV_CODEC_ID_FFV1`. The encoder is CPU only and lossless, and it carries alpha in the payload -
+`yuva444p`, `yuva422p`, `yuva420p` and their deeper variants are all supported - so one stream is
+the whole picture, like ProRes 4444 and unlike key/fill. Nothing decodes it on the GPU.
+
+The encoder must be told to write a self-describing bitstream:
+
+```text
+node.add { "type": "enc_video", "src": "v_frames", "dst": "v_enc", "group": "tx", "name": "Ffv1Enc", "codec": "ffv1", "options": { "level": 1, "g": 1 } }
+```
+
+`level: 1` is not optional. From FFV1 bitstream version 2 on - libavcodec's default - the
+configuration record (coder, quantisation tables, bit depth) is written once into
+`AVCodecContext.extradata` instead of the frames, and the fabric wire carries media packets only
+with `fabric_source` stripping extradata, so the consumer rejects every frame
+(`read_quant_table error`, then an invalid-data error from the decoder). Version 1 repeats the
+record in-band on every keyframe, which costs a little size per frame and rules out slice threading
+and the options that need version 2 or 3, in exchange for packets that decode on their own.
+`slicecrc` is one of those: it raises the version to 3 without an error, so it must stay off with
+`level: 1` or the stream goes back to carrying extradata.
+
+`g: 1` (or `0`) makes every frame a keyframe, as with every other fabric codec: version 1 writes
+its configuration only on keyframes, and `fabric_sink` requires keyframes by default.
+
+The consumer's `dec_video` has to name the decoder - `"codec_map": { "ffv1": "ffv1" }` or
+`"codec": "ffv1"` - like the HEVC and H.264 fabric consumers do with their `codec_map`. A fabric
+stream is codec-only metadata, so the node has no demuxed stream to resolve a default decoder from
+and fails at creation with "Action impossible with given codec context direction".
+
+The sink rejects a stream whose encoder parameters report `level` 2 or more, or carry extradata,
+but it only sees them when the producer graph also feeds a muxer (`IEncoder::setOutput` is what
+populates them), so the options above are the contract.
+
+Measured on the same QA host as the tables above, 900 frames of the same 1080p camera footage, CPU
+decode and CPU encode, the consumer decoding on loopback over the `tcp` provider, so both processes
+share the host's four cores:
+
+| format | KiB/frame | ratio | fps | Mb/s |
+| --- | --- | --- | --- | --- |
+| 8-bit 4:4:4 | 1039 | 5.85:1 | 8.0 | 68.5 |
+| 8-bit 4:2:0 | 747 | 4.07:1 | 12.4 | 75.7 |
+
+Level 1 costs nothing in bytes: the same frames encoded at level 3 come out at 1035.5 KiB/frame
+(4:4:4) and 745.6 (4:2:0), so level 1 was 0.3-0.4% smaller here - inside the noise either way. It
+costs encode time instead: a standalone `ffmpeg` encode of 900 4:4:4 frames takes 80.6 s at level 1
+against 77.4 s at level 3 (52.2 s against 49.1 s at 4:2:0), and the fabric pipeline runs at ~72% of
+that standalone rate because the consumer's decode shares the cores. On their own, the stages reach
+23.0 fps decode-only and 11.2 fps decode+encode at 4:4:4 (34.8 and 17.2 at 4:2:0).
+
+That is not a real-time 25p path at 1080p on four cores. Every other row above assumes NVENC or
+NVDEC; FFV1 level 1 is the CPU-only lossless option, at 8-12 fps fit for offline or low-rate use, or
+for hosts with more cores. A 640x360 `yuva444p` alpha ramp round trip carried its 180 frames in one
+stream at 27.1 KiB/frame and the received alpha plane was the ramp the producer stamped (0..254).
+
 ## Alpha (key/fill)
 
 A frame can travel as two records in the same fabric session: the fill (the picture) and the alpha
@@ -241,6 +297,8 @@ Reasons to override it:
   throughput headroom is needed. Not for lossless 4:4:4 (see above).
 - `jpeg` when throughput dominates and bitrate does not; it is 2-3x `hevc_intra` at equal luma
   PSNR.
+- `ffv1` when no GPU encoder is available and bit-exact lossless (including alpha in one stream) is
+  wanted; keep it at bitstream `level: 1`, see "FFV1" above.
 
 Set the receiver's `codec` (or provide a matching `reference_url`) before
 starting the graph. Without either, the receiver uses `h264_intra`. The sender

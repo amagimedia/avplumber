@@ -121,7 +121,7 @@ Required parameters:
 | `replica_id` | uint32 | Producer instance identity |
 | `generation` | uint64 | Controller epoch; static for MVP |
 | `media_type` | string | Initially `video` |
-| `codec` | string | `h264_intra` (fallback), `hevc_intra`, `jpeg`/`jpeg444`, `jpeg2000`/`j2k`, `prores`/`prores4444` - see "Codec Mode Performance" |
+| `codec` | string | `h264_intra` (fallback), `hevc_intra`, `jpeg`/`jpeg444`, `jpeg2000`/`j2k`, `prores`/`prores4444`, `ffv1` (bitstream version 1 only) - see "Codec Mode Performance" |
 | `width` | uint32 | Encoded video width; may be discovered from upstream metadata |
 | `height` | uint32 | Encoded video height; may be discovered from upstream metadata |
 | `pixel_format` | string | Source/encoded frame pixel format, for example `cuda` or `nv12` |
@@ -207,6 +207,14 @@ These should not be required for the first point-to-point node.
 
 Measured figures for each `codec` mode, including 8-bit and 10-bit HEVC 4:4:4, live with the demos that exercise them:
 `examples/redundancy/README.md`.
+
+Every codec here has to be self-describing: the wire carries media packets and nothing else, no
+codec extradata crosses it, and `fabric_source` strips any it finds in a reference stream. FFV1
+meets that guarantee only at bitstream version 1 (`level: 1` in the encoder options); from version
+2 on, libavcodec's default, the configuration record (coder, quantisation tables, bit depth) is
+written once into `AVCodecContext.extradata` and the consumer cannot decode a single frame without
+it. The sink rejects a stream it can see is not self-contained, and
+`examples/redundancy/README.md` documents the encoder options.
 
 ## SHM Address Exchange
 
