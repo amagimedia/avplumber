@@ -59,8 +59,8 @@ to select encoded storage, or `storage: "nv12"` / `"p010"` for raw uploads.
 `ndi: true` on an SDR 4:2:0 input instead makes each of its sources an NDI source that the same process
 (`ndi_senders.py`) sends on this host from the source's clip, stored as packed UYVY; the setup puts the
 full NDI names (machine and stream) in the show once the senders report them ([NDI sources](../../../doc/mixer.md#ndi-sources)).
-The NDI SDK encodes and the mixer decodes each one on the CPUs, so an instance profile offers only a few
-(`ndi_sources`).
+The NDI SDK encodes and the mixer decodes each one on the CPUs, about 0.7 of a core per 1080p30 source,
+so an instance profile offers only a few (`ndi_sources`: 2 at 25/30 fps on the L4's 12 vCPUs).
 `codecs` (a list, like `patterns`) gives the group's sources codecs in turn, and
 `gop` or `gops` their reference structure: `low_delay` (the default: two references,
 no B-frames) or `b_frames` (three B-frames in a pyramid over four references). Setup's

@@ -151,7 +151,7 @@ const types = [
  {id:'sdr_ndi',name:'NDI',detail:'Compressed video over the network from senders on this machine · encoded and decoded on the CPUs<span id="ndi-max"></span>',color:'#5fb3c9'}
 ];
 // Presentation order is independent of the saved recipe's weight indices.
-const sourceGroups=[['NVDEC',[0,1]],['Browser',[4]],['HW upload',[2,3,6,5,7]],['Network',[8]]];
+const sourceGroups=[['NVDEC',[0,1]],['Browser',[4]],['HW upload',[2,3,6,5]],['MXL',[7]],['NDI',[8]]];
 // The default Balanced mix (docs/capacity.md): NVDEC, browser
 // and raw uploads in about equal shares, half of each 4:2:0 path HLG on a 10-bit canvas (an SDR canvas
 // folds HLG into SDR). MXL and NDI sources are added by their own count.
