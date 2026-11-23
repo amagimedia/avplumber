@@ -41,7 +41,7 @@ def _add_packet_input(avp, api, tag: str, params: dict, *, group: str,
         }))
     else:
         avp.addNode(api.Input({"name": f"input_{tag}", "dst": packets, "initial_timeout": 20,
-                               "timeout": live_timeout, "group": group, **params}))
+                               "timeout": live_timeout, "group": group, **restart, **params}))
     if demux or live_timeout is not None:
         avp.addNode(api.Demux({
             "name": f"demux_{tag}", "src": packets, "routing": routing,

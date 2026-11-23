@@ -219,6 +219,9 @@ class MixerApplication:
     start_stable_sec: float = START_STABLE_SEC
     start_stable_timeout_sec: float = START_STABLE_TIMEOUT_SEC
     compositor_inputs: tuple[tuple[int, ...], ...] = ()   # a compositor's inputs per input_edges entry; routed: none
+    # Input nodes of live sources that restart their own group when a read times out (NDI): their
+    # failure while the show starts is that restart, not the start's.
+    live_inputs: tuple[str, ...] = ()
     absent_inputs: tuple[str, ...] = field(default=(), init=False)   # edges of sources that gave no frame
     startup: dict | None = field(default=None, init=False)   # how going on air went; `mixer.startup` answers with it
     _startup_error: str | None = field(default=None, init=False, repr=False)
@@ -350,7 +353,7 @@ class MixerApplication:
         original = self.avp.on_exception
         self._startup_error = None
         def failed(name, kind, message):
-            if self._startup_error is None:
+            if self._startup_error is None and name not in self.live_inputs:
                 self._startup_error = f"Mixer startup failed at {name} ({kind}): {message}"
             original(name, kind, message)
         self.avp.on_exception = failed
@@ -1025,6 +1028,7 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
     next_input = 0
     demux = cfg.input_routing == "demux"
     audio_edges: list[tuple[str, str]] = []  # (source.id, audio edge), only sources with has_audio
+    live_inputs: list[str] = []
     for index, source in enumerate(cfg.sources):
         group = _input_group(index)
         raw_storage = mixer_config.RAW_STORAGE.get(source.kind)   # what a raw source's frames arrive as
@@ -1069,6 +1073,8 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
                     pool_frames=cfg.raw_pool_frames, color=source.color, **file_params)
             else:
                 ndi = source.kind == "ndi"
+                if ndi:
+                    live_inputs.append(f"input_{index}")
                 edge, audio_edge = build_input(
                     avp, api, str(index), source.location, continuous_loop=True,
                     **({"input_params": {"format": "libndi_newtek", "options": {
@@ -1300,7 +1306,8 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
                         wipe_files=tuple(w.path for w in cfg.wipes), browser_windows=tuple(s.id for s in browsers.values()),
                         browser_input_edges=tuple(input_edges[i] for i in browsers),
                         delivery_monitor=True,
-                        aux_buses=aux, audio_edges=tuple(audio_edges), optional_input_edges=tuple(optional_input_edges))
+                        aux_buses=aux, audio_edges=tuple(audio_edges), optional_input_edges=tuple(optional_input_edges),
+                        live_inputs=tuple(live_inputs))
 
 
 def _startup_result(error=None):

@@ -193,7 +193,9 @@ def test_an_ndi_source_is_received_converted_to_nv12_and_uploaded(native_boundar
     # The plain input node, whose reads time out: a silent receiver fails it and its group restarts.
     assert (received["type"], received["url"], received["format"]) == ("input", "HOST (avp-smoke)", "libndi_newtek")
     assert received["options"] == {"wait_sources": "5", "extra_ips": "127.0.0.1"} and received["timeout"] == 2
-    assert "loop" not in received and nodes["demux_0"]["src"] == received["dst"]
+    assert "loop" not in received and nodes["demux_0"]["src"] == received["dst"] and received["auto_restart"] == "group"
+    # Its restart while the show starts does not fail the start.
+    assert app.live_inputs == ("input_0",)
     assert nodes["decode_0"]["auto_restart"] == "group" and nodes["decode_0"]["hwaccel_only_for_codecs"] == []
     upload = nodes["ndi_upload_0"]
     assert upload["src"] == "input_0_realtime" and app.input_edges[0] == "input_0_nv12"
