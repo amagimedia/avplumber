@@ -1807,7 +1807,7 @@ def test_mxl_writers_start_before_the_mixer_and_stop_after_it(tmp_path, monkeypa
                                              InstanceType.NVIDIA_L4_CUARRAY).profile
 
 
-NDI_SHOW = {**MXL_SHOW, "source_count": 170, "weights": [105, 0, 0, 0, 36, 27, 0, 0, 2]}
+NDI_SHOW = {**MXL_SHOW, "source_count": 188, "weights": [105, 0, 0, 0, 36, 43, 0, 0, 4]}
 
 
 def test_ndi_sources_are_sent_from_their_own_clips_up_to_the_profile_limit(tmp_path):
@@ -1815,16 +1815,16 @@ def test_ndi_sources_are_sent_from_their_own_clips_up_to_the_profile_limit(tmp_p
     by stream name until the setup knows the full one; a few, for the host's CPUs."""
     show, jobs, allocation = prepare_demo.plan(recipe_for(L4, NDI_SHOW), tmp_path)
     ndi = [s for s in show["sources"] if s["kind"] == "ndi"]
-    assert allocation["sdr_ndi"] == len(ndi) == 2
+    assert allocation["sdr_ndi"] == len(ndi) == 4
     assert all(s["clip"].endswith(".uyvy") and s["clip"] in map(str, jobs) for s in ndi)
     assert [s["name"] for s in ndi] == [f"avp-{s['id']}" for s in ndi]
     assert all(s["extra_ips"] == "127.0.0.1" and s["color"] == "sdr" for s in ndi)
     assert next(s for s in show["scenes"] if s["id"] == "ndi")["items"][0]["source"] == ndi[0]["id"]
     with pytest.raises(ValueError, match="MXL or NDI sources, not both"):
-        recipe_for(L4, {**NDI_SHOW, "source_count": 170, "weights": [105, 0, 0, 0, 36, 26, 0, 1, 2]})
-    with pytest.raises(ValueError, match="NDI is limited to 2"):
-        source_counts(L4, 3, [0] * 8 + [1], 30)
-    assert source_counts(L4, 8, [0, 0, 0, 0, 1, 0, 0, 0, 1], 60) == [0, 0, 0, 0, 7, 0, 0, 0, 1]   # 1 at 60 fps
+        recipe_for(L4, {**NDI_SHOW, "weights": [105, 0, 0, 0, 36, 42, 0, 1, 4]})
+    with pytest.raises(ValueError, match="NDI is limited to 4"):
+        source_counts(L4, 5, [0] * 8 + [1], 30)
+    assert source_counts(L4, 8, [0, 0, 0, 0, 1, 0, 0, 0, 1], 60) == [0, 0, 0, 0, 6, 0, 0, 0, 2]   # 2 at 60 fps
     import demos.mixer.setup_runtime as demo
     with pytest.raises(ValueError, match="NDI inputs are not available"):   # an image without NDI drops the entry
         demo._check_live({k: v for k, v in L4.items() if k != "ndi_sources"}, "ndi", 1, 30)
@@ -1861,7 +1861,7 @@ def test_ndi_senders_report_full_names_that_the_setup_puts_in_the_show_before_th
     monkeypatch.setattr(demo.BaseSetupRuntime, "_stop", lambda self: events.append("mixer stop"))
     monkeypatch.setattr(demo, "ndi_available", lambda: True)
     manager = SetupRuntime(tmp_path, tmp_path / "demo.json", SimpleNamespace(port=7777), InstanceType.NVIDIA_L4_CUARRAY)
-    assert manager.profile["ndi_sources"][30] == 2
+    assert manager.profile["ndi_sources"][30] == 4
     manager._start(config)
     manager._stop()
     assert events == ["writers start", "mixer start", "mixer stop", "writers stop"]
