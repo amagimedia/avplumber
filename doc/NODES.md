@@ -850,6 +850,11 @@ multiple inputs, 1 output: `av::Packet`
 -   `stream_ids` (list of positive integers) - if specified, will set custom stream ids in output container. Useful for `mpegts` format output.
 -   `metadata` (list of dictionaries) - if specified, will set metadata in output container's streams.
 
+`mux` runs on a thread of its own. `mux_nb` takes the same parameters and runs on an event loop
+(`event_loop`, as `realtime` does) when an input signals a packet, so many outputs need no thread
+each. A loop cannot sleep for another stream's packet, so it requires `ts_sort_wait: 0`; it takes a
+packet only when its output queue has room.
+
 ### `output`
 
 1 input: `av::Packet`
@@ -863,6 +868,11 @@ multiple inputs, 1 output: `av::Packet`
     written, so everything before the output runs (an encoder opens on its first frame) while nothing
     leaves. `node.object.set <name> hold false` releases it; writing then starts at the next key packet,
     so ask the encoder for one. `hold true` holds it again.
+
+`output` runs on a thread of its own. `output_nb` takes the same parameters and runs on an event loop
+(`event_loop`) when the muxer signals a packet. Its write must not block the loop: use it for a URL
+whose protocol queues or drops (UDP), not one that waits for a peer. An event loop only logs a node's
+exception, so `on_error` and `auto_restart` have no effect on `mux_nb` and `output_nb`.
 
 Format of binary seek table: 16-byte records containing:
 * timestamp of the frame in milliseconds: int64_t

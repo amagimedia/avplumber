@@ -169,7 +169,7 @@ def fake_api():
         "ResampleAudioForwardChannels": "resample_audio_forward_channels",
         "ForceFPS": "force_fps", "ForceKeyFrame": "force_key_frame", "Input": "input", "InputRec": "input_rec",
         "IpcDmabufSource": "ipc_dmabuf_source", "MixerCompositor": "mixer_compositor", "MixerKeyer": "mixer_keyer", "MixerDelivery": "mixer_delivery",
-        "Mux": "mux", "OneToMany": "one_to_many", "Output": "output", "PreheatVideoRouter": "preheat_video_router",
+        "Mux": "mux", "MuxNb": "mux_nb", "OutputNb": "output_nb", "OneToMany": "one_to_many", "Output": "output", "PreheatVideoRouter": "preheat_video_router",
         "RawVideoFileCuda": "raw_video_file_cuda", "Realtime": "realtime", "RepeatLastFrame": "repeat_last_frame",
         "ResampleAudio": "resample_audio",
         "SmoothTimestamps": "smooth_timestamps", "Split": "split", "PackedToCuda": "packed_to_cuda",
@@ -1499,6 +1499,23 @@ def test_janus_chain_queues_what_it_did_with_the_nodes_it_lost(declared):
     frames = [plans[e] for e in ("aux_1_fps", "aux_1_keyframed", "aux_1_video") if e in plans]
     assert frames == ([1, 2] if declared else [1, 1, 1]) and sum(frames) == 3
     assert plans["aux_1_encoded"] == 2 and plans["aux_1_video_rtp_mux"] == 1
+
+
+def test_janus_packets_are_muxed_and_sent_on_a_loop_only_when_a_failure_stops_nothing():
+    from pyplumber.mixer.janus import JanusVideoConfig, build_janus_output
+    avp = FakeAvp()
+    build_janus_output(avp, fake_api(), "bus", JanusVideoConfig(), fps=30, width=1920, height=1080,
+                       prefix="aux_1", failure_mode="off", packet_loop="packets")
+    build_janus_output(avp, fake_api(), "program", JanusVideoConfig(), fps=30, width=1920, height=1080)
+    nodes = {n.parameters["name"]: n for n in avp.nodes}
+    assert [(type(nodes[n]).__name__, nodes[n].parameters.get("event_loop")) for n in (
+        "aux_1_mux", "aux_1_rtp_output", "janus_mux", "janus_rtp_output")] == [
+        ("mux_nb", "packets"), ("output_nb", "packets"), ("mux", None), ("output", None)]
+    assert nodes["aux_1_mux"].parameters["ts_sort_wait"] == 0   # a loop cannot wait for another stream
+    assert "event_loop" not in nodes["aux_1_encoder"].parameters   # NVENC waits for the encoder: a thread
+    with pytest.raises(ValueError, match="failure_mode 'off'"):
+        build_janus_output(FakeAvp(), fake_api(), "program", JanusVideoConfig(), fps=30, width=1920, height=1080,
+                           packet_loop="packets")
 
 
 @pytest.mark.parametrize("minimum", [-1, 0.2, True, "200", 2**31])
