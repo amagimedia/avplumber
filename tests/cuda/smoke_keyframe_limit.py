@@ -32,7 +32,7 @@ def run(args):
     # The owned test ends at the encoder; leave RTP/BSF lifecycle to its own
     # tests, and never publish this graph to the demo's streaming mountpoint.
     app.avp.executeCommandsFromString("node.delete janus_rtp_output\n"
-                                     "node.delete janus_mux\nnode.delete janus_repeat_headers")
+                                     "node.delete janus_mux")
     app.rtcp_feedback_listener = None
     errors, frames, cuts = [], [], []
     app.avp.on_exception = lambda *error: errors.append(error)

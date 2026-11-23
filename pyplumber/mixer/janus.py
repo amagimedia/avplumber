@@ -168,8 +168,9 @@ def build_janus_output(avp, api, src_edge: str, janus: JanusVideoConfig, *, fps:
                        group: str = "output", codec: str = "", profile: str = "",
                        preset: str = "p7", enc_format: str = "nv12", color=None,
                        hdr_metadata=None, prefix: str = "janus", failure_mode: str = "panic",
-                       dpb_size: int = 0, edge_capacity: int | None = None, hold: bool = False):
-    """Add ``force_fps -> keyframe -> nvenc -> bsf -> rtp mux -> output``; return the RTCP listener.
+                       dpb_size: int = 0, edge_capacity: int | None = None, hold: bool = False,
+                       source_declares_format: bool = False):
+    """Add ``force_fps -> keyframe -> format -> nvenc -> rtp mux -> output``; return the RTCP listener.
 
     Defaults to HEVC (Main/Main10), which current Safari and Chrome negotiate
     over WebRTC on hardware-decode machines: ~2x the efficiency of H.264 at the
@@ -179,6 +180,11 @@ def build_janus_output(avp, api, src_edge: str, janus: JanusVideoConfig, *, fps:
     ``dpb_size`` sets the encoder's reference DPB (:func:`dpb_options`); 0 leaves it to NVENC.
     ``edge_capacity`` plans the capacity of every edge the chain creates; None keeps the plan for ``*``.
     ``hold`` starts the output held: the chain runs and nothing is sent until :func:`release_commands`.
+    ``source_declares_format`` leaves out the ``assume_video_format`` node and its thread: the node above
+    ``src_edge`` already declares this size and ``enc_format`` to the encoder (a compositor does).
+
+    No ``dump_extra`` bitstream filter repeats the parameter sets: the RTP muxer asks for no global
+    header, so NVENC writes them in-band before every IDR and has no extradata to repeat.
     """
     node_name = lambda suffix: f"{prefix}_{suffix}"
     keyframe_node = node_name("force_keyframe")
@@ -190,12 +196,14 @@ def build_janus_output(avp, api, src_edge: str, janus: JanusVideoConfig, *, fps:
     specs = [
         ("ForceFPS", {"name": node_name("fps"), "src": src_edge, "dst": node_name("fps"),
                       "fps": f"{fps}/{fps_den}"}),
-        ("ForceKeyFrame", {"name": keyframe_node, "src": node_name("fps"), "dst": node_name("keyframed"),
+        ("ForceKeyFrame", {"name": keyframe_node, "src": node_name("fps"),
+                           "dst": node_name("video" if source_declares_format else "keyframed"),
                            "interval_sec": f"{janus.keyframe_interval_sec}/1",
                            "min_interval_ms": janus.keyframe_min_interval_ms}),
-        ("AssumeVideoFormat", {"name": node_name("format"), "src": node_name("keyframed"), "dst": node_name("video"),
-                               "width": width, "height": height, "pixel_format": "cuda",
-                               "real_pixel_format": enc_format}),
+        *([] if source_declares_format else [
+            ("AssumeVideoFormat", {"name": node_name("format"), "src": node_name("keyframed"), "dst": node_name("video"),
+                                   "width": width, "height": height, "pixel_format": "cuda",
+                                   "real_pixel_format": enc_format})]),
         ("EncVideo", {
             "name": node_name("encoder"), "src": node_name("video"), "dst": node_name("encoded"),
             "codec": codec, "hwaccel": hwaccel,
@@ -217,9 +225,7 @@ def build_janus_output(avp, api, src_edge: str, janus: JanusVideoConfig, *, fps:
                 **dpb_options(dpb_size), **(color or {}),
             },
         }),
-        ("Bsf", {"name": node_name("repeat_headers"), "src": node_name("encoded"), "dst": node_name("repeat_headers"),
-                 "bsf": "dump_extra=freq=keyframe"}),
-        ("Mux", {"name": node_name("mux"), "src": [node_name("repeat_headers")], "dst": node_name("video_rtp_mux"),
+        ("Mux", {"name": node_name("mux"), "src": [node_name("encoded")], "dst": node_name("video_rtp_mux"),
                  "ts_sort_wait": 0, "auto_restart": "on" if failure_mode == "panic" else "off", "on_error": failure_mode}),
         ("Output", {"name": node_name("rtp_output"), "src": node_name("video_rtp_mux"), "url": janus.rtp_url,
                     "format": "rtp", "auto_restart": "on" if failure_mode == "panic" else "off", "on_error": failure_mode,

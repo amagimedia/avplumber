@@ -101,6 +101,10 @@ def test_bus_without_a_pgm_layout_skips_the_program_tap_and_labels_outputs(nativ
     # Monitors keep one NVENC reference frame; the program output leaves it to NVENC.
     assert graph["aux_mv2_encoder"]["options"]["dpb_size"] == 1
     assert "dpb_size" not in graph["janus_encoder"]["options"]
+    # A bus encoder reads its compositor's canvas: no format node between them. The program
+    # output, fed by pass-through nodes, keeps its own.
+    assert "aux_mv2_format" not in graph and graph["janus_format"]["dst"] == graph["janus_encoder"]["src"]
+    assert graph["aux_mv2_force_keyframe"]["dst"] == graph["aux_mv2_encoder"]["src"]
     if scene_view:
         assert graph["program_aux_tap"]["dst"][1:] == ["aux_mv_pgm"]
         # The tap does not wait for the renditions behind its first output: a stopped one would

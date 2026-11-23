@@ -1470,6 +1470,23 @@ def test_janus_keyframe_limit_is_configurable(minimum):
     assert node.parameters["min_interval_ms"] == minimum
 
 
+@pytest.mark.parametrize("declared", [False, True])
+def test_janus_chain_has_no_node_that_only_passes_data(declared):
+    """The encoder feeds the RTP muxer (NVENC repeats its parameter sets in-band), and a source that
+    declares its own format needs no assume_video_format node."""
+    from pyplumber.mixer.janus import JanusVideoConfig, build_janus_output
+    avp = FakeAvp()
+    build_janus_output(avp, fake_api(), "program", JanusVideoConfig(), fps=30, width=1920, height=1080,
+                       source_declares_format=declared)
+    nodes = {n.parameters["name"]: n.parameters for n in avp.nodes}
+    assert list(nodes) == ["janus_fps", "janus_force_keyframe", *([] if declared else ["janus_format"]),
+                           "janus_encoder", "janus_mux", "janus_rtp_output"]
+    chain = [nodes[name] for name in nodes]
+    assert chain[0]["src"] == "program" and chain[-2]["src"] == [chain[-3]["dst"]]
+    assert all(below["src"] == above["dst"] for above, below in zip(chain[:-3], chain[1:-2]))
+    assert chain[-1]["src"] == chain[-2]["dst"]
+
+
 @pytest.mark.parametrize("minimum", [-1, 0.2, True, "200", 2**31])
 def test_janus_rejects_invalid_keyframe_limit(minimum):
     from pyplumber.mixer.janus import JanusVideoConfig
