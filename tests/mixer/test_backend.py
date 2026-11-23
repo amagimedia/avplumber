@@ -105,6 +105,9 @@ def test_bus_without_a_pgm_layout_skips_the_program_tap_and_labels_outputs(nativ
     # output, fed by pass-through nodes, keeps its own.
     assert "aux_mv2_format" not in graph and graph["janus_format"]["dst"] == graph["janus_encoder"]["src"]
     assert graph["aux_mv2_force_keyframe"]["dst"] == graph["aux_mv2_encoder"]["src"]
+    # Every bus's packets are muxed and sent on one event loop; the program's keep their threads.
+    assert {graph[f"aux_mv2_{n}"]["event_loop"] for n in ("mux", "rtp_output")} == {"aux_packets"}
+    assert not any("event_loop" in graph[n] for n in ("janus_mux", "janus_rtp_output"))
     if scene_view:
         assert graph["program_aux_tap"]["dst"][1:] == ["aux_mv_pgm"]
         # The tap does not wait for the renditions behind its first output: a stopped one would

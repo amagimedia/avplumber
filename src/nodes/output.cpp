@@ -15,8 +15,10 @@ struct SeekTableEntry {
 #define SEEK_TABLE_FILES_COUNT 4
 #define MAX_SEEK_TABLE_ENTRIES 60
 
-class StreamOutput: public NodeSingleInput<av::Packet>, public IFlushable, public ReportsFinishByFlag,
-                    public IInputsObjects {
+// Writes muxed packets to a URL: what both nodes below do with a packet, and their parameters and
+// objects. How they come by the packet is theirs.
+class StreamOutputBase: public NodeSingleInput<av::Packet>, public IFlushable, public ReportsFinishByFlag,
+                        public IInputsObjects {
 public:
     std::shared_ptr<avp::SyncTrace> sync_trace_;   // "sync_trace": label, read with sync.trace
 protected:
@@ -77,8 +79,8 @@ public:
     av::FormatContext& ctx() {
         return octx_;
     }
-    virtual void process() {
-        av::Packet pkt = this->source_->get();
+protected:
+    void write(av::Packet pkt) {
         if (pkt && isEofMarker(pkt)) {
             flush();
             return;
@@ -158,6 +160,7 @@ public:
             }
         }
     }
+public:
     void setObject(const std::string key, const Parameters &value) override {
         if (key != "hold") throw Error("output: unknown object key: " + key);
         held_.store(value.get<bool>(), std::memory_order_release);
@@ -175,11 +178,12 @@ public:
         octx_.close();
         this->finished_ = true;
     }
-    static std::shared_ptr<StreamOutput> create(NodeCreationInfo &nci) {
+protected:
+    template <typename Child> static std::shared_ptr<Child> build(NodeCreationInfo &nci) {
         EdgeManager &edges = nci.edges;
         const Parameters &params = nci.params;
         std::shared_ptr<Edge<av::Packet>> edge = edges.find<av::Packet>(params["src"]);
-        auto r = std::make_shared<StreamOutput>(make_unique<EdgeSource<av::Packet>>(edge));
+        auto r = std::make_shared<Child>(make_unique<EdgeSource<av::Packet>>(edge));
         av::FormatContext &octx = r->ctx();
         if (params.count("sync_trace") > 0 && avp::SyncTrace::enabled()) {
             r->sync_trace_ = avp::namedSyncTrace(params["sync_trace"].get<std::string>());
@@ -239,4 +243,43 @@ public:
     }
 };
 
+// On a thread of its own, sleeping until the muxer gives a packet.
+class StreamOutput: public StreamOutputBase {
+public:
+    using StreamOutputBase::StreamOutputBase;
+    virtual void process() override {
+        write(this->source_->get());
+    }
+    static std::shared_ptr<StreamOutput> create(NodeCreationInfo &nci) {
+        return build<StreamOutput>(nci);
+    }
+};
+
+// On an event loop (`event_loop`), run when the muxer signals a packet: no thread per output. The
+// write must not block the loop: a URL whose protocol queues or drops (UDP), not one that waits for
+// a peer. The loop only logs an exception, so `on_error` and `auto_restart` do not apply.
+class StreamOutputNonBlocking: public StreamOutputBase, public NonBlockingNode<StreamOutputNonBlocking> {
+    // Packets written in one go before other work on the loop gets its turn.
+    static constexpr int kPacketsPerTurn = 8;
+public:
+    using StreamOutputBase::StreamOutputBase;
+    virtual void processNonBlocking(EventLoop&, bool ticks) override {
+        for (int written = 0; written < kPacketsPerTurn; ++written) {
+            av::Packet *pkt = this->source_->peek(0);
+            if (!pkt) {
+                if (!ticks) this->processWhenSignalled(this->edgeSource()->edge()->producedEvent());
+                return;
+            }
+            write(*pkt);
+            this->source_->pop();
+            if (this->finished_) return;
+        }
+        if (!ticks) this->yieldAndProcess();
+    }
+    static std::shared_ptr<StreamOutputNonBlocking> create(NodeCreationInfo &nci) {
+        return build<StreamOutputNonBlocking>(nci);
+    }
+};
+
 DECLNODE(output, StreamOutput);
+DECLNODE(output_nb, StreamOutputNonBlocking);
