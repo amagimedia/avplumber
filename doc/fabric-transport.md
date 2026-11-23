@@ -167,6 +167,13 @@ The receiver side needs `alpha_dst` on `fabric_source`. Each plane then travels 
 `fabric_source` without `alpha_dst` fails the node. A REPAIR request for a PTS re-sends every stored
 plane of that frame.
 
+For active/standby, give both selectors time to receive the repair after promotion. The
+redundancy examples use `repair_grace_ms=120`. At the default of zero, a selector can skip a
+status-only frame before the reply arrives. Match the decoded planes by PTS when compositing.
+
+The HEVC example extracts the source alpha and stores its full 0–255 range in the key's luma.
+Read that luma directly when recovering the mask. A limited-range conversion rounds away alpha values.
+
 ```text
 producer: fill encoder -> fabric_sink.src
           key encoder  -> fabric_sink.alpha_src
