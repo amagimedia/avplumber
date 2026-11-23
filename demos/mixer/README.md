@@ -68,9 +68,24 @@ selected [instance profile](instance_profiles.py), not a universal source limit.
 
 ### RTX 5080 and 5090 desktops
 
-Use native x86-64 Linux, an R615+ NVIDIA driver, Docker Compose and the NVIDIA
-Container Toolkit. From a fresh checkout, run the single-stream GPU smoke check
-first, then start the 96-input mixer.
+Use native x86-64 Linux, Docker Compose and the NVIDIA Container Toolkit.
+**R615 is the minimum host driver for the desktop image. R620 runs the same
+image.** The build uses CUDA Toolkit 13.4. At runtime the Container Toolkit
+mounts the installed host driver libraries. The host needs no CUDA Toolkit.
+
+| Linux driver | CUDA version reported by the driver | Desktop mixer image |
+| --- | --- | --- |
+| R595 | 13.2 | Below the minimum for Blackwell PTX and the pinned video codec API |
+| R615 | 13.4 | Meets the minimum |
+| R620 | 13.5 | Runs the CUDA 13.4 build through driver backward compatibility |
+
+On the RTX 5080 and 5090 the driver compiles the image's CUDA 13.4 PTX on
+first use. FFmpeg also uses Video Codec SDK 13.1 headers, which require
+R610 or newer. [CUDA driver compatibility](https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/#cuda-driver) ·
+[FFmpeg codec headers](https://github.com/FFmpeg/nv-codec-headers/blob/n13.1.15.0/README)
+
+From a fresh checkout, run the single-stream GPU smoke check first, then start
+the 96-input mixer.
 
 ```sh
 git clone --branch develop --recurse-submodules https://github.com/amagimedia/avplumber.git

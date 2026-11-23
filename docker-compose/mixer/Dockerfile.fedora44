@@ -16,13 +16,11 @@
 # ENABLE_NDI=1 downloads the official NDI 6.4 SDK, which accepts its license, and
 # adds FFmpeg's libndi_newtek input device. The two options are independent.
 #
-# The host driver must be R615 or newer (CUDA 13.4): FFmpeg ships its CUDA
-# filters as PTX that the driver JIT-compiles, and an older driver rejects
-# nvcc 13.4 PTX with CUDA_ERROR_UNSUPPORTED_PTX_VERSION at the first CUDA filter.
-# NVIDIA_REQUIRE_CUDA below makes the container runtime refuse such a host at
-# start instead. For an R595 host build CUDA_VERSION=13.2 from the fedora43
-# repository (CUDA_REPO_URL), with NVCC_PREPEND_FLAGS='-ccbin g++-15' and
-# gcc15-c++ installed, since nvcc 13.2 supports GCC up to 15.
+# The NVIDIA container runtime supplies the host driver. This CUDA 13.4 image
+# runs on R615 and newer drivers, including R620. On desktop Blackwell the
+# driver JIT-compiles the compute_89 PTX in the FFmpeg and compositor fatbins.
+# NVIDIA_REQUIRE_CUDA below enforces that PTX requirement at container startup.
+# The pinned Video Codec SDK 13.1 headers also require R610+ (deps/ffmpeg/9/bases.env).
 
 ARG WITH_TENSORRT=0
 ARG WITH_MXL=0
@@ -73,6 +71,8 @@ RUN dnf -y install --setopt=install_weak_deps=False ca-certificates dnf5-plugins
 
 # Extra nvcc flags without editing this file, e.g. '-allow-unsupported-compiler'
 # should a CUDA release lag behind Fedora's GCC. nvcc 13.4 supports GCC 16.
+# For older-toolkit builds, CUDA_VERSION=13.2 uses the fedora43 CUDA_REPO_URL,
+# gcc15-c++ and NVCC_PREPEND_FLAGS='-ccbin g++-15'.
 ARG NVCC_PREPEND_FLAGS=
 ENV NVCC_PREPEND_FLAGS=${NVCC_PREPEND_FLAGS}
 
