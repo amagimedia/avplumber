@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import selectors
 import socket
 import struct
 import threading
@@ -110,7 +111,11 @@ def _build_rtcp_sdes(*, media_ssrc: int, cname: str) -> bytes:
 
 
 class RtcpFeedbackListener:
-    """Listens for RTCP PLI/FIR and triggers the configured keyframe callback."""
+    """Listens for RTCP PLI/FIR and triggers the configured keyframe callback.
+
+    Every listener of the process is served by one thread (_RtcpPoller): a show has one per
+    Janus output, and a thread each, waking five times a second to look at its socket, was 26
+    threads on the 192-source demo for a few packets a second between them."""
 
     def __init__(
         self,
@@ -130,9 +135,8 @@ class RtcpFeedbackListener:
         self.media_ssrc = media_ssrc
         self.on_keyframe_request = on_keyframe_request
         self.announce_interval_s = announce_interval_s
-        self._stop_event = threading.Event()
-        self._thread: threading.Thread | None = None
         self._sock: socket.socket | None = None
+        self._next_announce = 0.0
         self.local_port: int | None = None
         self.total_packets = 0
         self.keyframe_requests = 0
@@ -140,20 +144,15 @@ class RtcpFeedbackListener:
         self.fir_requests = 0
 
     def start(self) -> None:
-        if self._thread is not None:
+        if self._sock is not None:
             return
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind((self.bind_host, self.bind_port))
-        sock.settimeout(0.2)
+        sock.setblocking(False)
         self._sock = sock
         self.local_port = sock.getsockname()[1]
-        self._thread = threading.Thread(
-            target=self._run,
-            name="janus-rtcp-feedback",
-            daemon=True,
-        )
-        self._thread.start()
+        _RtcpPoller.add(self)
         print(
             "[rtcp] listening for Janus PLI/FIR on "
             f"{self.bind_host}:{self.local_port}, announcing to "
@@ -161,12 +160,11 @@ class RtcpFeedbackListener:
         )
 
     def stop(self) -> None:
-        self._stop_event.set()
-        if self._sock is not None:
-            self._sock.close()
-        if self._thread is not None:
-            self._thread.join(timeout=2.0)
-            self._thread = None
+        if self._sock is None:
+            return
+        _RtcpPoller.remove(self)   # returns once the poller no longer touches the socket
+        self._sock.close()
+        self._sock = None
 
     def _announce(self) -> None:
         if self._sock is None:
@@ -178,28 +176,25 @@ class RtcpFeedbackListener:
         )
         self._sock.sendto(packet, (self.janus_host, self.janus_rtcp_port))
 
-    def _run(self) -> None:
-        next_announce = 0.0
-        while not self._stop_event.is_set():
-            now = time.monotonic()
-            if now >= next_announce:
-                try:
-                    self._announce()
-                except OSError as exc:
-                    if not self._stop_event.is_set():
-                        print(f"[rtcp] failed to send RTCP announcement: {exc}")
-                next_announce = now + self.announce_interval_s
+    def _announce_if_due(self, now: float) -> float:
+        """Announce when due; returns when the next announcement is."""
+        if now >= self._next_announce:
             try:
-                data, addr = self._sock.recvfrom(2048) if self._sock else (b"", ("", 0))
-            except socket.timeout:
-                continue
-            except OSError:
-                if self._stop_event.is_set():
-                    break
-                raise
+                self._announce()
+            except OSError as exc:
+                print(f"[rtcp] failed to send RTCP announcement: {exc}")
+            self._next_announce = now + self.announce_interval_s
+        return self._next_announce
+
+    def _receive(self) -> None:
+        """Handle every datagram waiting on the socket."""
+        while True:
+            try:
+                data, addr = self._sock.recvfrom(2048)
+            except (BlockingIOError, InterruptedError):
+                return
             self.total_packets += 1
-            requests = rtcp_keyframe_requests(data)
-            for request in requests:
+            for request in rtcp_keyframe_requests(data):
                 self.keyframe_requests += 1
                 if request == "pli":
                     self.pli_requests += 1
@@ -207,3 +202,82 @@ class RtcpFeedbackListener:
                     self.fir_requests += 1
                 print(f"[rtcp] received {request.upper()} from {addr[0]}:{addr[1]}")
                 self.on_keyframe_request(request)
+
+
+class _RtcpPoller:
+    """The one thread that waits on every listener's socket and sends their announcements. It
+    starts with the first listener and ends with the last. Listeners join and leave through a
+    queue the thread applies itself, so only it ever touches the selector."""
+
+    _lock = threading.Lock()
+    _instance: "_RtcpPoller | None" = None
+
+    def __init__(self) -> None:
+        self._selector = selectors.DefaultSelector()
+        self._wake_recv, self._wake_send = socket.socketpair()
+        self._wake_recv.setblocking(False)
+        self._selector.register(self._wake_recv, selectors.EVENT_READ, None)
+        self._pending: list[tuple[RtcpFeedbackListener, bool, threading.Event]] = []
+        self._listeners: set[RtcpFeedbackListener] = set()
+        self._thread = threading.Thread(target=self._run, name="janus-rtcp-feedback", daemon=True)
+        self._thread.start()
+
+    @classmethod
+    def add(cls, listener: RtcpFeedbackListener) -> None:
+        cls._change(listener, True)
+
+    @classmethod
+    def remove(cls, listener: RtcpFeedbackListener) -> None:
+        cls._change(listener, False)
+
+    @classmethod
+    def _change(cls, listener: RtcpFeedbackListener, add: bool) -> None:
+        done = threading.Event()
+        with cls._lock:
+            if cls._instance is None:
+                if not add:
+                    return
+                cls._instance = cls()
+            poller = cls._instance
+            poller._pending.append((listener, add, done))
+        poller._wake_send.send(b"\0")
+        done.wait()
+
+    def _apply_pending(self) -> bool:
+        """Apply joins and leaves; False once the last listener has left and the thread may end."""
+        with _RtcpPoller._lock:
+            pending, self._pending = self._pending, []
+            for listener, add, done in pending:
+                if add:
+                    self._selector.register(listener._sock, selectors.EVENT_READ, listener)
+                    self._listeners.add(listener)
+                elif listener in self._listeners:
+                    self._selector.unregister(listener._sock)
+                    self._listeners.discard(listener)
+                done.set()
+            if self._listeners or self._pending:
+                return True
+            _RtcpPoller._instance = None
+            return False
+
+    def _run(self) -> None:
+        try:
+            while self._apply_pending():
+                now = time.monotonic()
+                next_due = min(listener._announce_if_due(now) for listener in self._listeners)
+                for key, _ in self._selector.select(max(0.0, next_due - time.monotonic())):
+                    if key.data is None:
+                        while True:
+                            try:
+                                self._wake_recv.recv(64)
+                            except (BlockingIOError, InterruptedError):
+                                break
+                        continue
+                    try:
+                        key.data._receive()
+                    except Exception as exc:   # one output's callback must not stop the others
+                        print(f"[rtcp] {key.data.janus_host}:{key.data.janus_rtcp_port}: {exc}")
+        finally:
+            self._selector.close()
+            self._wake_recv.close()
+            self._wake_send.close()
