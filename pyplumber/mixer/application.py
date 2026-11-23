@@ -52,6 +52,12 @@ NDI_READ_TIMEOUT_S = 2
 # start) resync it. Held longer, they back up into the input, whose receiver then drops frames, and
 # the gaps would hold the next ones longer still.
 NDI_EARLY_RESYNC_S = 0.1
+# Pacing releases one picture per picture received, so pictures that once queued up in front of it
+# (a show's slow start, a stall) stay queued: the chain's queues stay full, every late read loses a
+# picture in the receiver, and the source runs a queue's worth behind. More than NDI_BACKLOG_MAX
+# frame periods between the picture being paced and the newest one received: the older ones are
+# dropped until NDI_BACKLOG_KEEP are left. Between whole periods, so that jitter decides neither.
+NDI_BACKLOG_MAX, NDI_BACKLOG_KEEP = 3.5, 1.5
 # Nothing in a show reads what input_rec stamps on decoded frames (realtime's frame counters serve
 # its teams and the OBS embedding, speed nodes read frame_ts); stamping costs every hop a copy.
 SOURCE_FRAME_METADATA: list = []
@@ -1090,9 +1096,14 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
                     # packed 4:2:2 (UYVY) is no codec NVDEC has: its frames go the same way, as NV12.
                     decoder_params={**_decoder_params(source, cfg), **({"hwaccel_only_for_codecs": []} if source.alpha or ndi else {})},
                     decoded_ahead=cfg.decoded_frames_ahead,
-                    has_audio=source.has_audio, sync_team=(f"input_{index}_av_sync" if source.has_audio else None),
+                    # realtime measures and drops a backlog as a member of a team, also one of its own.
+                    has_audio=source.has_audio, sync_team=(f"input_{index}_av_sync" if source.has_audio or ndi else None),
                     **({"realtime_params": {"jitter_margin": fps_den / fps_num, "initial_jitter_margin": fps_den / fps_num,
-                                            "discontinuity_threshold": NDI_EARLY_RESYNC_S}} if ndi else {}),
+                                            "discontinuity_threshold": NDI_EARLY_RESYNC_S,
+                                            "input_ts_queue": f"input_{index}_packets",
+                                            "intermediate_queues": [f"input_{index}_video_packets"],
+                                            "max_buffered": NDI_BACKLOG_MAX * fps_den / fps_num,
+                                            "min_buffered": NDI_BACKLOG_KEEP * fps_den / fps_num}} if ndi else {}),
                     **file_params)
                 if audio_edge:
                     audio_edges.append((source.id, audio_edge))

@@ -197,6 +197,13 @@ def test_an_ndi_source_is_received_converted_to_nv12_and_uploaded(native_boundar
     pacing = nodes["realtime_0"]
     # Arrival-paced with a frame of jitter buffer, resynced when frames run ahead (a stale anchor).
     assert pacing["discontinuity_threshold"] == 0.1 and pacing["jitter_margin"] == pacing["initial_jitter_margin"] > 0
+    # A backlog in front of pacing (what arrived against what is being paced) is dropped, not kept.
+    fps_num, fps_den = config.rate_pair(cfg.fps)
+    period = fps_den / fps_num
+    assert pacing["jitter_margin"] == period
+    assert (pacing["team"], pacing["input_ts_queue"], pacing["intermediate_queues"]) == (
+        "input_0_av_sync", received["dst"], ["input_0_video_packets"])
+    assert (pacing["max_buffered"], pacing["min_buffered"]) == (3.5 * period, 1.5 * period)
     # Its restart while the show starts does not fail the start.
     assert app.live_inputs == ("input_0",)
     assert nodes["decode_0"]["auto_restart"] == "group" and nodes["decode_0"]["hwaccel_only_for_codecs"] == []
@@ -804,5 +811,6 @@ def test_the_v210_unpack_kernels_of_the_node_and_of_the_ffmpeg_patch_are_the_sam
     assert all(line.startswith("+") for line in hunk)
     kernels = "\n".join(line[1:] for line in hunk)
     start = "#define INLINE"
-    node = (repo / "src/nodes/hwaccel/v210_pack.cu").read_text()
+    # The node's file goes on with the UYVY unpack (uyvy422_to_cuda), which the patch does not have.
+    node = (repo / "src/nodes/hwaccel/v210_pack.cu").read_text().split("\n// ---- Unpack: UYVY rows")[0]
     assert node[node.index(start):].strip() == kernels[kernels.index(start):].strip()
