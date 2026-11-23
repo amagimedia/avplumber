@@ -687,7 +687,7 @@ def load_avp_api():
         ResampleAudioForwardChannels,
         SmoothTimestamps,
         Split,
-        Uyvy422ToCuda,
+        PackedToCuda,
     )
     from pyplumber.rtcp_feedback import RtcpFeedbackListener
 
@@ -727,7 +727,7 @@ def load_avp_api():
         RtcpFeedbackListener=RtcpFeedbackListener,
         SmoothTimestamps=SmoothTimestamps,
         Split=Split,
-        Uyvy422ToCuda=Uyvy422ToCuda,
+        PackedToCuda=PackedToCuda,
     )
 
 
@@ -819,6 +819,12 @@ def _flag_renditions(options: MixerOptions, width: int, height: int) -> tuple:
                                     _kbps(options.bitrate), options.codec, preset="p3")
     janus = mixer_config.Rendition("janus", "janus", width, height, options.fps, options.janus_video_bitrate_kbps)
     return tuple(r for r, wanted in ((record, options.output), (janus, options.janus_output)) if wanted)
+
+
+def _alpha_storage(source) -> str | None:
+    """What an alpha source's frames are on the GPU: decoded video is uploaded as RGBA, NDI
+    delivers BGRA. None for a source without alpha."""
+    return {"video": "rgba", "ndi": "bgra"}[source.kind] if source.alpha else None
 
 
 def _hdr_metadata(r: "mixer_config.Rendition", target) -> dict | None:
@@ -1115,12 +1121,15 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
                 if source.alpha or ndi:
                     # After pacing, not between decoder and pacing: a seek walks up from the realtime
                     # node to the decoder, and a filter in that path stops it.
-                    stored = "nv12" if ndi else "rgba"
+                    stored = _alpha_storage(source) or "nv12"
                     upload = {"name": f"{'ndi' if ndi else 'alpha'}_upload_{index}", "src": edge, "dst": f"input_{index}_{stored}",
                               "hwaccel": HWACCEL, "group": group, "auto_restart": "group"}
                     # NDI: the device unpacks the packed picture into NV12 itself; converting it on
                     # the CPU first (format=nv12 in a filter graph) was a quarter of a core a source.
-                    avp.addNode(api.Uyvy422ToCuda({**upload, "frame_color": source.color.tags}) if ndi
+                    # With alpha its BGRA goes to the device as it is; a sender's frames without
+                    # alpha (UYVY, BGRX) become opaque BGRA there. Whichever the sender delivers,
+                    # the frames are what the source declares.
+                    avp.addNode(api.PackedToCuda({**upload, "storage": stored, "frame_color": source.color.tags}) if ndi
                                 else api.FilterVideo({**upload, "graph": ALPHA_UPLOAD}))
                     edge = f"input_{index}_{stored}"
         if source.transform:
@@ -1162,11 +1171,11 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
                              # Raw upload stamps tags; transforms preserve frame properties.
                              # User filters/hooks can change them, so keep normalization there.
                              color_tagged=((source.kind in mixer_config.RAW_STORAGE or source.id in external) and
-                                           not source.filter_graph and process_source is None),
+                                           not source.alpha and not source.filter_graph and process_source is None),
                              packed_rgb=source.kind == "browser" or source.alpha,
                              # Decoded alpha is straight; only browser pages arrive premultiplied.
                              premultiplied_alpha=source.kind == "browser" and source.id in blended_sources,
-                             pixel_format="rgba" if source.alpha else source.filter_output_format or
+                             pixel_format=_alpha_storage(source) or source.filter_output_format or
                              (source.transform.sw_format if source.transform
                               else source.decoded_format or ("nv12" if source.id in external else raw_storage)))
     for scene in cfg.scenes:

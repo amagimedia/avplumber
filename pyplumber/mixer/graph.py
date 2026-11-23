@@ -640,7 +640,8 @@ class MixerGraphBuilder:
                     self.avp.addNode(AssumeVideoFormat({
                         "name": self._n(f"live_{src.name}"), "src": fan_out_src, "dst": held[fan_out_src],
                         "ignore_eof": True, "width": src.reconnects[0], "height": src.reconnects[1],
-                        "pixel_format": "cuda", "real_pixel_format": self.working_format, "group": src.input_group,
+                        "pixel_format": "cuda", "group": src.input_group,
+                        "real_pixel_format": src.pixel_format if src.packed_rgb else self.working_format,
                     }))
                 fan_out_src = held[fan_out_src]
             is_in_initial = src.name in initial_scene.sources

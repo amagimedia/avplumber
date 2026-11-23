@@ -165,11 +165,23 @@ UNPACK(p210le, uint16_t, uint64_t, 1)
 UNPACK(p010le, uint16_t, uint64_t, 2)
 UNPACK(nv12, uint8_t, uint32_t, 2)
 
-// ---- Unpack: UYVY rows (8-bit 4:2:2, the bytes Cb Y Cr Y; what an NDI receiver delivers) to nv12 ----
+// ---- Unpack: UYVY rows and packed RGB to nv12 or bgra ----
 //
 // Not in FFmpeg's hwupload_cuda: the kernels the two files share end above this line.
-// CudaPinnedUploader launches it for uyvy422_to_cuda. `input_pitch` is a multiple of 16 bytes
-// (uyvy422Stride), so a thread's 8 pixels are two aligned words of each of its two picture rows.
+// CudaPinnedUploader launches these for packed_to_cuda. UYVY is 8-bit 4:2:2, the bytes Cb Y Cr Y:
+// what an NDI receiver delivers. Packed RGB is 8-bit with a fourth byte (bgra, bgr0, rgba, rgb0):
+// what it delivers for a sender with alpha. `input_pitch` is that of whole groups of 8 pixels
+// (packedStride), which a thread unpacks, so its loads are aligned words.
+//
+// They share their parameters, of which each reads what it needs. `red_shift` is the bit position
+// of red in an RGB pixel's little-endian word, 16 for bgra and 0 for rgba; blue is at the other of
+// the two. `kr` and `kb` are the luma weights of red and blue (0.2126 and 0.0722 for BT.709) and
+// `full_range` chooses Y'CbCr codes of 0..255 over 16..235 and 16..240. `opaque`: the fourth byte
+// of the RGB pixels is not alpha.
+#define PACKED_PARAMETERS \
+    const uint8_t *input, int input_pitch, int width, int height, int interlaced, \
+    uint8_t *output_y, int y_pitch, uint8_t *output_uv, int uv_pitch, \
+    int red_shift, float kr, float kb, int full_range, int opaque
 
 // The even bytes of a word, as four bytes.
 INLINE uint32_t evenBytes(uint64_t word)
@@ -179,29 +191,43 @@ INLINE uint32_t evenBytes(uint64_t word)
     return static_cast<uint32_t>(word | word >> 16);
 }
 
-// 8 samples of a plane row from sample x: one word store, or sample by sample where the picture ends.
-INLINE void store8(uint8_t *plane, int pitch, int row, int x, int width, uint64_t samples)
+// The two picture rows a 4:2:0 chroma row is made of, of its field in an interlaced frame: as in
+// unpack() above, whose text the FFmpeg patch pins, so the rule is written out here again. `second`
+// is `first` where the picture ends; false below the picture.
+INLINE bool chromaRows(int chroma, int height, int interlaced, int &first, int &second)
 {
-    uint8_t *dst = plane + static_cast<size_t>(row) * pitch + x;
-    if (x + 8 <= width) {
-        *reinterpret_cast<uint64_t *>(dst) = samples;
-    } else {
-        for (int i = 0; x + i < width; i++)
-            dst[i] = samples >> i * 8;
-    }
+    const int fields = interlaced ? 1 : 0;
+    first = chroma * 2 - (fields & chroma);
+    const int next = first + 1 + fields;
+    second = next < height ? next : first;
+    return first < height;
 }
 
-extern "C" __global__ void unpack_uyvy422_nv12(
-    const uint8_t *input, int input_pitch, int width, int height, int interlaced,
-    uint8_t *output_y, int y_pitch, uint8_t *output_uv, int uv_pitch)
+// 8 samples (bytes, or words of a bgra row) of a plane row from sample x: sample by sample where
+// the picture ends.
+template <typename T> INLINE void store8(uint8_t *plane, int pitch, int row, int x, int width, const T *samples)
+{
+    T *dst = reinterpret_cast<T *>(plane + static_cast<size_t>(row) * pitch) + x;
+    for (int i = 0; i < 8 && x + i < width; i++)
+        dst[i] = samples[i];
+}
+INLINE void store8(uint8_t *plane, int pitch, int row, int x, int width, uint64_t samples)
+{
+    if (x + 8 <= width)
+        *reinterpret_cast<uint64_t *>(plane + static_cast<size_t>(row) * pitch + x) = samples;
+    else
+        store8(plane, pitch, row, x, width, reinterpret_cast<const uint8_t *>(&samples));
+}
+
+INLINE uint32_t code8(float value) { return static_cast<uint32_t>(min(max(value + 0.5f, 0.0f), 255.0f)); }
+
+// UYVY to nv12: luma as it is, a chroma row the rounded mean of its two picture rows.
+extern "C" __global__ void unpack_uyvy422_nv12(PACKED_PARAMETERS)
 {
     const int x = (blockIdx.x * blockDim.x + threadIdx.x) * 8;
     const int chroma = blockIdx.y * blockDim.y + threadIdx.y;
-    // The two picture rows of the chroma row, of its field in an interlaced frame: as in unpack()
-    // above, whose text the FFmpeg patch pins, so the rule is written out here again.
-    const int first = chroma * 2 - (interlaced ? chroma & 1 : 0), next = first + 1 + (interlaced ? 1 : 0);
-    if (x >= width || first >= height) return;
-    const int second = next < height ? next : first;
+    int first, second;
+    if (x >= width || !chromaRows(chroma, height, interlaced, first, second)) return;
     const uint64_t *a = reinterpret_cast<const uint64_t *>(input + static_cast<size_t>(first) * input_pitch) + x / 4;
     const uint64_t *b = reinterpret_cast<const uint64_t *>(input + static_cast<size_t>(second) * input_pitch) + x / 4;
     const uint64_t a0 = a[0], a1 = a[1], b0 = b[0], b1 = b[1];
@@ -217,4 +243,79 @@ extern "C" __global__ void unpack_uyvy422_nv12(
         store8(output_y, y_pitch, second, x, width, luma(b0, b1));
     if (chroma * 2 < height)   // a last bottom-field row can lie below the last chroma row
         store8(output_uv, uv_pitch, chroma, x, width, mean(a0, b0) | static_cast<uint64_t>(mean(a1, b1)) << 32);
+}
+
+// UYVY to opaque bgra, for a source that keeps alpha when its sender has none: a pixel pair
+// shares its chroma sample.
+extern "C" __global__ void unpack_uyvy422_bgra(PACKED_PARAMETERS)
+{
+    const int x = (blockIdx.x * blockDim.x + threadIdx.x) * 8;
+    const int row = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= width || row >= height) return;
+    const uint8_t *in = input + static_cast<size_t>(row) * input_pitch + x * 2;
+    const float kg = 1.0f - kr - kb;
+    const float luma_gain = full_range ? 1.0f : 255.0f / 219.0f, luma_zero = full_range ? 0.0f : 16.0f;
+    const float chroma_gain = full_range ? 2.0f : 2.0f * 255.0f / 224.0f;
+    uint32_t pixels[8];
+    for (int i = 0; i < 8; i++) {
+        const uint8_t *pair = in + (i & ~1) * 2;
+        const float y = luma_gain * (pair[1 + (i & 1) * 2] - luma_zero);
+        const float blue = y + chroma_gain * (1.0f - kb) * (pair[0] - 128.0f);
+        const float red = y + chroma_gain * (1.0f - kr) * (pair[2] - 128.0f);
+        pixels[i] = code8(blue) | code8((y - kr * red - kb * blue) / kg) << 8 | code8(red) << 16 | 255u << 24;
+    }
+    store8(output_y, y_pitch, row, x, width, pixels);
+}
+
+// RGB to nv12. A chroma sample is that of the mean of its 2x2 pixels (two rows of one field in an
+// interlaced frame); a picture of odd width repeats its last column. The fourth byte is not read:
+// alpha is dropped.
+extern "C" __global__ void unpack_rgb32_nv12(PACKED_PARAMETERS)
+{
+    const int x = (blockIdx.x * blockDim.x + threadIdx.x) * 8;
+    const int chroma = blockIdx.y * blockDim.y + threadIdx.y;
+    int first, second;
+    if (x >= width || !chromaRows(chroma, height, interlaced, first, second)) return;
+    const uint32_t *row[2] = {
+        reinterpret_cast<const uint32_t *>(input + static_cast<size_t>(first) * input_pitch),
+        reinterpret_cast<const uint32_t *>(input + static_cast<size_t>(second) * input_pitch) };
+    const float kg = 1.0f - kr - kb;
+    const float luma_gain = full_range ? 1.0f : 219.0f / 255.0f, luma_zero = full_range ? 0.0f : 16.0f;
+    const float chroma_gain = full_range ? 0.5f : 112.0f / 255.0f;
+    uint8_t luma[2][8], pairs[8];
+    for (int pair = 0; pair < 4; pair++) {
+        float red = 0, green = 0, blue = 0;
+        for (int i = 0; i < 4; i++) {   // the pair's two pixels in each of the two rows
+            const int column = pair * 2 + (i & 1);
+            const uint32_t pixel = row[i >> 1][min(x + column, width - 1)];
+            const float r = pixel >> red_shift & 255, g = pixel >> 8 & 255, b = pixel >> (16 - red_shift) & 255;
+            luma[i >> 1][column] = code8(luma_zero + luma_gain * (kr * r + kg * g + kb * b));
+            red += r, green += g, blue += b;
+        }
+        const float y = (kr * red + kg * green + kb * blue) / 4;
+        pairs[pair * 2] = code8(128.0f + chroma_gain * (blue / 4 - y) / (1.0f - kb));
+        pairs[pair * 2 + 1] = code8(128.0f + chroma_gain * (red / 4 - y) / (1.0f - kr));
+    }
+    store8(output_y, y_pitch, first, x, width, luma[0]);
+    if (second != first)
+        store8(output_y, y_pitch, second, x, width, luma[1]);
+    if (chroma * 2 < height)   // a last bottom-field row can lie below the last chroma row
+        store8(output_uv, uv_pitch, chroma, x, (width + 1) & ~1, pairs);
+}
+
+// RGB to bgra, for a source that keeps alpha: the bytes in bgra's order, alpha 255 when the
+// pixels have none (`opaque`). bgra itself needs no kernel.
+extern "C" __global__ void unpack_rgb32_bgra(PACKED_PARAMETERS)
+{
+    const int x = (blockIdx.x * blockDim.x + threadIdx.x) * 8;
+    const int row = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= width || row >= height) return;
+    const uint32_t *in = reinterpret_cast<const uint32_t *>(input + static_cast<size_t>(row) * input_pitch) + x;
+    uint32_t pixels[8];
+    for (int i = 0; i < 8; i++) {
+        const uint32_t pixel = in[i];
+        pixels[i] = (pixel >> (16 - red_shift) & 255) | (pixel & 0xff00) | (pixel >> red_shift & 255) << 16 |
+                    (opaque ? 255u << 24 : pixel & 0xff000000);
+    }
+    store8(output_y, y_pitch, row, x, width, pixels);
 }

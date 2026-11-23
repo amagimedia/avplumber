@@ -5,8 +5,8 @@
 // with a caller's allocator, a packet reassembler). The block holds one picture, or as many as
 // the caller wants to keep for showing again.
 //
-// With a `packed` picture the block holds packed rows (v210, 10-bit 4:2:2, or UYVY, 8-bit 4:2:2;
-// packedStride() bytes each) instead of the planes of the frames' format: the device takes the
+// With a `packed` picture the block holds packed rows (v210, 10-bit 4:2:2; UYVY, 8-bit 4:2:2; or
+// 8-bit RGB with a fourth byte; packedStride() bytes each) instead of the planes of the frames' format: the device takes the
 // packed picture as it is and unpacks it there into the frame, so the CPU never touches a
 // sample after the caller's one write.
 //
@@ -85,6 +85,8 @@ class CudaPinnedUploader {
     int unpack_pixels_ = 0;   // pixels of a row one kernel block covers
     int unpack_rows_ = 0;     // picture rows one kernel block covers
     int interlaced_ = 0;
+    int red_shift_ = 0;       // packed RGB: the bit position of red in a pixel
+    PackedConversion conversion_;
 
     static bool failed(CUresult result, const char *call, std::string &error) {
         if (result == CUDA_SUCCESS) return false;
@@ -111,14 +113,16 @@ public:
     /// `pictures`: how many pictures the block holds. `pool_frames`: at most that many device
     /// frames, 0 for as many as are ever out at once. `packed`: the block holds pictures packed
     /// so and the frames are `sw_format` unpacked from them (v210 to p210le, p010le or nv12,
-    /// UYVY to nv12); `interlaced`: its rows are two woven fields, so 4:2:0 chroma is taken field
-    /// by field.
+    /// UYVY and RGB to nv12 or bgra, by `conversion` between RGB and Y'CbCr); `interlaced`: its
+    /// rows are two woven fields, so 4:2:0 chroma is taken field by field.
     CudaPinnedUploader(std::shared_ptr<HWAccelDevice> device, AVPixelFormat sw_format, int width, int height,
                        bool write_combined = false, size_t pictures = 1, int pool_frames = 0,
-                       PackedPicture packed = PackedPicture::None, bool interlaced = false):
+                       PackedPicture packed = PackedPicture::None, bool interlaced = false,
+                       PackedConversion conversion = {}):
         device_(std::move(device)),
         layout_(packed == PackedPicture::None ? sw_format : AV_PIX_FMT_GRAY8,
-                packed == PackedPicture::None ? width : packedStride(packed, width), height), interlaced_(interlaced) {
+                packed == PackedPicture::None ? width : packedStride(packed, width), height), interlaced_(interlaced),
+        red_shift_(packed == PackedPicture::Bgr32 ? 16 : 0), conversion_(conversion) {
         if (!device_ || device_->hardwarePixelFormat() != AV_PIX_FMT_CUDA)
             throw Error("pinned upload: a CUDA hwaccel is required");
         if (!pictures) throw Error("pinned upload: the block must hold at least one picture");
@@ -165,16 +169,17 @@ public:
             if (packed != PackedPicture::None && error.empty()) {
 #if HAVE_V210_KERNELS
                 const bool v210 = packed == PackedPicture::V210;
-                const std::string name = std::string(v210 ? "unpack_v210_" : "unpack_uyvy422_") + av_get_pix_fmt_name(sw_format);
-                // A kernel block is 32x8 threads; a thread unpacks 12 pixels (v210) or 8 (UYVY) of
-                // one picture row, or of the two a 4:2:0 chroma row spans.
+                const std::string name = std::string(v210 ? "unpack_v210_" : packed == PackedPicture::Uyvy422 ? "unpack_uyvy422_"
+                                                     : "unpack_rgb32_") + av_get_pix_fmt_name(sw_format);
+                // A kernel block is 32x8 threads; a thread unpacks 12 pixels (v210) or 8 (UYVY, RGB)
+                // of one picture row, or of the two a 4:2:0 chroma row spans.
                 unpack_pixels_ = 32 * (v210 ? 12 : 8);
                 unpack_rows_ = 8 << av_pix_fmt_desc_get(sw_format)->log2_chroma_h;
                 const std::string image(avpl_v210_pack_ptx, avpl_v210_pack_ptx + avpl_v210_pack_ptx_len);
                 if (!failed(cuMemAlloc(&packed_, size_t(layout_.frame_size)), "cuMemAlloc", error) &&
                     !failed(cuModuleLoadDataEx(&module_, image.c_str(), 0, nullptr, nullptr), "cuModuleLoadDataEx", error) &&
                     failed(cuModuleGetFunction(&unpack_, module_, name.c_str()), "cuModuleGetFunction", error))
-                    error += " (v210 unpacks to p210le, p010le or nv12, UYVY to nv12)";
+                    error += " (v210 unpacks to p210le, p010le or nv12, UYVY and RGB to nv12 or bgra)";
 #else
                 error = "a packed picture needs the CUDA kernels of a HAVE_NVCC=1 build";
 #endif
@@ -232,8 +237,10 @@ private:
                failed(cuStreamWaitEvent(stream_, readers_done_, 0), "cuStreamWaitEvent", error);
         if (!stop && unpack_) {
             AVFrame *frame = out.raw();
+            // A kernel takes as many of these as it has parameters: the v210 ones not the last five.
             void *args[] = {&packed_, &layout_.row_bytes[0], &frame->width, &frame->height, &interlaced_,
-                            &frame->data[0], &frame->linesize[0], &frame->data[1], &frame->linesize[1]};
+                            &frame->data[0], &frame->linesize[0], &frame->data[1], &frame->linesize[1],
+                            &red_shift_, &conversion_.kr, &conversion_.kb, &conversion_.full_range, &conversion_.opaque};
             stop = failed(cuLaunchKernel(unpack_, (frame->width + unpack_pixels_ - 1) / unpack_pixels_,
                                          (frame->height + unpack_rows_ - 1) / unpack_rows_, 1, 32, 8, 1, 0,
                                          stream_, args, nullptr), "cuLaunchKernel", error);

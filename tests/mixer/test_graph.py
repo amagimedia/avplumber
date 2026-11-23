@@ -172,7 +172,7 @@ def fake_api():
         "Mux": "mux", "OneToMany": "one_to_many", "Output": "output", "PreheatVideoRouter": "preheat_video_router",
         "RawVideoFileCuda": "raw_video_file_cuda", "Realtime": "realtime", "RepeatLastFrame": "repeat_last_frame",
         "ResampleAudio": "resample_audio",
-        "SmoothTimestamps": "smooth_timestamps", "Split": "split", "Uyvy422ToCuda": "uyvy422_to_cuda",
+        "SmoothTimestamps": "smooth_timestamps", "Split": "split", "PackedToCuda": "packed_to_cuda",
     }
     return SimpleNamespace(AVPlumber=FakeAvp, MixerGraphBuilder=FakeMixer,
                            RtcpFeedbackListener=FakeRtcpFeedbackListener,
@@ -2440,6 +2440,20 @@ def test_mixer_fade_rejects_an_unknown_curve():
 def test_dsk_config_rejects_invalid_keys(dsk, message):
     with pytest.raises(mixer_config.ConfigError, match=message):
         mixer_config.parse({**CONFIG, "dsk": dsk})
+
+
+@pytest.mark.parametrize("graphics", [
+    {"kind": "ndi", "name": "HOST (graphics)", "width": 1920, "height": 1080, "color": "sdr"},
+    {"kind": "video", "path": "lower_third.mov"},
+])
+def test_a_source_with_alpha_is_a_dsk_key_and_one_without_is_not(graphics):
+    """A key needs alpha: a browser page's, or that of an alpha video or NDI source (graphics)."""
+    def keyed(alpha):
+        return mixer_config.parse({**CONFIG, "sources": [*CONFIG["sources"], {"id": "gfx", **graphics, "alpha": alpha}],
+                                   "dsk": {"keys": [{"id": "k", "source": "gfx"}]}})
+    assert keyed(True).dsk_keys[0].source == "gfx"
+    with pytest.raises(mixer_config.ConfigError, match="one with alpha"):
+        keyed(False)
 
 
 @pytest.mark.parametrize("doc,message", [

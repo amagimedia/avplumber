@@ -216,7 +216,7 @@ def test_an_ndi_source_is_received_converted_to_nv12_and_uploaded(native_boundar
     upload = nodes["ndi_upload_0"]
     assert upload["src"] == "input_0_realtime" and app.input_edges[0] == "input_0_nv12"
     # Unpacked into NV12 by the device, not converted on the CPU: no filter graph.
-    assert upload["type"] == "uyvy422_to_cuda" and upload["frame_color"] == cfg.sources[0].color.tags
+    assert upload["type"] == "packed_to_cuda" and upload["frame_color"] == cfg.sources[0].color.tags
     assert (upload["hwaccel"], upload["auto_restart"]) == ("mixer_gpu", "group") and "graph" not in upload
     # A sender lost on program restarts the chain: its EOF stops at the guard before the fan-out.
     live = next(n for n in nodes.values() if n.get("dst") == nodes["mixer_otm_cam"]["src"])
@@ -224,6 +224,17 @@ def test_an_ndi_source_is_received_converted_to_nv12_and_uploaded(native_boundar
     (cam,) = [s for s in app.mixer._sources if s.name == "cam"]
     assert cam.pixel_format == "nv12" and not cam.packed_rgb
     assert "realtime_audio_0" in nodes
+    assert upload["storage"] == "nv12" and live["real_pixel_format"] == "nv12"
+    # With alpha (graphics): BGRA on the GPU whatever the sender delivers, straight alpha, composited
+    # as packed RGB like a browser page, the guard declaring that format.
+    keyed = build_application(ndi_show({**ndi, "alpha": True}), api=fake_api_with(native_boundary))
+    nodes = {n.parameters["name"]: n.parameters for n in keyed.avp.nodes}
+    upload = nodes["ndi_upload_0"]
+    assert (upload["type"], upload["storage"], upload["dst"]) == ("packed_to_cuda", "bgra", "input_0_bgra")
+    live = next(n for n in nodes.values() if n.get("dst") == nodes["mixer_otm_cam"]["src"])
+    assert live["type"] == "assume_video_format" and live["ignore_eof"] and live["real_pixel_format"] == "bgra"
+    (cam,) = [s for s in keyed.mixer._sources if s.name == "cam"]
+    assert cam.packed_rgb and not cam.premultiplied_alpha and cam.pixel_format == "bgra" and not cam.color_tagged
     for bad, match in (({"color": "hlg"}, "SDR only"), ({"name": None}, "needs name"), ({"width": None}, "width"),
                        ({"extra_ips": 1}, "extra_ips")):
         with pytest.raises(config.ConfigError, match=match):
@@ -819,6 +830,6 @@ def test_the_v210_unpack_kernels_of_the_node_and_of_the_ffmpeg_patch_are_the_sam
     assert all(line.startswith("+") for line in hunk)
     kernels = "\n".join(line[1:] for line in hunk)
     start = "#define INLINE"
-    # The node's file goes on with the UYVY unpack (uyvy422_to_cuda), which the patch does not have.
+    # The node's file goes on with the UYVY and RGB unpacks (packed_to_cuda), which the patch does not have.
     node = (repo / "src/nodes/hwaccel/v210_pack.cu").read_text().split("\n// ---- Unpack: UYVY rows")[0]
     assert node[node.index(start):].strip() == kernels[kernels.index(start):].strip()

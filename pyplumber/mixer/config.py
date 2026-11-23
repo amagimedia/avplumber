@@ -265,6 +265,8 @@ class Source:
     # Video with an alpha channel (QuickTime Animation, ProRes 4444, PNG...): decoded on the CPU to
     # straight RGBA and uploaded, the way wipe clips are, then composited as packed RGB like a
     # browser page, so a scene item with blend draws it over what is beneath. SDR only.
+    # NDI from a sender with alpha (graphics): its BGRA frames go to the GPU as they are and are
+    # composited the same way, also as a downstream key.
     alpha: bool = False
     # Layer zoom (avplumber layer_zoom.hpp): where the source's picture is 1:1 on its frames, the
     # metadata key of its per-frame framings and which framing layers (by input) map it.
@@ -363,7 +365,8 @@ class Scene:
 
 @dataclass(frozen=True)
 class DskKey:
-    """One downstream key: an alpha browser source drawn over the finished program."""
+    """One downstream key: a source with alpha (a browser page, or an alpha video or NDI source)
+    drawn over the finished program."""
     id: str
     source: str
     dst: Rect
@@ -672,10 +675,10 @@ def _parse_source(s: Dict[str, Any], where: str, fps: int) -> Source:
     if not isinstance(extra_ips, str) or extra_ips and kind != "ndi":
         raise ConfigError(f"{where}: extra_ips must be a string of comma-separated addresses on an ndi source")
     alpha = s.get("alpha", False)
-    if not isinstance(alpha, bool) or alpha and kind != "video":
-        raise ConfigError(f"{where}: alpha must be a boolean, and only applies to kind video")
+    if not isinstance(alpha, bool) or alpha and kind not in ("video", "ndi"):
+        raise ConfigError(f"{where}: alpha must be a boolean, and only applies to kinds video and ndi")
     if alpha and (source_filter or "transform" in s or storage != "cuda" or decoded_format or deinterlace):
-        raise ConfigError(f"{where}: an alpha source is decoded to RGBA on the CPU: no filter, transform, "
+        raise ConfigError(f"{where}: an alpha source is packed RGB from the CPU: no filter, transform, "
                           "cuarray storage, decoded_format or deinterlace")
     try:
         color = declared_color(s)
@@ -688,7 +691,7 @@ def _parse_source(s: Dict[str, Any], where: str, fps: int) -> Source:
         if kind == "browser" and color != Color():
             raise ValueError("browser input supports SDR only")
         if kind == "ndi" and color != Color():
-            raise ValueError("ndi input supports SDR only (it is converted to 8-bit NV12)")
+            raise ValueError("ndi input supports SDR only (it is 8-bit NV12, or BGRA with alpha)")
         if kind in ("nv12", "p010"):
             if kind == "nv12" and color != Color():
                 raise ValueError("nv12 input supports SDR only")
@@ -975,8 +978,8 @@ def _parse_dsk(dsk: Any, sources: Dict[str, Source], canvas_w: int, canvas_h: in
         if not isinstance(k, dict) or "id" not in k:
             raise ConfigError(f"{where}: id required")
         source = sources.get(k.get("source"))
-        if source is None or source.kind != "browser":
-            raise ConfigError(f"{where}: source must be a browser source (keys need its alpha)")
+        if source is None or source.kind != "browser" and not source.alpha:
+            raise ConfigError(f"{where}: source must be a browser source or one with alpha (keys need its alpha)")
         on = k.get("on", False)
         if not isinstance(on, bool):
             raise ConfigError(f"{where}: on must be a boolean")

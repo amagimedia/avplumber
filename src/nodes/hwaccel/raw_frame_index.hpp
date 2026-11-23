@@ -15,17 +15,27 @@ extern "C" {
 /// described here as GRAY8 rows of this many bytes.
 inline int v210Stride(int width) { return (width + 47) / 48 * 128; }
 
-/// Bytes of a packed UYVY row (AV_PIX_FMT_UYVY422, two a pixel) padded to whole 16-byte groups
-/// of 8 pixels, which is what the device unpacks at a time.
-inline int uyvy422Stride(int width) { return (2 * width + 15) / 16 * 16; }
+/// What a picture handed to the device is packed as, when not the planes of its frames' format:
+/// v210, UYVY (AV_PIX_FMT_UYVY422, two bytes a pixel) or 8-bit RGB with a fourth byte, red first
+/// (rgba, rgb0) or blue first (bgra, bgr0).
+enum class PackedPicture { None, V210, Uyvy422, Rgb32, Bgr32 };
 
-/// What a picture handed to the device is packed as, when not the planes of its frames' format.
-enum class PackedPicture { None, V210, Uyvy422 };
-
-/// The bytes of a row of `packed`; a picture of it is laid out as GRAY8 rows of that many.
+/// The bytes of a row of `packed`; a picture of it is laid out as GRAY8 rows of that many. UYVY
+/// and RGB rows are padded to whole groups of 8 pixels, which is what the device unpacks at a time.
 inline int packedStride(PackedPicture packed, int width) {
-    return packed == PackedPicture::V210 ? v210Stride(width) : uyvy422Stride(width);
+    if (packed == PackedPicture::V210) return v210Stride(width);
+    return (width + 7) / 8 * 8 * (packed == PackedPicture::Uyvy422 ? 2 : 4);
 }
+
+/// How the device converts a packed picture between RGB and Y'CbCr (RGB to nv12, UYVY to bgra):
+/// the luma weights of red and blue (BT.709's by default) and whether Y'CbCr codes span the full
+/// range. `opaque`: an RGB picture's fourth byte is not alpha (rgb0, bgr0) and bgra frames made
+/// of it get alpha 255.
+struct PackedConversion {
+    float kr = 0.2126f, kb = 0.0722f;
+    int full_range = 0;
+    int opaque = 0;
+};
 
 /// One picture as contiguous planes, each row exactly its samples.
 struct RawPictureLayout {
