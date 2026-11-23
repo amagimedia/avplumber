@@ -43,9 +43,10 @@ protected:
     bool interlaced_ = false;
     std::atomic<uint64_t> frames_{0}, copy_us_{0}, upload_us_{0};
 
-    // How frames of `format` are packed for the device: not at all when they are the storage's.
+    // How frames of `format` are packed for the device: not at all when they are the storage's and it
+    // is packed (bgra); a planar storage (nv12) is only ever unpacked into, as one plane is copied.
     PackedPicture packing(AVPixelFormat format) const {
-        if (format == storage_) return PackedPicture::None;
+        if (format == storage_ && storage_ == AV_PIX_FMT_BGRA) return PackedPicture::None;
         switch (format) {
         case AV_PIX_FMT_UYVY422: return PackedPicture::Uyvy422;
         case AV_PIX_FMT_BGRA: case AV_PIX_FMT_BGR0: return PackedPicture::Bgr32;
