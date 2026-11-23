@@ -733,6 +733,71 @@ Runtime control (via `node.object.set` / `node.object.get`):
 -   `node.object.get <name> pending` — bool, `true` if a trigger has been
     requested but not yet applied to a frame.
 
+### `nvjpeg2k_enc`
+
+GPU-only JPEG 2000 encoder. Requires `HAVE_CUDA=1 HAVE_NVJPEG2K=1`.
+
+1 input: `av::VideoFrame` (CUDA `yuv444p`, `yuv444p10le`, `yuv444p12le` or `yuv444p16le`),
+1 output: `av::Packet` (`AV_CODEC_ID_JPEG2000`).
+
+-   `lossless` (bool, default `true`) - reversible 5/3 wavelet. When `false`, the
+    encoder uses the irreversible 9/7 wavelet and `psnr`.
+-   `high_throughput` (bool, default `false`) - encode HTJ2K (ISO/IEC 15444-15) instead of
+    JPEG 2000 Part 1: the same wavelet and codestream structure with the fast block coder in
+    place of the arithmetic one, which is what makes J2K viable at video rates, for a few
+    percent in size. Lossless still applies. Only an HT-capable decoder reads the result -
+    `nvjpeg2k_dec` takes it from the codestream and needs no setting, but libavcodec's
+    `jpeg2000` decoder cannot read it, and the packets are still `AV_CODEC_ID_JPEG2000`, so
+    nothing warns a Part 1 consumer. Keep it off when anything outside nvJPEG2000 decodes the
+    stream. Measured on 1080p camera footage, HT encoded lossless 4:4:4 at 577 fps against 60 fps
+    for Part 1, for 14% more bytes. Requires `lossless` - nvJPEG2000 has no target-PSNR rate
+    control for HT codestreams, so `high_throughput` with `lossless: false` is rejected.
+-   `psnr` (float, default `50`) - target PSNR in dB, used only when `lossless` is `false`.
+-   `stream_type` (`j2k` or `jp2`, default `j2k`) - raw codestream or JP2 container.
+-   `num_resolutions` (int, default `6`) - clamped to what the image dimensions allow.
+-   `code_block_w` / `code_block_h` (32 or 64, default `64`) - JPEG 2000 code-block size.
+    nvJPEG2000 also documents a width of 128, but takes it only on the HT coder with NLT type 3
+    float samples, which this node does not encode, so it is rejected.
+-   `real_pixel_format` (string) - optional override when the upstream metadata does not
+    describe the planar 4:4:4 CUDA frame.
+
+Match the pixel format to the depth of the content. The component precision is taken from the
+format, and encoding at a precision above the content costs multiples rather than being absorbed:
+`scale_cuda` fills a deeper container by shifting left (8-bit to `yuv444p16le` is exactly
+`v << 8`), and nvJPEG2000 codes those known-zero low bit-planes anyway. Measured on 1080p
+footage, the same 8-bit frames cost 1102 KiB as `yuv444p` and 5082 KiB as `yuv444p16le` - 4.6x for
+no added information.
+
+This matters beyond 8-bit, because `scale_cuda` cannot output `yuv444p10le`: a 10-bit 4:4:4 source
+can only reach this node as MSB-aligned `yuv444p16le`, which it must encode as 16-bit. A
+`precision` override would not help - the samples are not LSB-aligned, so declaring 10 bits would
+misread them. For lossless 10-bit (or deeper) 4:4:4, prefer `enc_video` with `hevc_nvenc`
+(`profile: rext`, `tune: lossless`, `qp: 0`): NVENC takes the top 10 bits, which is bit-exact for
+the content - verified sample-for-sample across all three planes of a 1080p frame of native
+10-bit 4:4:4. On that content it measured 2420 KiB/frame (3.14:1) against 4158 for Part 1 (1.83:1)
+and 5445 for HT (1.39:1), at 4x Part 1's throughput. At native 8-bit the ranking reverses and this
+node wins - see `examples/redundancy/jpeg2000_lossless/`.
+
+### `nvjpeg2k_dec`
+
+GPU-only JPEG 2000 decoder. Requires `HAVE_CUDA=1 HAVE_NVJPEG2K=1`.
+
+1 input: `av::Packet`, 1 output: `av::VideoFrame` (CUDA, planar 4:4:4).
+
+-   `hwaccel` (string) - mandatory, name of a `hwaccel.init` CUDA device.
+-   `width` / `height` (int) - optional before the first frame arrives.
+-   `real_pixel_format` (string, default from upstream) - `yuv444p`, `yuv444p10le`,
+    `yuv444p12le` or `yuv444p16le`. What the node advertises to the nodes built below it, so it
+    has to match what the producer sends: a bitstream whose size or component precision differs
+    is an error naming both, not a new output format, because the graph downstream was already
+    built for the declared one.
+-   `frame_color` (object, optional) - colour fields written on every decoded frame, as
+    `one_to_many` takes them (`color_range`, `colorspace`, `color_primaries`, `color_trc`).
+    A JPEG 2000 codestream carries no colour tags, so a decoded frame is untagged unless this
+    declares what the encoder was fed: the samples survive the round trip bit for bit, their
+    meaning does not. Tag a limited-range source `{"color_range": "tv"}`, or anything
+    downstream that converts it reads the samples as full range.
+
 ### `enc_video`, `enc_audio`
 
 Encodes video or audio frames.

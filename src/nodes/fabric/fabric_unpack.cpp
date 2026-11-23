@@ -27,6 +27,11 @@ public:
     void process() override {
         FabricPacket *ptr = this->source_->peek();
         if (ptr == nullptr) return;
+        if (isEofMarker(*ptr)) {
+            // Leave the marker at the head: consumeEofIfPresent() forwards it as EOF through
+            // NodeSISO::onEofConsumed(). Popping it here would drop the end of the stream.
+            return;
+        }
         FabricPacket fp = *ptr;
         this->source_->pop();
         if (!fp.complete || fp.message_type != avp_fabric::MSG_MEDIA) return;
@@ -45,10 +50,11 @@ public:
         pkt.setKeyPacket((fp.packet_flags & avp_fabric::FLAG_KEYFRAME) != 0);
         pkt.setComplete(true);
 
-        const AVCodecID codec_id = avp_fabric::codecIdFromWire(fp.codec);
-        if (codec_id != AV_CODEC_ID_NONE && source_stream_.raw()->codecpar->codec_id != codec_id) {
-            source_stream_.raw()->codecpar->codec_id = codec_id;
-            codec_ = av::findEncodingCodec(codec_id);
+        const AVCodecID codec_id = avp_fabric::codecIdFromWire(fp.codec, "fabric_unpack");
+        if (source_stream_.raw()->codecpar->codec_id != codec_id) {
+            throw Error(std::string("fabric_unpack configured for ") +
+                        avcodec_get_name(source_stream_.raw()->codecpar->codec_id) +
+                        " but received " + avcodec_get_name(codec_id));
         }
         this->sink_->put(pkt);
     }

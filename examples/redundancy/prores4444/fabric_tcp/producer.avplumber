@@ -1,0 +1,23 @@
+# ProRes 4444 over fabric, single stream: alpha rides inside the payload (4:4:4:4), so there is no
+# key/fill pair and no merge step. prores_ks encodes on the CPU today; ProresNV (a CUDA prores_nv
+# plugin) produces the same bitstream and can replace it without touching the protocol.
+#
+# The filter stamps a horizontal alpha ramp on the source so a consumer can prove that the alpha
+# plane it receives is really the one encoded here. ProRes frames are big: 4444 is a mastering
+# codec, so max_payload_bytes has to hold a whole frame (and sizes the receive pool with
+# rx_buffers on the consumer side).
+queue.plan_capacity * 4
+queue.plan_capacity in 4
+queue.plan_capacity v_packet 8
+queue.plan_capacity v_frames 4
+queue.plan_capacity v_alpha_frames 4
+queue.plan_capacity v_enc 8
+
+node.add { "type": "input", "format": "lavfi", "url": "testsrc2=size=640x360:rate=30:duration=6", "dst": "in", "group": "tx", "name": "TestSrc", "auto_restart": "off", "timeout": -1 }
+node.add { "type": "demux", "src": "in", "routing": { "v:0": "v_packet" }, "group": "tx", "name": "Demux" }
+node.add { "type": "dec_video", "src": "v_packet", "dst": "v_frames", "group": "tx", "name": "Decode" }
+node.add { "type": "filter_video", "graph": "format=yuva444p10le,geq=lum='lum(X,Y)':a='X*1023/W'", "src": "v_frames", "dst": "v_alpha_frames", "group": "tx", "name": "AlphaRamp", "dst_width": 640, "dst_height": 360, "dst_pixel_format": "yuva444p10le", "dst_frame_rate": "30/1" }
+node.add { "type": "enc_video", "src": "v_alpha_frames", "dst": "v_enc", "group": "tx", "name": "ProResEnc", "codec": "prores_ks", "options": { "profile": "4444" } }
+node.add { "type": "fabric_sink", "src": "v_enc", "group": "tx", "name": "ProResFabricOut", "provider": "tcp", "remote_host": "127.0.0.1", "remote_port": "5593", "stream_id": "main", "replica_id": 1, "generation": 1, "media_type": "video", "codec": "prores4444", "width": 640, "height": 360, "pixel_format": "yuva444p10le", "real_pixel_format": "yuva444p10le", "require_keyframes": true, "max_payload_bytes": 4194304, "queue_depth": 64, "backpressure": "block", "header_crc": true, "payload_crc": false }
+
+group.start tx

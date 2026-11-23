@@ -51,6 +51,9 @@ private:
     uint32_t current_active_replica_id_ = 1;
     uint64_t playout_delay_frames_ = 0;
     uint64_t promote_after_misses_ = 1;
+    // Liveness horizon: a replica counts as live only while its records keep arriving within this
+    // window. This is the selector's heartbeat contract for both failover and strict playout
+    // gating; the records can be media or status-only.
     uint64_t active_timeout_ms_ = 50;
     uint64_t repair_grace_ns_ = 0;
     bool strict_frame_identity_ = false;
@@ -210,6 +213,27 @@ public:
                 slot.repair_requested_ns = monotonicNs();
             }
             break;
+        }
+        return false;
+    }
+
+    // All input edges have ended. No later media or repair reply can arrive.
+    bool drain(SourceCandidate &selected) {
+        while (!frame_slots_.empty()) {
+            auto slot = frame_slots_.begin();
+            auto &media = slot->second.media_by_replica;
+            auto chosen = media.find(current_active_replica_id_);
+            if (chosen == media.end()) {
+                chosen = std::find_if(media.begin(), media.end(), [this](const auto &entry) {
+                    return replicaEligible(entry.first);
+                });
+            }
+            if (chosen != media.end() && (!next_emit_valid_ || slot->first >= next_emit_frame_)) {
+                selected = chosen->second;
+                finishSelectedFrame(slot);
+                return true;
+            }
+            frame_slots_.erase(slot);
         }
         return false;
     }

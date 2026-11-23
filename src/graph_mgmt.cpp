@@ -791,6 +791,12 @@ namespace NodeGroupUtils {
         } else if (params.count("dst")==1) {
             we_offer = jsonToStringList(params["dst"]);
         }
+        // A second named output edge, as fabric_source's alpha_dst is to its dst. Without this the
+        // sort would not know that the key chain reads from this node, and a consumer of that edge
+        // could be created before the producer that publishes its stream metadata.
+        if (params.count("alpha_dst")==1) {
+            we_offer.push_back(params["alpha_dst"].get<std::string>());
+        }
         return we_offer;
     }
     static std::list<std::string> offers(NodeGroup::Item& weak_node) {
@@ -800,11 +806,15 @@ namespace NodeGroupUtils {
     }
 
     static std::list<std::string> needs(Parameters& params) {
+        std::list<std::string> we_need;
         if (params.count("src")==1) {
-            return jsonToStringList(params["src"]);
-        } else {
-            return {};
+            we_need = jsonToStringList(params["src"]);
         }
+        // A second named input edge, as fabric_sink's alpha_src is to its src.
+        if (params.count("alpha_src")==1) {
+            we_need.push_back(params["alpha_src"].get<std::string>());
+        }
+        return we_need;
     }
     static std::list<std::string > needs(NodeGroup::Item& weak_node) {
         NodeGroup::SolidItem node = weak_node.lock();

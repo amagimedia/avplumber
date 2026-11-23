@@ -1,0 +1,19 @@
+# GPU-only lossless JPEG 2000 consumer: receive, decode with nvJPEG2000, drain frames.
+# Requires a build with HAVE_CUDA=1 HAVE_NVJPEG2K=1.
+queue.plan_capacity * 4
+queue.plan_capacity v_fabric 8
+queue.plan_capacity v_j2k 8
+queue.plan_capacity v_dec_cuda 4
+
+hwaccel.init { "name": "@gpu", "type": "cuda" }
+
+# max_payload_bytes must match the producer, and it sizes the receive pool: fabric_source
+# pre-allocates max_payload_bytes x rx_buffers (default 16), so 4 MiB here is a 64 MiB slab.
+node.add { "type": "fabric_source", "dst": "v_fabric", "group": "rx", "name": "Jpeg2000FabricIn", "provider": "tcp", "bind_port": "5592", "stream_id": "main", "media_type": "video", "codec": "jpeg2000", "width": 1280, "height": 720, "pixel_format": "cuda", "real_pixel_format": "yuv444p", "time_base": "1/30000", "frame_rate": "30000/1001", "max_payload_bytes": 4194304, "queue_depth": 64 }
+node.add { "type": "fabric_unpack", "src": "v_fabric", "dst": "v_j2k", "group": "rx", "name": "UnpackJpeg2000Fabric", "auto_restart": "panic" }
+node.add { "type": "nvjpeg2k_dec", "src": "v_j2k", "dst": "v_dec_cuda", "group": "rx", "name": "NvJpeg2000Decode", "auto_restart": "panic", "hwaccel": "@gpu", "width": 1280, "height": 720, "real_pixel_format": "yuv444p" }
+node.add { "type": "null_sink<av::VideoFrame>", "src": "v_dec_cuda", "group": "rx", "name": "FakeSink", "auto_restart": "panic" }
+
+stats.subscribe { "url": "", "name": "jpeg2000_lossless_fabric_tcp_consumer_decode_null", "interval": 1, "streams": { "video": [ { "q_pre_dec": "v_j2k", "q_post_dec": "v_dec_cuda", "decoder": "NvJpeg2000Decode" } ] } }
+
+group.start rx

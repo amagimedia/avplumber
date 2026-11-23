@@ -16,6 +16,7 @@ struct FabricPacket {
     int32_t time_base_den = 0;
     uint32_t media_type = 0;
     uint32_t codec = 0;
+    uint32_t plane = 0;          // avp_fabric::PLANE_FILL or PLANE_ALPHA
     uint32_t packet_format = 0;
     uint32_t packet_flags = 0;
     int64_t duration = 0;

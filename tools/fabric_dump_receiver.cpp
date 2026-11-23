@@ -1,3 +1,4 @@
+#include "../src/nodes/fabric/fabric_wire.hpp"
 #include <rdma/fabric.h>
 #include <rdma/fi_cm.h>
 #include <rdma/fi_domain.h>
@@ -14,42 +15,6 @@
 #include <vector>
 
 namespace {
-
-constexpr uint32_t AVPF_MAGIC = 0x46505641;
-
-struct __attribute__((packed)) AvpFabricWireHeader {
-    uint32_t magic;
-    uint16_t version;
-    uint16_t header_bytes;
-    uint16_t message_type;
-    uint16_t flags;
-    uint32_t header_crc;
-    uint32_t payload_crc;
-    uint32_t payload_bytes;
-};
-
-struct __attribute__((packed)) AvpFabricMediaHeader {
-    uint64_t stream_id_hash;
-    uint32_t track_id;
-    uint32_t replica_id;
-    uint64_t generation;
-    uint64_t sequence;
-    uint64_t frame_group_id;
-    int64_t pts;
-    int64_t dts;
-    int32_t time_base_num;
-    int32_t time_base_den;
-    uint32_t media_type;
-    uint32_t codec;
-    uint32_t packet_format;
-    uint32_t packet_flags;
-    int64_t duration;
-    uint32_t width;
-    uint32_t height;
-    uint32_t pixel_format;
-    uint32_t real_pixel_format;
-    uint64_t sender_wallclock_ns;
-};
 
 [[noreturn]] void fail(const std::string &msg, int err = 0) {
     if (err < 0) {
@@ -148,26 +113,31 @@ public:
     }
 
     void describe(size_t len, size_t index) {
-        if (len < sizeof(AvpFabricWireHeader) + sizeof(AvpFabricMediaHeader)) {
+        if (len < sizeof(avp_fabric::WireHeader)) {
             std::cout << "frame=" << index << " len=" << len << " too_short=1\n";
             return;
         }
-        const auto *wire = reinterpret_cast<const AvpFabricWireHeader *>(buffer_.data());
-        const auto *media = reinterpret_cast<const AvpFabricMediaHeader *>(buffer_.data() + sizeof(AvpFabricWireHeader));
-        const bool magic_ok = wire->magic == AVPF_MAGIC;
+        const auto *wire = reinterpret_cast<const avp_fabric::WireHeader *>(buffer_.data());
+        const size_t expected = avp_fabric::headerBytes(wire->version);
+        if (!expected || wire->header_bytes != expected || len < expected) {
+            std::cout << "frame=" << index << " invalid_header=1\n";
+            return;
+        }
+        const auto media = avp_fabric::readMediaHeader(buffer_.data() + sizeof(*wire), wire->version);
+        const bool magic_ok = wire->magic == avp_fabric::MAGIC;
         std::cout << "frame=" << index
                   << " len=" << len
+                  << " version=" << wire->version
                   << " magic_ok=" << magic_ok
                   << " payload_bytes=" << wire->payload_bytes
-                  << " sequence=" << media->sequence
-                  << " frame_group_id=" << media->frame_group_id
-                  << " pts=" << media->pts
-                  << " tb=" << media->time_base_num << "/" << media->time_base_den
-                  << " replica_id=" << media->replica_id
-                  << " generation=" << media->generation
-                  << " size=" << media->width << "x" << media->height
-                  << " pixfmt=" << media->pixel_format
-                  << " real_pixfmt=" << media->real_pixel_format
+                  << " pts=" << media.pts
+                  << " tb=" << media.time_base_num << "/" << media.time_base_den
+                  << " plane=" << (media.plane == 1 ? "alpha" : media.plane == 0 ? "fill" : "unknown")
+                  << " replica_id=" << media.replica_id
+                  << " generation=" << media.generation
+                  << " size=" << media.width << "x" << media.height
+                  << " pixfmt=" << media.pixel_format
+                  << " real_pixfmt=" << media.real_pixel_format
                   << "\n";
     }
 

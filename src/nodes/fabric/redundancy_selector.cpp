@@ -65,6 +65,8 @@ class RedundancySelector: public NodeMultiInput<FabricPacket>,
     int64_t next_emit_id_ = 0;
     int64_t highest_seen_id_ = std::numeric_limits<int64_t>::min();
     int64_t frame_step_ = 0;
+    bool plane_known_ = false;
+    uint32_t plane_ = avp_fabric::PLANE_FILL;
     int64_t previous_anchor_pts_ = AV_NOPTS_VALUE;
     av::FormatContext format_ctx_;
     av::Stream stream_;
@@ -74,6 +76,9 @@ class RedundancySelector: public NodeMultiInput<FabricPacket>,
     uint64_t stale_dropped_ = 0;
     uint64_t standby_selected_ = 0;
     uint64_t implausible_steps_ = 0;
+    // One flag per input edge: set when that edge delivered its EOF marker. The selector ends
+    // when every edge has ended, so a multi-port selector never waits for a peer that is gone.
+    std::vector<bool> edge_ended_;
 
 public:
     RedundancySelector(std::unique_ptr<Sink<FabricPacket>> &&sink, const Parameters &params):
@@ -136,6 +141,7 @@ public:
     void init(EdgeManager &edges, const Parameters &params) override {
         NodeMultiInput<FabricPacket>::createSourcesFromParameters(edges, params);
         NodeSingleOutput<FabricPacket>::init(edges, params);
+        edge_ended_.assign(source_edges_.size(), false);
 
         for (auto &edge: source_edges_) {
             auto md = edge->template metadata<InputStreamMetadata>();
@@ -161,7 +167,7 @@ public:
                     av_freep(&cp->extradata);
                     cp->extradata_size = 0;
                 }
-                cp->codec_tag = 0;
+                if (cp->codec_id != AV_CODEC_ID_PRORES) cp->codec_tag = 0;
             }
         }
         if (!stream_.isValid()) throw Error("redundancy_selector requires upstream InputStreamMetadata");
@@ -169,6 +175,10 @@ public:
         auto out_md = out_edge->metadata<InputStreamMetadata>(true);
         out_md->source_stream = stream_;
     }
+
+    // The base class only flushes on EOF and never forwards the marker, so this node handles
+    // markers in process() and sends EOF to its own output when every input edge has ended.
+    bool consumeEofIfPresent() override { return false; }
 
     void process() override {
         if (mode_ == Mode::Single) {
@@ -188,9 +198,23 @@ public:
             if (idx < 0) return;
             FabricPacket *queued = source_edges_[idx]->peek();
             if (queued == nullptr) continue;
+            if (isEofMarker(*queued)) {
+                source_edges_[idx]->pop();
+                edge_ended_[idx] = true;
+                if (allEdgesEnded()) {
+                    while (tryEmit(selected, true)) {
+                        this->sink_->put(selected);
+                        ++emitted_;
+                    }
+                    endOfStream();
+                    return;
+                }
+                continue;
+            }
             FabricPacket pkt = *queued;
             source_edges_[idx]->pop();
             if (!pkt.complete) continue;
+            notePlane(pkt.plane);
 
             if (mode_ == Mode::ActiveStandby) {
                 receiveActiveStandby(pkt);
@@ -215,30 +239,55 @@ public:
     }
 
 private:
+    bool allEdgesEnded() const {
+        for (bool ended: edge_ended_) {
+            if (!ended) return false;
+        }
+        return true;
+    }
+
+    // Every input has ended: hand the end of the stream to the output and finish. The selector's
+    // own output marker is what lets downstream decoders terminate. emitEof() enqueues directly,
+    // like the framework's other EOF paths, so a marker with no PTS does not warn.
+    void endOfStream() {
+        emitEof();
+        markFinished();
+    }
+
     void processSingle() {
         for (;;) {
             const int idx = findSourceWithData(-1);
             if (idx < 0) return;
             FabricPacket *queued = source_edges_[idx]->peek();
             if (queued == nullptr) continue;
+            if (isEofMarker(*queued)) {
+                source_edges_[idx]->pop();
+                edge_ended_[idx] = true;
+                if (allEdgesEnded()) {
+                    endOfStream();
+                    return;
+                }
+                continue;
+            }
             FabricPacket pkt = *queued;
             source_edges_[idx]->pop();
             if (!pkt.complete || pkt.message_type != avp_fabric::MSG_MEDIA) continue;
+            notePlane(pkt.plane);
             this->sink_->put(transparentPacket(pkt));
             emitted_++;
             return;
         }
     }
 
-    bool tryEmit(FabricPacket &selected) {
+    bool tryEmit(FabricPacket &selected, bool draining = false) {
         if (mode_ == Mode::ActiveStandby) {
             avp_fabric::SourceCandidate candidate;
-            if (!timeline_.trySelect(candidate, controlSender())) return false;
+            if (!(draining ? timeline_.drain(candidate) : timeline_.trySelect(candidate, controlSender()))) return false;
             selected = fromCandidate(candidate);
             return true;
         }
-        if (!next_emit_valid_ || slots_.empty()) return false;
-        return alignment_mode_ == AlignmentMode::StrictFrameIdentity ? tryEmitStrict(selected) : tryEmitWallclock(selected);
+        if (slots_.empty() || (!next_emit_valid_ && !draining)) return false;
+        return selectBuffered(selected, draining);
     }
 
     void receiveActiveStandby(const FabricPacket &pkt) {
@@ -303,6 +352,7 @@ private:
         }
         if (received_ < 12 || received_ % 250 == 0) {
             logstream << "redundancy_selector received"
+                      << " plane=" << avp_fabric::planeName(pkt.plane)
                       << " replica_id=" << pkt.replica_id
                       << " raw_pts=" << pkt.raw_pts
                       << " offset=" << state.offset
@@ -377,62 +427,37 @@ private:
         state.offset_valid = true;
     }
 
-    bool tryEmitWallclock(FabricPacket &selected) {
-        auto it = slots_.lower_bound(next_emit_id_);
-        if (it == slots_.end()) return false;
-        next_emit_id_ = it->first;
-
-        const int64_t delay_ticks = (frame_step_ > 0) ? static_cast<int64_t>(playout_delay_frames_) * frame_step_ : 0;
-        if (delay_ticks > 0 && highest_seen_id_ < next_emit_id_ + delay_ticks) return false;
-
-        Slot &slot = it->second;
-        auto active = slot.by_replica.find(anchor_replica_id_);
-        if (active != slot.by_replica.end()) {
-            selected = transparentPacket(active->second);
-            finish(it);
-            return true;
-        }
-        auto standby = slot.by_replica.find(standby_replica_id_);
-        if (standby != slot.by_replica.end()) {
-            selected = transparentPacket(standby->second);
-            logStandbySelected(*standby, next_emit_id_, false);
-            finish(it);
-            return true;
-        }
-        return false;
-    }
-
-    bool tryEmitStrict(FabricPacket &selected) {
-        while (!slots_.empty() && slots_.begin()->first < next_emit_id_) {
-            if (stale_dropped_ < 8 || stale_dropped_ % 250 == 0) {
+    bool selectBuffered(FabricPacket &selected, bool draining) {
+        const bool strict = alignment_mode_ == AlignmentMode::StrictFrameIdentity;
+        while (next_emit_valid_ && !slots_.empty() && slots_.begin()->first < next_emit_id_) {
+            if (strict && (stale_dropped_ < 8 || stale_dropped_ % 250 == 0)) {
                 logstream << "redundancy_selector strict dropped stale pts=" << slots_.begin()->first
-                          << " next_emit_id=" << next_emit_id_
-                          << " stale_dropped=" << stale_dropped_;
+                          << " next_emit_id=" << next_emit_id_ << " stale_dropped=" << stale_dropped_;
             }
-            stale_dropped_++;
+            ++stale_dropped_;
             slots_.erase(slots_.begin());
         }
-        if (slots_.empty()) return false;
-
-        const int64_t delay_ticks = (frame_step_ > 0) ? static_cast<int64_t>(playout_delay_frames_) * frame_step_ : 0;
-        if (delay_ticks > 0 && highest_seen_id_ < next_emit_id_ + delay_ticks) return false;
-
-        auto it = slots_.find(next_emit_id_);
-        if (it == slots_.end()) return false;
-
-        Slot &slot = it->second;
-        auto active = slot.by_replica.find(anchor_replica_id_);
-        if (active != slot.by_replica.end()) {
-            selected = transparentPacket(active->second);
-            finish(it);
-            return true;
-        }
-        auto standby = slot.by_replica.find(standby_replica_id_);
-        if (standby != slot.by_replica.end()) {
-            selected = transparentPacket(standby->second);
-            logStandbySelected(*standby, next_emit_id_, true);
-            finish(it);
-            return true;
+        while (!slots_.empty()) {
+            auto it = slots_.begin();
+            if (!draining) {
+                if (strict && it->first != next_emit_id_) return false;
+                if (!strict) next_emit_id_ = it->first;
+                const int64_t delay = frame_step_ * static_cast<int64_t>(playout_delay_frames_);
+                if (delay > 0 && highest_seen_id_ < it->first + delay) return false;
+            }
+            auto &replicas = it->second.by_replica;
+            auto chosen = replicas.find(anchor_replica_id_);
+            if (chosen == replicas.end()) {
+                chosen = replicas.find(standby_replica_id_);
+                if (chosen != replicas.end()) logStandbySelected(*chosen, it->first, strict);
+            }
+            if (chosen != replicas.end()) {
+                selected = transparentPacket(chosen->second);
+                finish(it);
+                return true;
+            }
+            if (!draining) return false;
+            slots_.erase(it);
         }
         return false;
     }
@@ -455,6 +480,22 @@ private:
         return out;
     }
 
+    // A selector carries one plane of one stream: every replica feeding it must be that same
+    // plane. Wiring a fill edge and an alpha edge into one selector would publish key payloads as
+    // pictures, so that is an error rather than something to average over.
+    void notePlane(uint32_t plane) {
+        if (!plane_known_) {
+            plane_ = plane;
+            plane_known_ = true;
+            return;
+        }
+        if (plane != plane_) {
+            throw Error(std::string("redundancy_selector received plane ") + avp_fabric::planeName(plane) +
+                        " but already carries plane " + avp_fabric::planeName(plane_) +
+                        ": give each plane its own selector");
+        }
+    }
+
     FabricPacket fromCandidate(const avp_fabric::SourceCandidate &candidate) {
         FabricPacket out;
         out.message_type = avp_fabric::MSG_MEDIA;
@@ -465,6 +506,7 @@ private:
         out.time_base_den = candidate.media.time_base_den;
         out.media_type = candidate.media.media_type;
         out.codec = candidate.media.codec;
+        out.plane = candidate.media.plane;
         out.packet_format = candidate.media.packet_format;
         out.packet_flags = candidate.media.packet_flags;
         out.duration = candidate.media.duration;
@@ -510,6 +552,7 @@ private:
         media.time_base_den = pkt.time_base_den;
         media.media_type = pkt.media_type;
         media.codec = pkt.codec;
+        media.plane = pkt.plane;
         media.packet_format = pkt.packet_format;
         media.packet_flags = pkt.packet_flags;
         media.duration = pkt.duration;

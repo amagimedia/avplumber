@@ -119,10 +119,34 @@ private:
     std::string log_prefix_;
     uint64_t copied_under_pressure_ = 0;
     uint64_t receive_errors_ = 0;
+    // Set when a receive fails because the peer's connection went away. Best effort: the tcp
+    // provider does not deliver FI_SHUTDOWN for an RDM endpoint (its per-peer connection endpoints
+    // are created without the application's EQ), so only a posted receive that tears mid-record
+    // reports here. A clean or idle close is silent; record cadence and idle_timeout_ms carry
+    // liveness. The endpoint stays open, so the same peer (or a new one) can send again; a record
+    // clears the flag.
+    std::atomic_bool peer_closed_{false};
+    uint64_t peer_closes_ = 0;
 
     static void check(int ret, const std::string &what) {
         if (ret < 0) {
             throw Error(what + " failed: " + fi_strerror(-ret));
+        }
+    }
+
+    // Errors that mean "the peer's connection ended", not "this receiver is broken": the
+    // provider's own error codes are the platform's errno values (see fi_errno.h).
+    static bool isConnectionLoss(int err) {
+        switch (err) {
+            case FI_ECONNRESET:
+            case FI_ECONNREFUSED:
+            case FI_ENOTCONN:
+            case FI_ESHUTDOWN:
+            case FI_ETIMEDOUT:
+            case FI_ECONNABORTED:
+                return true;
+            default:
+                return false;
         }
     }
 
@@ -209,9 +233,10 @@ public:
         if (domain_) fi_close(&domain_->fid);
         if (fabric_) fi_close(&fabric_->fid);
         if (info_) fi_freeinfo(info_);
-        if (copied_under_pressure_ || receive_errors_) {
+        if (copied_under_pressure_ || receive_errors_ || peer_closes_) {
             logstream << log_prefix_ << " summary copied_under_pressure=" << copied_under_pressure_
-                      << " receive_errors=" << receive_errors_;
+                      << " receive_errors=" << receive_errors_
+                      << " peer_closes=" << peer_closes_;
         }
     }
 
@@ -222,6 +247,15 @@ public:
 
     bool stopping() const {
         return stopping_.load(std::memory_order_acquire);
+    }
+
+    // True while the provider has reported a connection loss and no record has arrived since.
+    bool peerClosed() const {
+        return peer_closed_.load(std::memory_order_acquire);
+    }
+
+    uint64_t peerCloses() const {
+        return peer_closes_;
     }
 
     // One completed receive, without blocking. Reposts buffers that came back first.
@@ -236,6 +270,10 @@ public:
         }
         check(ret, "fi_cq_read");
         if (ret != 1) throw Error("fi_cq_read returned unexpected count");
+        if (peer_closed_.load(std::memory_order_acquire)) {
+            peer_closed_.store(false, std::memory_order_release);
+            logstream << log_prefix_ << " peer back after " << peer_closes_ << " close(s)";
+        }
         auto *slot = static_cast<Slot *>(entry.op_context);
         slot->posted = false;
         --posted_;
@@ -350,6 +388,20 @@ private:
             --posted_;
         }
         if (err.err == FI_ECANCELED && stopping()) return;
+        if (isConnectionLoss(err.err)) {
+            if (stopping()) return;
+            // The peer left. Not a receiver failure: keep the endpoint and its posted receives so
+            // the peer can return (or a new one can connect). On tcp/RDM only a torn in-flight
+            // record reports here, so this is diagnostic; the caller decides what record silence
+            // means (fabric_source ends the session after idle_timeout_ms).
+            ++peer_closes_;
+            peer_closed_.store(true, std::memory_order_release);
+            logstream << log_prefix_ << " peer closed: " << fi_strerror(err.err)
+                      << " (" << fi_cq_strerror(cq_, err.prov_errno, err.err_data, nullptr, 0) << ")"
+                      << " closes=" << peer_closes_;
+            if (slot) post(slot->index);
+            return;
+        }
         ++receive_errors_;
         logstream << log_prefix_ << " receive error: " << fi_strerror(err.err)
                   << " (" << fi_cq_strerror(cq_, err.prov_errno, err.err_data, nullptr, 0) << ")"

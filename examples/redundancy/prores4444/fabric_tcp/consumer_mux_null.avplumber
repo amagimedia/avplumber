@@ -1,0 +1,21 @@
+# ProRes 4444 over fabric, single stream consumer: the received payloads are written to a MOV
+# unchanged (fabric_unpack describes the codec, mux passes the packets through), so the file holds
+# exactly what crossed the fabric and its alpha plane can be checked offline:
+#
+#   ffmpeg -i /tmp/prores4444_fabric_rx.mov -frames:v 1 -vf alphaextract,format=gray16le \
+#     -f rawvideo -pix_fmt gray16le - | <inspect>
+#
+# There is deliberately no filter_video here: a fabric decoder gets codec-only stream metadata, so
+# its frame rate is unknown, and filter_video's buffer source rejects an unknown frame rate before
+# the first frame. Inserting a filter after a fabric decode needs that fixed first.
+queue.plan_capacity * 4
+queue.plan_capacity v_fabric 8
+queue.plan_capacity v_enc 8
+queue.plan_capacity v_muxed 8
+
+node.add { "type": "fabric_source", "dst": "v_fabric", "group": "rx", "name": "ProResFabricIn", "provider": "tcp", "bind_port": "5593", "stream_id": "main", "media_type": "video", "codec": "prores4444", "width": 640, "height": 360, "pixel_format": "yuva444p10le", "real_pixel_format": "yuva444p10le", "time_base": "1/1000", "frame_rate": "30/1", "max_payload_bytes": 4194304, "queue_depth": 64 }
+node.add { "type": "fabric_unpack", "src": "v_fabric", "dst": "v_enc", "group": "rx", "name": "UnpackProRes" }
+node.add { "type": "mux", "src": "v_enc", "dst": "v_muxed", "group": "rx", "name": "MuxProRes", "format": "mov" }
+node.add { "type": "output", "src": "v_muxed", "group": "rx", "name": "WriteProRes", "url": "/tmp/prores4444_fabric_rx.mov", "auto_restart": "off" }
+
+group.start rx
