@@ -242,9 +242,13 @@ def build_janus_output(avp, api, src_edge: str, janus: JanusVideoConfig, *, fps:
             **({"hold": True} if hold else {}), **on_loop}),
     ]
     if edge_capacity is not None:
+        # The chain holds as many frames and packets as it did with the format node and the
+        # dump_extra filter in it: the queue before each of them now has its item too. Without it an
+        # encoder that stalls for a few frames costs the compositor a tick, a repeated picture, sooner.
+        longer = {node_name("encoded")} | ({node_name("video")} if source_declares_format else set())
         for _, params in specs:
             if "dst" in params:   # planned before addNode creates the edge
-                avp.edges.planCapacity(params["dst"], edge_capacity)
+                avp.edges.planCapacity(params["dst"], edge_capacity + (params["dst"] in longer))
     add_nodes(avp, api, specs, group=group, auto_restart=failure_mode)
     return api.RtcpFeedbackListener(
         bind_host=janus.rtcp_bind, bind_port=janus.rtcp_port, janus_host=janus.host,
