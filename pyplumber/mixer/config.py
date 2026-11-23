@@ -587,7 +587,7 @@ def _rect(obj: Any, where: str) -> Rect:
 
 
 _SOURCE_KEYS = {"browser": ("url", "width", "height"), "video": ("path",), "mxl": ("url", "flow", "width", "height"),
-                "ndi": ("name",),
+                "ndi": ("name", "width", "height"),
                 **{kind: ("path", "width", "height") for kind in ("v210", "nv12", "p010")}}
 
 

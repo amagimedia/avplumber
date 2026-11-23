@@ -180,7 +180,8 @@ def test_an_ndi_source_is_received_converted_to_nv12_and_uploaded(native_boundar
     its audio joins the show's like a video file's. NDI never ends: no loop, the group restarts."""
     api = fake_api()
     api.MixerGraphBuilder = native_boundary[1]
-    ndi = {"id": "cam", "kind": "ndi", "name": "HOST (avp-smoke)", "extra_ips": "127.0.0.1", "color": "sdr"}
+    ndi = {"id": "cam", "kind": "ndi", "name": "HOST (avp-smoke)", "extra_ips": "127.0.0.1", "color": "sdr",
+           "width": 1920, "height": 1080}
     def ndi_show(source):
         return config.parse({"canvas": CONFIG["canvas"], "renditions": [{"id": "record", "target": "program.ts"}],
                              "sources": [source, {**CONFIG["sources"][0], "id": "idle", "path": "idle.mp4"}],
@@ -194,11 +195,15 @@ def test_an_ndi_source_is_received_converted_to_nv12_and_uploaded(native_boundar
     assert nodes["decode_0"]["auto_restart"] == "group" and nodes["decode_0"]["hwaccel_only_for_codecs"] == []
     upload = nodes["ndi_upload_0"]
     assert upload["src"] == "input_0_realtime" and app.input_edges[0] == "input_0_nv12"
-    assert upload["graph"] == f"format=nv12,{cfg.sources[0].color.setparams},hwupload_cuda"
+    assert upload["graph"] == f"format=nv12,{cfg.sources[0].color.setparams},hwupload_cuda=pinned=1" and upload["threads"] == 1
+    # A sender lost on program restarts the chain: its EOF stops at the guard before the fan-out.
+    live = next(n for n in nodes.values() if n.get("dst") == nodes["mixer_otm_cam"]["src"])
+    assert live["type"] == "assume_video_format" and live["ignore_eof"] and (live["width"], live["height"]) == (1920, 1080)
     (cam,) = [s for s in app.mixer._sources if s.name == "cam"]
     assert cam.pixel_format == "nv12" and not cam.packed_rgb
     assert "realtime_audio_0" in nodes
-    for bad, match in (({"color": "hlg"}, "SDR only"), ({"name": None}, "needs name"), ({"extra_ips": 1}, "extra_ips")):
+    for bad, match in (({"color": "hlg"}, "SDR only"), ({"name": None}, "needs name"), ({"width": None}, "width"),
+                       ({"extra_ips": 1}, "extra_ips")):
         with pytest.raises(config.ConfigError, match=match):
             ndi_show({k: v for k, v in {**ndi, **bad}.items() if v is not None})
     with pytest.raises(config.ConfigError, match="extra_ips"):

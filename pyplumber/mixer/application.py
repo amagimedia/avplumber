@@ -1081,10 +1081,12 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
                     # After pacing, not between decoder and pacing: a seek walks up from the realtime
                     # node to the decoder, and a filter in that path stops it.
                     stored = "nv12" if ndi else "rgba"
+                    # NDI: pinned staging on the upload's own stream, not the program compositors'
+                    # default one, on one thread rather than a slice thread per CPU per source.
                     avp.addNode(api.FilterVideo({
                         "name": f"{'ndi' if ndi else 'alpha'}_upload_{index}", "src": edge, "dst": f"input_{index}_{stored}",
-                        "graph": f"format=nv12,{source.color.setparams},hwupload_cuda" if ndi else ALPHA_UPLOAD,
-                        "hwaccel": HWACCEL, "group": group, "auto_restart": "group",
+                        "graph": f"format=nv12,{source.color.setparams},hwupload_cuda=pinned=1" if ndi else ALPHA_UPLOAD,
+                        **({"threads": 1} if ndi else {}), "hwaccel": HWACCEL, "group": group, "auto_restart": "group",
                     }))
                     edge = f"input_{index}_{stored}"
         if source.transform:
@@ -1118,7 +1120,9 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
             # The reusable builder shares conversion and fan-out for identical edges.
             mixer.add_source(mixer_config.alias_name(source.id, k), pre_otm_edge=edge,
                              input_group=group, picture=source.picture,
-                             reconnects=(source.width, source.height) if source.kind == "mxl" else None,
+                             # A lost MXL flow or NDI sender restarts the source's group, whose EOF
+                             # would otherwise end a program showing only such sources for good.
+                             reconnects=(source.width, source.height) if source.kind in ("mxl", "ndi") else None,
                              fan_out_loop=_pacing_loop(index) if cfg.source_fan_out == "event_loop" else None,
                              color=None if source.filter_graph else source.color,
                              # Raw upload stamps tags; transforms preserve frame properties.

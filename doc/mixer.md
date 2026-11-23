@@ -142,13 +142,15 @@ for revision-specific evidence and the ranked optimization list.
 
 ## NDI sources
 
-A source `{"kind": "ndi", "name": "HOST (stream)", "color": "sdr"}` receives that NDI sender with
+A source `{"kind": "ndi", "name": "HOST (stream)", "width": 1920, "height": 1080, "color": "sdr"}` receives that NDI sender with
 FFmpeg's `libndi_newtek` device, which images built with `ENABLE_NDI=1` have (see
 `docker-compose/mixer/deploy/l4/README.md` for the discovery service). `extra_ips` lists addresses to
 find the sender at besides mDNS, e.g. `"127.0.0.1"` for one on the same host. NDI video is packed
 4:2:2 (UYVY), no codec NVDEC has: it decodes in software, is converted to NV12 with the declared
 colour tags and uploaded after pacing, as an alpha source is RGBA. `has_audio` takes its audio into
-the show like a video file's. The source never loops; when the sender is lost the chain restarts.
+the show like a video file's. The source never loops; when the sender is lost the chain restarts, and an
+`assume_video_format` with `ignore_eof` at the declared size before its fan-out, as for MXL, keeps that
+restart's EOF from ending a program that shows only NDI sources. The upload is pinned and on one thread.
 
 ## MXL sources and outputs
 

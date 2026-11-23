@@ -73,7 +73,7 @@ One source ID opens one decoder or browser window; scenes and aliases reuse it. 
 | `kind` | all | `"video"`, `"browser"`, `"nv12"` (raw SDR 8-bit 4:2:0), `"p010"` (raw 10-bit 4:2:0), `"v210"` (headerless packed 10-bit 4:2:2, e.g. generated HDR test content), `"mxl"` (see [MXL sources](../../../doc/mixer.md#mxl-sources-and-outputs)) or `"ndi"` (an NDI sender, in an image built with `ENABLE_NDI=1`) |
 | `path` | video, v210, nv12, p010 | file or stream |
 | `width`, `height` | v210, nv12, p010 | required: raw bytes carry no header; NV12/P010 dimensions must be positive and even |
-| `name`, `extra_ips` | ndi | the NDI source's name as discovery lists it (`HOST (stream)`), and optionally the comma-separated addresses to look for it at besides mDNS. Its packed 4:2:2 is converted to NV12 on the CPU and uploaded; it never loops, and a lost source restarts its chain |
+| `name`, `width`, `height`, `extra_ips` | ndi | the NDI source's name as discovery lists it (`HOST (stream)`) and its picture size (required), and optionally the comma-separated addresses to look for it at besides mDNS. Its packed 4:2:2 is converted to NV12 on the CPU and uploaded; it never loops, and a lost source restarts its chain |
 | `color` | browser, v210, nv12, p010, ndi | required color contract (`sdr`, `hlg`, `pq`); browser, NV12 and NDI sources must be `sdr`. Optional for `video`: by default the decoded frame tags decide and untagged files are treated as BT.709 SDR |
 | `url`, `width`, `height` | browser | page and the window it is rendered in (all three required) |
 | `fps` | browser | the rate its frames are numbered at, whole or exact NTSC; defaults to the canvas rate. The window paints at the next whole rate |
