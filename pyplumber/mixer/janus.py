@@ -169,7 +169,7 @@ def build_janus_output(avp, api, src_edge: str, janus: JanusVideoConfig, *, fps:
                        preset: str = "p7", enc_format: str = "nv12", color=None,
                        hdr_metadata=None, prefix: str = "janus", failure_mode: str = "panic",
                        dpb_size: int = 0, edge_capacity: int | None = None, hold: bool = False,
-                       source_declares_format: bool = False, packet_loop: str | None = None):
+                       source_declares_format: bool = False):
     """Add ``force_fps -> keyframe -> format -> nvenc -> rtp mux -> output``; return the RTCP listener.
 
     Defaults to HEVC (Main/Main10), which current Safari and Chrome negotiate
@@ -182,17 +182,11 @@ def build_janus_output(avp, api, src_edge: str, janus: JanusVideoConfig, *, fps:
     ``hold`` starts the output held: the chain runs and nothing is sent until :func:`release_commands`.
     ``source_declares_format`` leaves out the ``assume_video_format`` node and its thread: the node above
     ``src_edge`` already declares this size and ``enc_format`` to the encoder (a compositor does).
-    ``packet_loop`` names an event loop that muxes and sends the encoder's packets (``mux_nb``,
-    ``output_nb``) in place of two threads per output. A loop only logs a node's error, so this
-    needs ``failure_mode`` "off": an output whose failure must stop or restart the show keeps its threads.
 
     No ``dump_extra`` bitstream filter repeats the parameter sets: the RTP muxer asks for no global
     header, so NVENC writes them in-band before every IDR and has no extradata to repeat.
     """
-    if packet_loop and failure_mode != "off":
-        raise ValueError("packet_loop needs failure_mode 'off': an event loop does not apply on_error or auto_restart")
     node_name = lambda suffix: f"{prefix}_{suffix}"
-    on_loop = {"event_loop": packet_loop} if packet_loop else {}
     keyframe_node = node_name("force_keyframe")
     bitrate = f"{janus.bitrate_kbps}k"
     ten_bit = enc_format in TEN_BIT_FORMATS
@@ -231,15 +225,12 @@ def build_janus_output(avp, api, src_edge: str, janus: JanusVideoConfig, *, fps:
                 **dpb_options(dpb_size), **(color or {}),
             },
         }),
-        ("MuxNb" if packet_loop else "Mux", {
-            "name": node_name("mux"), "src": [node_name("encoded")], "dst": node_name("video_rtp_mux"),
-            "ts_sort_wait": 0, "auto_restart": "on" if failure_mode == "panic" else "off", "on_error": failure_mode,
-            **on_loop}),
-        ("OutputNb" if packet_loop else "Output", {
-            "name": node_name("rtp_output"), "src": node_name("video_rtp_mux"), "url": janus.rtp_url,
-            "format": "rtp", "auto_restart": "on" if failure_mode == "panic" else "off", "on_error": failure_mode,
-            "options": {"payload_type": janus.payload_type, "rtpflags": "skip_rtcp", "ssrc": janus.ssrc},
-            **({"hold": True} if hold else {}), **on_loop}),
+        ("Mux", {"name": node_name("mux"), "src": [node_name("encoded")], "dst": node_name("video_rtp_mux"),
+                 "ts_sort_wait": 0, "auto_restart": "on" if failure_mode == "panic" else "off", "on_error": failure_mode}),
+        ("Output", {"name": node_name("rtp_output"), "src": node_name("video_rtp_mux"), "url": janus.rtp_url,
+                    "format": "rtp", "auto_restart": "on" if failure_mode == "panic" else "off", "on_error": failure_mode,
+                    "options": {"payload_type": janus.payload_type, "rtpflags": "skip_rtcp", "ssrc": janus.ssrc},
+                    **({"hold": True} if hold else {})}),
     ]
     if edge_capacity is not None:
         # The chain holds as many frames and packets as it did with the format node and the

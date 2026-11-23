@@ -2,10 +2,8 @@
 #include "../MultiEventWait.hpp"
 #include "../ClockOrigin.hpp"
 
-// Interleaves packet streams for one output: what both nodes below do with the packets, and their
-// parameters. How they wait for a packet is theirs.
-class StreamMuxerBase: public NodeSingleOutput<av::Packet>, public IStoppable, public IMuxer, public NodeDoesNotBuffer {
-protected:
+class StreamMuxer: public NodeSingleOutput<av::Packet>, public IStoppable, public IMuxer, public NodeDoesNotBuffer {
+private:
     struct StreamInfo {
         int stream_index = -1;
         int out_stream_id = -1;
@@ -25,9 +23,6 @@ protected:
     Event stop_event_;
     AVTS sync_wait_max_ms_ = 2500;
     std::unique_ptr<MultiEventWait> event_wait_;
-    /// Called when a pass has to wait for an input: until a packet comes, or `timeout_ms` at most.
-    /// True when a packet came.
-    virtual bool waitForPacket(int timeout_ms = -1) = 0;
     bool fix_timestamps_ = false;
     bool allow_no_encoder_ = false;
     av::Timestamp global_shift_ = {0, {1, 1}};
@@ -86,7 +81,7 @@ protected:
         logstream << "Shifting everything by " << global_shift_;
     }
 public:
-    StreamMuxerBase(std::unique_ptr<Sink<av::Packet>> &&sink): NodeSingleOutput<av::Packet>(std::move(sink)) {
+    StreamMuxer(std::unique_ptr<Sink<av::Packet>> &&sink): NodeSingleOutput<av::Packet>(std::move(sink)) {
     }
     StreamInfo& addStream(int stream_index, std::shared_ptr<Edge<av::Packet>> edge) {
         streams_.emplace_back();
@@ -107,8 +102,7 @@ public:
     virtual void stop() {
         stop_event_.signal();
     }
-protected:
-    void step() {
+    virtual void process() {
         // All inputs at EOF: merge into one EOF packet downstream and finish.
         if (!streams_.empty()) {
             bool all_eof = true;
@@ -182,7 +176,7 @@ protected:
             }
             // no packet available in queue, wait for it
             should_emit = false;
-            waitForPacket();
+            event_wait_->wait();
         } else if (sync_wait_max_ms_>0 && !have_all) {
             AVTS ts = least_ts.timestamp(av::Rational(1, 1000));
             AVTS max_wait = -1;
@@ -229,7 +223,7 @@ protected:
                 }
                 // wait for next packet
                 // if timeout occured (no more packets arrived), emit without re-checking
-                bool got_packet = waitForPacket(max_wait);
+                bool got_packet = event_wait_->wait(max_wait);
                 should_emit = !got_packet;
                 if (!got_packet) {
                     for (StreamInfo &s: streams_) {
@@ -292,7 +286,6 @@ protected:
             }
         }
     }
-public:
     virtual void initFromFormatContext(av::FormatContext &octx) {
         for (StreamInfo &s: streams_) {
             std::shared_ptr<IEncoder> enc = s.edge->findNodeUp<IEncoder>();
@@ -339,12 +332,11 @@ public:
             enc->setOutputPostOpen(deststream, octx);
         }
     }
-protected:
-    template <typename Child> static std::shared_ptr<Child> build(NodeCreationInfo &nci) {
+    static std::shared_ptr<StreamMuxer> create(NodeCreationInfo &nci) {
         EdgeManager &edges = nci.edges;
         const Parameters &params = nci.params;
         std::shared_ptr<Edge<av::Packet>> out_edge = edges.find<av::Packet>(params["dst"]);
-        auto r = std::make_shared<Child>(make_unique<EdgeSink<av::Packet>>(out_edge));
+        auto r = std::make_shared<StreamMuxer>(make_unique<EdgeSink<av::Packet>>(out_edge));
         if (params.count("fix_timestamps")) {
             r->fix_timestamps_ = params["fix_timestamps"];
         }
@@ -388,59 +380,4 @@ protected:
     }
 };
 
-// On a thread of its own, sleeping until an input has a packet.
-class StreamMuxer: public StreamMuxerBase {
-protected:
-    bool waitForPacket(int timeout_ms) override {
-        return event_wait_->wait(timeout_ms);
-    }
-public:
-    using StreamMuxerBase::StreamMuxerBase;
-    virtual void process() override {
-        step();
-    }
-    static std::shared_ptr<StreamMuxer> create(NodeCreationInfo &nci) {
-        return build<StreamMuxer>(nci);
-    }
-};
-
-// On an event loop (`event_loop`), run when an input signals a packet: no thread per muxer. A loop
-// cannot sleep for another stream's packet, so `ts_sort_wait` must be 0, and it takes a packet only
-// when the output queue has room for it.
-class StreamMuxerNonBlocking: public StreamMuxerBase, public NonBlockingNode<StreamMuxerNonBlocking> {
-    // Packets passed on in one go before other work on the loop gets its turn.
-    static constexpr int kPacketsPerTurn = 8;
-    bool idle_ = false;   // the last step found no packet
-protected:
-    bool waitForPacket(int) override {
-        idle_ = true;
-        return false;
-    }
-public:
-    using StreamMuxerBase::StreamMuxerBase;
-    virtual void processNonBlocking(EventLoop&, bool ticks) override {
-        Edge<av::Packet> &out = *this->edgeSink()->edge();
-        for (int passed = 0; passed < kPacketsPerTurn; ++passed) {
-            if (out.occupied() >= int(out.capacity())) {
-                if (!ticks) this->processWhenSignalled(out.consumedEvent());
-                return;
-            }
-            idle_ = false;
-            step();
-            if (this->finished_) return;
-            if (idle_) {
-                if (!ticks) for (StreamInfo &s: streams_) this->processWhenSignalled(s.edge->producedEvent());
-                return;
-            }
-        }
-        if (!ticks) this->yieldAndProcess();
-    }
-    static std::shared_ptr<StreamMuxerNonBlocking> create(NodeCreationInfo &nci) {
-        auto r = build<StreamMuxerNonBlocking>(nci);
-        if (r->sync_wait_max_ms_ > 0) throw Error("mux_nb: ts_sort_wait must be 0, an event loop cannot wait for another stream's packet");
-        return r;
-    }
-};
-
 DECLNODE(mux, StreamMuxer);
-DECLNODE(mux_nb, StreamMuxerNonBlocking);

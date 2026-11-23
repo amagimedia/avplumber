@@ -332,14 +332,6 @@ class Mux(InternalNode):
 class Output(InternalNode):
     TYPE = "output"
 
-
-class MuxNb(InternalNode):
-    TYPE = "mux_nb"
-
-
-class OutputNb(InternalNode):
-    TYPE = "output_nb"
-
 class OneToMany(InternalNode):
     TYPE = "one_to_many"
 class OneToManyNb(InternalNode):

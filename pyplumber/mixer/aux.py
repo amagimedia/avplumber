@@ -14,11 +14,6 @@ from .config import ConfigError, rate_number, rate_pair
 from . import thumbnail
 
 
-# The one event loop that muxes and sends every bus's encoded packets: microseconds of work per
-# frame and bus, queued for FFmpeg's paced UDP sender, so the buses need no two threads each for it.
-PACKET_LOOP = "aux_packets"
-
-
 class _PvwFollowNode(InternalNode):
     TYPE = "mixer_pvw_follow"
 
@@ -152,7 +147,7 @@ class AuxBus:
             codec=r.codec, preset=r.preset, profile=r.profile or ("main" if "hevc" in r.codec else "high"), enc_format="nv12",
             prefix=self.prefix, failure_mode="off", dpb_size=r.dpb_size, edge_capacity=1,
             # Without a conversion the encoder reads the bus compositor's own canvas size and storage.
-            source_declares_format=not needs_conversion, packet_loop=PACKET_LOOP,
+            source_declares_format=not needs_conversion,
             hold=True)   # MixerApplication releases every output together once the show has settled
         # Prefer the mixer's copy: build_application clears it when no has_audio sources
         # remain, while a stale options.audio_router_node would still wire an unfed edge.
