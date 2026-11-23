@@ -81,6 +81,11 @@ summary { cursor: pointer; }
 <div class="workspace">
 <div class="stack">
 <section class="card"><div class="card-title"><h2>Mixer</h2></div>
+<div id="desktop-presets" hidden>
+<button type="button" id="low">Low · 96 inputs</button>
+<button type="button" id="high">High · 192 inputs</button>
+<p id="preset-memory" class="hint"></p>
+</div>
 <div class="fields">
 <span id="canvas-controls" style="display:contents"></span>
 <label>Unique sources<input id="sources" type="number" min="1" step="1" value="16"></label>
@@ -89,7 +94,7 @@ summary { cursor: pointer; }
 </div>
 <div class="canvas-row"><div><b id="canvas-label"></b><p id="canvas-format"></p><p id="input-size"></p></div></div>
 <p class="hint" id="source-limit"></p>
-<p class="hint">Unique sources are independent input chains. Scene count is the number of compositions you can switch between; scenes reuse those sources.</p>
+<p class="hint">The Unique sources field counts scene inputs. Downstream keys add separate browser inputs. Scene count is the number of compositions you can switch between; scenes reuse those sources.</p>
 </section>
 <section class="card"><div class="card-title"><h2>Sources</h2></div>
 <p class="hint">Set each source count within its budget; zero disables that type. Editing Unique sources restores the default balanced proportions.</p>
@@ -120,7 +125,7 @@ summary { cursor: pointer; }
 </section>
 </div>
 <aside class="stack right">
-<section class="card summary"><h2 id="summary-title"></h2><div class="stats"><div><b id="source-total"></b><span>unique sources</span></div><div><b id="scene-total"></b><span>scenes</span></div><div><b id="fps-total"></b><span>frames / second</span></div></div><p id="engine-split"></p></section>
+<section class="card summary"><h2 id="summary-title"></h2><div class="stats"><div><b id="source-total"></b><span>total inputs</span></div><div><b id="scene-total"></b><span>scenes</span></div><div><b id="fps-total"></b><span>frames / second</span></div></div><p id="engine-split"></p></section>
 <section class="card">
 <button class="primary" id="apply">Apply setup</button>
 <p class="hint">Prepares assets and restarts this instance’s mixer. Output pauses during the restart.</p>
@@ -159,7 +164,7 @@ const BALANCED=[18,18,4,0,36,17,17,0,0];
 const dskPages=()=>[...document.querySelectorAll('#dsk-pages input:checked')].map(i=>i.value);
 // The instance's measured limits (instance_profiles.py) arrive with the setup status; the page
 // applies them as setup_runtime.py does and computes nothing before they arrive.
-let profile=null, instanceType='', auxBuses=[], janusApi=false, extraLimit=0;
+let desktop=null, profile=null, instanceType='', auxBuses=[], janusApi=false, extraLimit=0;
 // One {codec, preset, bitrate_kbps} per encoded output, by output id: the last valid one of every output
 // shown or loaded. A new one, or every one after Defaults, takes the profile's default
 // (nvenc.defaults), an aux bus, own or extra, its "aux".
@@ -319,8 +324,9 @@ function update(){
   });
   groups[k].hidden=indices.every(i=>!sourceAvailable(i));
  });
- $('source-total').textContent=counts.reduce((a,b)=>a+b,0);
- $('source-limit').textContent=`Maximum ${limit} unique sources at ${label} fps${tenBit?` on a 10-bit ${chroma==='422'?'4:2:2':'4:2:0'} canvas (estimated)`:''}. Limits measured on ${instanceType}.`;
+ $('source-total').textContent=counts.reduce((a,b)=>a+b,0)+dskPages().length;
+ const basis=profile.reference_profile?`Reference limits from ${profile.reference_profile}. Desktop capacity is unmeasured.`:`Limits measured on ${instanceType}.`;
+ $('source-limit').textContent=`Maximum ${limit} unique sources at ${label} fps${tenBit?` on a 10-bit ${chroma==='422'?'4:2:2':'4:2:0'} canvas (estimated)`:''}. ${basis}`;
  $('browser-max').textContent=` · maximum ${browserLimit()}`;$('mxl-max').textContent=` · maximum ${mxlLimit()}`;
  $('ndi-max').textContent=` · maximum ${ndiLimit()}`;
  $('mxl-generated').hidden=!mxlLimit();$('ndi-generated').hidden=!ndiLimit();
@@ -380,7 +386,7 @@ function update(){
  $('canvas-format').textContent=tenBit?`HLG, 10-bit ${chroma==='422'?'4:2:2':'4:2:0'} canvas · SDR and HDR outputs`:'BT.709, 8-bit 4:2:0 canvas · SDR output';
  $('input-size').textContent=`Generated inputs: ${sourceWidth} × ${sourceHeight} at ${label} fps`;
  $('summary-title').textContent=`${height>width?'Portrait':'Landscape'} ${sourceHeight}p${label}`;
- $('source-total').textContent=sourceCount;$('scene-total').textContent=sceneCount;$('fps-total').textContent=label;
+ $('source-total').textContent=sourceCount+currentSettings.dsk.length;$('scene-total').textContent=sceneCount;$('fps-total').textContent=label;
  const keys=currentSettings.dsk.length;
  $('engine-split').textContent=`${counts[0]+counts[1]} NVDEC · ${counts[2]+counts[3]} v210 → CUDA · ${counts[5]} raw NV12 upload · ${counts[6]} raw P010 upload${mxlLimit()?` · ${counts[7]} MXL`:''}${ndiLimit()?` · ${counts[8]} NDI`:''} · ${counts[4]} browser${keys?` + ${keys} key`:''}. ${nvenc}.`;
  // The server refuses encodes above the budget with the same reason (setup_runtime.extra_aux_limit).
@@ -393,7 +399,7 @@ function update(){
 }
 function setBusy(value){
  busy=value||submitting;
- document.querySelectorAll('.fields input,.fields select,.toggles input,.source input,#encodes select,#encodes input').forEach(el=>el.disabled=busy);
+ document.querySelectorAll('.fields input,.fields select,.toggles input,.source input,#encodes select,#encodes input,#desktop-presets button').forEach(el=>el.disabled=busy);
  if($('extra-aux'))$('extra-aux').disabled=busy||!extraLimit;
  encodeRows.get('hdr')?.querySelector('.codec').setAttribute('disabled','');
  $('output-defaults').disabled=busy||atDefaults;
@@ -403,6 +409,22 @@ function showStatus(status){
  $('feedback').textContent=status.message;
  setBusy(['preparing','starting'].includes(status.phase));
 }
+function loadSettings(s){
+ const depth=s.bit_depth??10;
+ $('browser-motion').value=s.browser_motion??'static';
+ $('mode').value=`${depth}:${s.chroma??(depth===8?'420':'422')}`;
+ for(const [id,key] of Object.entries({orientation:'orientation',fps:'fps',scenes:'scene_count',layout:'layout'}))if(s[key]!==undefined)$(id).value=s[key];
+ manualCounts=null;encodes=structuredClone(s.encodes??{});encodeRows.clear();extraAux=s.extra_aux??0;
+ document.querySelectorAll('#dsk-pages input').forEach(i=>{i.checked=(s.dsk||[]).includes(i.value);});$('clean-feed').checked=!!s.clean_feed;
+ typedSources=s.source_count<sourceLimit()?s.source_count:null;
+ const saved=Array.isArray(s.weights)&&[7,8].includes(s.weights.length)?[...s.weights,...Array(9-s.weights.length).fill(0)]:s.weights;   // saved before MXL or NDI
+ if(Array.isArray(saved)&&saved.length===types.length&&saved.every(n=>Number.isInteger(n)&&n>=0)&&
+    saved.reduce((a,b)=>a+b,0)===s.source_count){
+  const balanced=sourceCounts(Math.min(s.source_count,sourceLimit()),foldForMode([...BALANCED]));
+  if(saved.some((n,i)=>n!==balanced[i]))manualCounts=[...saved];
+ }
+}
+for(const size of ['low','high'])$(size).onclick=()=>{loadSettings(desktop.presets[size]);update();};
 async function refresh(){
  const requestedSubmission=submission;
  try{
@@ -413,21 +435,15 @@ async function refresh(){
   if(submitting||requestedSubmission!==submission)return;
   online=true;profile=status.profile;instanceType=status.instance_type;auxBuses=status.aux_buses;janusApi=status.janus_api;
   if(!loaded&&!['preparing','starting'].includes(status.phase)){
-   if(status.settings){
-    const s=status.settings,depth=s.bit_depth??10;
-    $('browser-motion').value=s.browser_motion??'static';
-    $('mode').value=`${depth}:${s.chroma??(depth===8?'420':'422')}`;
-    for(const [id,key] of Object.entries({orientation:'orientation',fps:'fps',scenes:'scene_count',layout:'layout'}))if(s[key]!==undefined)$(id).value=s[key];
-    encodes=structuredClone(s.encodes??{});extraAux=s.extra_aux??0;
-    document.querySelectorAll('#dsk-pages input').forEach(i=>{i.checked=(s.dsk||[]).includes(i.value);});$('clean-feed').checked=!!s.clean_feed;
-    typedSources=s.source_count<sourceLimit()?s.source_count:null;
-    const saved=Array.isArray(s.weights)&&[7,8].includes(s.weights.length)?[...s.weights,...Array(9-s.weights.length).fill(0)]:s.weights;   // saved before MXL or NDI
-    if(Array.isArray(saved)&&saved.length===types.length&&saved.every(n=>Number.isInteger(n)&&n>=0)&&
-       saved.reduce((a,b)=>a+b,0)===s.source_count){
-     const balanced=sourceCounts(Math.min(s.source_count,sourceLimit()),foldForMode([...BALANCED]));
-     if(saved.some((n,i)=>n!==balanced[i]))manualCounts=[...saved];
-    }
+   desktop=status.desktop;
+   if(desktop){
+    $('desktop-presets').hidden=false;
+    const free=desktop.free_mib_at_start;
+    $('preset-memory').textContent=(free==null?'Startup VRAM unavailable.':`${(free/1024).toFixed(1)} GiB VRAM free before mixer startup.`)+
+     ` Suggested preset for available memory: ${desktop.suggested==='high'?'High':'Low'}. Both counts include four keys. Reduce Unique sources to try a smaller show.`;
    }
+   const settings=status.settings??desktop?.presets.low;
+   if(settings)loadSettings(settings);
    loaded=true;update();
   }
   showStatus(status);

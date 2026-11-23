@@ -13,7 +13,7 @@ import threading
 import time
 
 from . import ndi_senders, prepare_demo
-from .demo_recipe import allocate, validate_dsk
+from .demo_recipe import DSK_PAGES, allocate, validate_dsk
 from .instance_profiles import INSTANCE_PROFILES, InstanceType, mxl_sources
 from pyplumber.mixer.color import TRANSFER_TAGS
 from pyplumber.mixer.config import CANVAS_RATES, parse, parse_rate, rate_number, rate_weight
@@ -28,7 +28,7 @@ DEMO_DIR = Path(__file__).resolve().parent
 # The demo is 1080p only: every source is a unique 1920x1080 input, in either orientation.
 PROGRAM_SIZE = (1920, 1080)
 DEFAULT_SETTINGS = dict(orientation="portrait", fps=60, bit_depth=10, chroma="422",
-                        source_count=16, scene_count=32, layout="balanced", weights=[8, 4, 2, 0, 2, 0, 0, 0],
+                        source_count=16, scene_count=32, layout="balanced", weights=[8, 4, 2, 0, 2, 0, 0, 0, 0],
                         encodes={}, dsk=[], clean_feed=False, extra_aux=0, browser_motion="static",
                         decode_mix="profile")
 # What the SDR 4:2:0 group's clips are coded as: the profile's choice (the qualified show; HLG clips
@@ -39,6 +39,26 @@ DEFAULT_SETTINGS = dict(orientation="portrait", fps=60, bit_depth=10, chroma="42
 DECODE_MIXES = {"profile": {}, "h264": {"codec": "h264"},
                 "mixed": {"codecs": ["hevc", "h264"], "gops": ["low_delay", "low_delay", "b_frames", "b_frames"]}}
 
+
+
+def desktop_preset(size):
+    """Low halves the decoded streams, raw uploads and total browser windows of High."""
+    factor = {"low": 1, "high": 2}[size]
+    return {**DEFAULT_SETTINGS, "orientation": "landscape", "fps": 25, "bit_depth": 8, "chroma": "420",
+            "scene_count": 256, "source_count": 96 * factor - len(DSK_PAGES),
+            "weights": [60 * factor, 0, 0, 0, 20 * factor - len(DSK_PAGES), 16 * factor, 0, 0, 0],
+            "dsk": list(DSK_PAGES), "clean_feed": True}
+
+
+def desktop_startup_memory():
+    """Probe before starting the mixer. Multiple visible GPUs make the target ambiguous."""
+    try:
+        free = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+            text=True, stderr=subprocess.DEVNULL, timeout=2).strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return int(free) if free.isascii() and free.isdigit() else None
 
 
 def _in_range(profile, kbps):
@@ -313,6 +333,21 @@ class SetupRuntime(BaseSetupRuntime):
         self.writers, self.writer_flows, self.writers_lock = None, [], threading.Lock()
         super().__init__(media_dir, recipe_path, bridge, profile, *args,
                          instance_type=instance_type.value, config_name="mixer.demo.json", **kwargs)
+
+        self.desktop = None
+        if instance_type == InstanceType.GEFORCE:
+            free = desktop_startup_memory()
+            # The 192-input / 26-output SDR reference peaked at 19,295 MiB on L4.
+            # Round up to 20 GiB for a first-run suggestion, never a capacity guarantee.
+            self.desktop = {"presets": {size: desktop_preset(size) for size in ("low", "high")},
+                            "free_mib_at_start": free,
+                            "suggested": "high" if free is not None and free >= 20 * 1024 else "low"}
+
+    def status(self):
+        status = super().status()
+        if self.desktop:
+            status["desktop"] = self.desktop
+        return status
 
     def _start(self, config):
         self._start_writers(config)

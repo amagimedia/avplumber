@@ -1133,7 +1133,7 @@ def test_every_profile_covers_every_rate_and_canvas(tmp_path, instance_type):
     assert json.loads(json.dumps(status))["profile"]["nvdec_decodes"].keys() == {"25", "30", "50", "60"}
     nvenc = profile["nvenc"]
     assert nvenc.keys() == {"budget_pct", "pct_per_fps", "bitrate_kbps", "defaults"} | (
-        {"max_outputs"} if instance_type in (InstanceType.NVIDIA_L4, InstanceType.NVIDIA_L4_CUARRAY) else set())
+        {"max_outputs"} if instance_type != InstanceType.TESLA_T4 else set())
     assert nvenc["defaults"].keys() == {"sdr", "hdr", "sdr_clean", "aux"}
     assert nvenc["pct_per_fps"]["hevc"].keys() == nvenc["pct_per_fps"]["h264"].keys() >= {e["preset"] for e in nvenc["defaults"].values()}
 

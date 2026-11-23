@@ -66,6 +66,69 @@ memory. Cached clips are reused. Keep that directory writable and mount it
 whole: Setup atomically replaces the generated show. Capacity comes from the
 selected [instance profile](instance_profiles.py), not a universal source limit.
 
+### RTX 5080 and 5090 desktops
+
+Use native x86-64 Linux, Docker Compose and the NVIDIA Container Toolkit.
+**R615 is the minimum host driver for the desktop image. R620 runs the same
+image.** The build uses CUDA Toolkit 13.4. At runtime the Container Toolkit
+mounts the installed host driver libraries. The host needs no CUDA Toolkit.
+
+| Linux driver | CUDA version reported by the driver | Desktop mixer image |
+| --- | --- | --- |
+| R595 | 13.2 | Below the minimum for Blackwell PTX and the pinned video codec API |
+| R615 | 13.4 | Meets the minimum |
+| R620 | 13.5 | Runs the CUDA 13.4 build through driver backward compatibility |
+
+On the RTX 5080 and 5090 the driver compiles the image's CUDA 13.4 PTX on
+first use. FFmpeg also uses Video Codec SDK 13.1 headers, which require
+R610 or newer. [CUDA driver compatibility](https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/#cuda-driver) ·
+[FFmpeg codec headers](https://github.com/FFmpeg/nv-codec-headers/blob/n13.1.15.0/README)
+
+From a fresh checkout, run the single-stream GPU smoke check first, then start
+the 96-input mixer.
+
+```sh
+git clone --branch develop --recurse-submodules https://github.com/amagimedia/avplumber.git
+cd avplumber
+./demos/mixer/desktop.sh smoke
+./demos/mixer/desktop.sh
+```
+
+First start builds the remaining images and generates the Low show. The desktop
+build leaves the optional MXL SDK disabled (`WITH_MXL=0`). Open
+<http://127.0.0.1:7681/setup/> to follow preparation. When it says **Mixer ready**,
+open the [controls](http://127.0.0.1:7681/), [wall](http://127.0.0.1:7681/wall)
+or [live graph](http://127.0.0.1:7681/graph/). To change the load, choose
+**Low** or **High**, then **Apply setup**. Both are
+1920×1080p25 SDR shows with 256 scenes, four downstream keys, Program and
+clean Program, Program/Preview and Multiviewer. You can lower **Unique sources**
+before applying. The launcher keeps shows and the CUDA JIT cache in
+`media/desktop/` across restarts.
+
+| Preset | Total inputs | HEVC decoded | Raw NV12 | Browser scene sources | Browser keys |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Low | 96 | 60 | 16 | 16 | 4 |
+| High | 192 | 120 | 32 | 36 | 4 |
+
+Setup suggests High with at least 20 GiB free on a
+single visible GPU at startup. Otherwise it suggests Low. The 192-input,
+26-output L4 reference run peaked at 19,295 MiB on a card reporting
+23,034 MiB usable. Desktop throughput and peak memory remain unmeasured.
+The driver allows 12 concurrent GeForce encode sessions per system, shared
+with other applications. [L4 measurements](https://amagimedia.github.io/avplumber/demos/mixer/docs/capacity-l4.json) ·
+[NVIDIA session limits](https://developer.nvidia.com/video-encode-decode-support-matrix)
+
+The launcher selects GPU 0's NVIDIA render node for both Wayland and Chromium.
+It advertises the default network interface's IPv4 address for WebRTC. Set
+`JANUS_HOST_IP` to the desktop's LAN address if the default route uses a VPN.
+Use `./demos/mixer/desktop.sh check` for the host prerequisite checks alone.
+
+`smoke` builds the mixer image, encodes a short HEVC clip and checks
+50 decoded frames through the CUDA compositor against the linear CUDA
+reference, including timestamps. It can run before the show starts.
+Use `./demos/mixer/desktop.sh logs -f mixer` for startup logs and
+`./demos/mixer/desktop.sh down` to stop the stack.
+
 ## Controls
 
 - Preview/Program: select the next scene, or enable Direct to cut on selection.

@@ -11,25 +11,28 @@ from pyplumber.mixer.tools.extra_aux import extra_buses
 from demos.mixer.instance_profiles import INSTANCE_PROFILES, InstanceType
 from demos.mixer.prepare_demo import CLEAN_PORT, plan
 from pyplumber.mixer.config import parse
-from demos.mixer.setup_runtime import extra_aux_limit, recipe_for
+from demos.mixer.setup_runtime import desktop_preset, extra_aux_limit, recipe_for
 
 
-def seed(settings_path, media_dir):
+def seed(settings_path, media_dir, instance_type=InstanceType.NVIDIA_L4_CUARRAY):
     media_dir = Path(media_dir)
     media_dir.mkdir(parents=True, exist_ok=True)
     recipe_path, show_path = media_dir / "demo.json", media_dir / "mixer.demo.json"
     if recipe_path.exists() or show_path.exists():
         print("Keeping the saved mixer setup.")
         return
-    profile = INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY]
-    recipe = recipe_for(profile, json.loads(Path(settings_path).read_text()))
+    profile = INSTANCE_PROFILES[InstanceType(instance_type)]
+    initial = (desktop_preset("low") if settings_path == "low" and instance_type == InstanceType.GEFORCE
+               else json.loads(Path(settings_path).read_text()))
+    recipe = recipe_for(profile, initial)
     settings = recipe["setup"]
     encodes = settings["encodes"]
+    aux_default = profile["nvenc"]["defaults"]["aux"]
     recipe["aux_buses"] = [
         {"id": "mv", "label": "Program preview", "layout": {"preset": "pgm_pvw_grid"},
-         "renditions": [{"id": "monitor", "port": 5008, **encodes["mv"]}]},
+         "renditions": [{"id": "monitor", "port": 5008, **encodes.get("mv", aux_default)}]},
         {"id": "mv2", "label": "Multiviewer", "layout": {"preset": "source_pages"},
-         "renditions": [{"id": "monitor", "port": 5012, **encodes["mv2"]}]},
+         "renditions": [{"id": "monitor", "port": 5012, **encodes.get("mv2", aux_default)}]},
     ]
     cfg = parse(plan(recipe, media_dir)[0])
     settings["extra_aux"] = min(settings["extra_aux"], extra_aux_limit(profile, cfg, encodes))

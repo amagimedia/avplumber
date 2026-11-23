@@ -239,6 +239,14 @@ from the shared [DMA-BUF stack](../../../docker-compose/dmabuf/compose.yaml).
 TensorRT is optional (`WITH_TENSORRT=1` and the `tensorrt_url` build secret in the
 Fedora image); the manual mixer needs no neural models.
 
+The compositor and FFmpeg CUDA filters include native kernels for `sm_75`,
+`sm_80`, `sm_86` and `sm_89`, plus `compute_89` PTX. On an RTX 5080 or
+5090 (`sm_120`), the host driver compiles the PTX on first use. The desktop
+launcher persists the cache in the media volume. The full mixer also needs
+NVDEC, NVENC and an NVIDIA DRM render node for browser capture.
+[Desktop quick start](../README.md#rtx-5080-and-5090-desktops) ·
+[NVIDIA Blackwell compatibility](https://docs.nvidia.com/cuda/blackwell-compatibility-guide/index.html)
+
 ## Behind a reverse proxy
 
 Serve controls at `/` and the preview server at `/preview/`, stripping that

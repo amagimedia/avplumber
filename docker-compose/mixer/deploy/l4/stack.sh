@@ -3,9 +3,10 @@
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../../../.." && pwd)"
-if [[ -f "$here/.env" ]]; then
+env_file="${MIXER_STACK_ENV_FILE:-$here/.env}"
+if [[ -f "$env_file" ]]; then
     set -a
-    source "$here/.env"
+    source "$env_file"
     set +a
 fi
 source "$repo/deps/ffmpeg/9/bases.env"
@@ -19,7 +20,7 @@ if [[ -z "${AVPLUMBER_REVISION:-}" && -f "$repo/SOURCE_REVISION" ]]; then
 fi
 export AVPLUMBER_REVISION="${AVPLUMBER_REVISION:-$(git -C "$repo" rev-parse HEAD 2>/dev/null || echo workspace)}"
 export MIXER_RELEASE="${MIXER_RELEASE:-${AVPLUMBER_REVISION:0:12}}"
-export MIXER_INSTANCE_TYPE=nvidia_l4_cuarray
+export MIXER_INSTANCE_TYPE="${MIXER_INSTANCE_TYPE:-nvidia_l4_cuarray}"
 export MIXER_HTTP_PORT="${MIXER_HTTP_PORT:-17681}"
 # Only the proxy reaches the page, so MIXER_HTPASSWD cannot be bypassed on MIXER_HTTP_PORT.
 export MIXER_BIND="${MIXER_BIND:-127.0.0.1}"
@@ -28,6 +29,10 @@ export MIXER_PREVIEW_BASE=/preview/
 export MIXER_WEBUI_URL=http://127.0.0.1:22222
 export MIXER_RECIPE=/media/demo.json
 export MIXER_MEDIA_DIR="${MIXER_MEDIA_DIR:-$repo/media}"
+export MIXER_SEED_SETTINGS=/initial-settings.json
+if [[ "$MIXER_INSTANCE_TYPE" = geforce && -z "${MIXER_INITIAL_SETTINGS:-}" ]]; then
+    export MIXER_SEED_SETTINGS=low
+fi
 export MIXER_INITIAL_SETTINGS="${MIXER_INITIAL_SETTINGS:-$here/settings.json}"
 export MIXER_AUTH_REALM=off
 if [[ -n "${MIXER_HTPASSWD:-}" ]]; then
@@ -38,7 +43,7 @@ if [[ $# == 0 ]]; then
     echo "Usage: $0 {build|up -d|down|logs -f|config|...}" >&2
     exit 2
 fi
-if [[ $1 == up ]] && command -v nvidia-smi >/dev/null; then
+if [[ $1 == up && $MIXER_INSTANCE_TYPE == nvidia_l4_cuarray ]] && command -v nvidia-smi >/dev/null; then
     # Without persistence mode the driver tears the GPU down whenever no process holds it,
     # so every container start pays its initialisation again.
     if nvidia-smi --query-gpu=persistence_mode --format=csv,noheader 2>/dev/null | grep -q Disabled; then

@@ -1,7 +1,7 @@
 """Source capacity of each instance type the mixer setup supports.
 
-Every value comes from measurements on that instance (docs/capacity.md), derived ones noted
-beside them; another machine needs its own measured entry, never a scaled T4 one. Per-rate
+The T4 and L4 entries record measurements (docs/capacity.md), with derived values noted
+beside them. GeForce uses the L4 workload as an editable experiment. Per-rate
 tables cover every frame rate the setup offers; a profile's "mode_limits" replace, on one canvas
 ("bit_depth:chroma"), the limits measured apart there. setup_runtime.py applies the selected profile
 and serves it to setup.html. Standard library only: tests/check_setup.cjs loads it with any
@@ -16,6 +16,7 @@ class InstanceType(str, Enum):
     TESLA_T4 = "tesla_t4"
     NVIDIA_L4 = "nvidia_l4"
     NVIDIA_L4_CUARRAY = "nvidia_l4_cuarray"
+    GEFORCE = "geforce"
 
 
 # Not capacities: the range the setup offers per output, and each output's encode until the setup
@@ -179,6 +180,16 @@ INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY]["canvas"] = {
     # the budget.
     "decoder_park_limit": 12,
 }
+
+
+# Reuse the reference show's input bounds and estimated encode costs. GeForce has a
+# separate driver session limit across the system (NVIDIA Video Codec SDK 13.1).
+geforce = deepcopy(INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY])
+geforce["reference_profile"] = InstanceType.NVIDIA_L4_CUARRAY.value
+geforce["nvenc"]["max_outputs"] = 12
+for limits in geforce["mode_limits"].values():
+    limits.pop("nvenc_max_outputs")
+INSTANCE_PROFILES[InstanceType.GEFORCE] = geforce
 
 
 def mxl_sources(compute_capability):
