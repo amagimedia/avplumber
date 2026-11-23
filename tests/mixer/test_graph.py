@@ -1499,6 +1499,11 @@ def test_janus_chain_queues_what_it_did_with_the_nodes_it_lost(declared):
     frames = [plans[e] for e in ("aux_1_fps", "aux_1_keyframed", "aux_1_video") if e in plans]
     assert frames == ([1, 2] if declared else [1, 1, 1]) and sum(frames) == 3
     assert plans["aux_1_encoded"] == 2 and plans["aux_1_video_rtp_mux"] == 1
+    # Packets for a shared loop queue one deeper: the loop may be busy with another output's.
+    looped = FakeAvp()
+    build_janus_output(looped, fake_api(), "bus", JanusVideoConfig(), fps=30, width=1920, height=1080, prefix="aux_1",
+                       failure_mode="off", edge_capacity=1, source_declares_format=declared, packet_loop="packets")
+    assert dict(looped.edges.plans)["aux_1_encoded"] == 3
 
 
 def test_janus_packets_are_muxed_and_sent_on_a_loop_only_when_a_failure_stops_nothing():

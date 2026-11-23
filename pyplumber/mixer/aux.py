@@ -14,9 +14,15 @@ from .config import ConfigError, rate_number, rate_pair
 from . import thumbnail
 
 
-# The one event loop that muxes and sends every bus's encoded packets: microseconds of work per
-# frame and bus, queued for FFmpeg's paced UDP sender, so the buses need no two threads each for it.
-PACKET_LOOP = "aux_packets"
+# The event loops that mux and send the buses' encoded packets, a bus on the loop of its index:
+# microseconds of work per frame and bus, queued for FFmpeg's paced UDP sender, so the buses need no
+# two threads each for it. One loop for all of them held an encoder back behind the other buses'
+# packets when the host was loaded (output drops on the 192-source show); a few buses share one.
+PACKET_LOOPS = 4
+
+
+def packet_loop(index: int) -> str:
+    return f"aux_packets_{index % PACKET_LOOPS}"
 
 
 class _PvwFollowNode(InternalNode):
@@ -36,8 +42,8 @@ class AuxBus:
     with a new revision, and hands them to the node, which draws the mixer's preview changes with
     the program. A slot assignment, a layout switch and a page turn are each a new base."""
 
-    def __init__(self, avp, api, mixer, cfg, bus):
-        self.avp, self.api, self.mixer, self.cfg, self.bus = avp, api, mixer, cfg, bus
+    def __init__(self, avp, api, mixer, cfg, bus, index: int = 0):
+        self.avp, self.api, self.mixer, self.cfg, self.bus, self.index = avp, api, mixer, cfg, bus, index
         self.rendition = bus.renditions[0]
         self.fps = self.rendition.fps
         self.prefix = f"aux_{bus.id}"
@@ -152,7 +158,7 @@ class AuxBus:
             codec=r.codec, preset=r.preset, profile=r.profile or ("main" if "hevc" in r.codec else "high"), enc_format="nv12",
             prefix=self.prefix, failure_mode="off", dpb_size=r.dpb_size, edge_capacity=1,
             # Without a conversion the encoder reads the bus compositor's own canvas size and storage.
-            source_declares_format=not needs_conversion, packet_loop=PACKET_LOOP,
+            source_declares_format=not needs_conversion, packet_loop=packet_loop(self.index),
             hold=True)   # MixerApplication releases every output together once the show has settled
         # Prefer the mixer's copy: build_application clears it when no has_audio sources
         # remain, while a stale options.audio_router_node would still wire an unfed edge.

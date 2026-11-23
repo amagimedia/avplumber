@@ -1223,7 +1223,7 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
         mixer.audio_router_node = ""
         options = replace(options, audio_router_node="")
     from pyplumber.mixer.aux import AuxBus, AuxBuses
-    aux = AuxBuses(avp, [AuxBus(avp, api, mixer, cfg, bus) for bus in cfg.aux_buses]) if cfg.aux_buses else None
+    aux = AuxBuses(avp, [AuxBus(avp, api, mixer, cfg, bus, index) for index, bus in enumerate(cfg.aux_buses)]) if cfg.aux_buses else None
     keyer = DownstreamKeyer(avp, api, mixer, cfg, group=OUTPUT_GROUP) if cfg.dsk_keys else None
     renditions = cfg.renditions or _flag_renditions(options, *canvas)
     program = mixer.build()
