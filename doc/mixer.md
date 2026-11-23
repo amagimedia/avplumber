@@ -289,8 +289,8 @@ compositors retire them at the frame tick, so every such decoder wakes in the sa
 milliseconds of each frame. On the 192-source L4 demo (105 HEVC CUarray sources, 1080p30,
 12 vCPU) `extra_hw_frames` 4 woke each decoder 4.4 times a frame and the 1-minute load
 average swung 6-15 (mean 8.6, CPU pressure 12%); 12, the L4 profile's value, wakes each 1.2
-times a frame at its own source's phase (mean 6.9, steady peaks under 9, pressure 9%) for
-about 2.6 GB more VRAM. Size it so the gate stays open in steady state: the decoders' log
+times a frame at its own source's phase (mean 6.7, steady peaks under 10, pressure 9%) for
+3.8 GB more VRAM (19.4 of the L4's 23 GB in use). Size it so the gate stays open in steady state: the decoders' log
 counts each closing (`decoder resumed after N ms (M pauses so far)`).
 
 Interlaced sources: NVDEC never deinterlaces on this path (`vpp.progressive_frame = 1`,
