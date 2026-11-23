@@ -217,6 +217,27 @@ public:
         return false;
     }
 
+    // All input edges have ended. No later media or repair reply can arrive.
+    bool drain(SourceCandidate &selected) {
+        while (!frame_slots_.empty()) {
+            auto slot = frame_slots_.begin();
+            auto &media = slot->second.media_by_replica;
+            auto chosen = media.find(current_active_replica_id_);
+            if (chosen == media.end()) {
+                chosen = std::find_if(media.begin(), media.end(), [this](const auto &entry) {
+                    return replicaEligible(entry.first);
+                });
+            }
+            if (chosen != media.end() && (!next_emit_valid_ || slot->first >= next_emit_frame_)) {
+                selected = chosen->second;
+                finishSelectedFrame(slot);
+                return true;
+            }
+            frame_slots_.erase(slot);
+        }
+        return false;
+    }
+
     int64_t denormalizeFrameId(uint32_t replica_id, int64_t normalized_frame_id) const {
         auto it = replicas_.find(replica_id);
         if (it == replicas_.end() || !it->second.offset_valid) return normalized_frame_id;

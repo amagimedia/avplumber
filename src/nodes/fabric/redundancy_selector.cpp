@@ -202,6 +202,10 @@ public:
                 source_edges_[idx]->pop();
                 edge_ended_[idx] = true;
                 if (allEdgesEnded()) {
+                    while (tryEmit(selected, true)) {
+                        this->sink_->put(selected);
+                        ++emitted_;
+                    }
                     endOfStream();
                     return;
                 }
@@ -259,8 +263,11 @@ private:
             if (isEofMarker(*queued)) {
                 source_edges_[idx]->pop();
                 edge_ended_[idx] = true;
-                endOfStream();
-                return;
+                if (allEdgesEnded()) {
+                    endOfStream();
+                    return;
+                }
+                continue;
             }
             FabricPacket pkt = *queued;
             source_edges_[idx]->pop();
@@ -272,15 +279,15 @@ private:
         }
     }
 
-    bool tryEmit(FabricPacket &selected) {
+    bool tryEmit(FabricPacket &selected, bool draining = false) {
         if (mode_ == Mode::ActiveStandby) {
             avp_fabric::SourceCandidate candidate;
-            if (!timeline_.trySelect(candidate, controlSender())) return false;
+            if (!(draining ? timeline_.drain(candidate) : timeline_.trySelect(candidate, controlSender()))) return false;
             selected = fromCandidate(candidate);
             return true;
         }
-        if (!next_emit_valid_ || slots_.empty()) return false;
-        return alignment_mode_ == AlignmentMode::StrictFrameIdentity ? tryEmitStrict(selected) : tryEmitWallclock(selected);
+        if (slots_.empty() || (!next_emit_valid_ && !draining)) return false;
+        return selectBuffered(selected, draining);
     }
 
     void receiveActiveStandby(const FabricPacket &pkt) {
@@ -420,62 +427,37 @@ private:
         state.offset_valid = true;
     }
 
-    bool tryEmitWallclock(FabricPacket &selected) {
-        auto it = slots_.lower_bound(next_emit_id_);
-        if (it == slots_.end()) return false;
-        next_emit_id_ = it->first;
-
-        const int64_t delay_ticks = (frame_step_ > 0) ? static_cast<int64_t>(playout_delay_frames_) * frame_step_ : 0;
-        if (delay_ticks > 0 && highest_seen_id_ < next_emit_id_ + delay_ticks) return false;
-
-        Slot &slot = it->second;
-        auto active = slot.by_replica.find(anchor_replica_id_);
-        if (active != slot.by_replica.end()) {
-            selected = transparentPacket(active->second);
-            finish(it);
-            return true;
-        }
-        auto standby = slot.by_replica.find(standby_replica_id_);
-        if (standby != slot.by_replica.end()) {
-            selected = transparentPacket(standby->second);
-            logStandbySelected(*standby, next_emit_id_, false);
-            finish(it);
-            return true;
-        }
-        return false;
-    }
-
-    bool tryEmitStrict(FabricPacket &selected) {
-        while (!slots_.empty() && slots_.begin()->first < next_emit_id_) {
-            if (stale_dropped_ < 8 || stale_dropped_ % 250 == 0) {
+    bool selectBuffered(FabricPacket &selected, bool draining) {
+        const bool strict = alignment_mode_ == AlignmentMode::StrictFrameIdentity;
+        while (next_emit_valid_ && !slots_.empty() && slots_.begin()->first < next_emit_id_) {
+            if (strict && (stale_dropped_ < 8 || stale_dropped_ % 250 == 0)) {
                 logstream << "redundancy_selector strict dropped stale pts=" << slots_.begin()->first
-                          << " next_emit_id=" << next_emit_id_
-                          << " stale_dropped=" << stale_dropped_;
+                          << " next_emit_id=" << next_emit_id_ << " stale_dropped=" << stale_dropped_;
             }
-            stale_dropped_++;
+            ++stale_dropped_;
             slots_.erase(slots_.begin());
         }
-        if (slots_.empty()) return false;
-
-        const int64_t delay_ticks = (frame_step_ > 0) ? static_cast<int64_t>(playout_delay_frames_) * frame_step_ : 0;
-        if (delay_ticks > 0 && highest_seen_id_ < next_emit_id_ + delay_ticks) return false;
-
-        auto it = slots_.find(next_emit_id_);
-        if (it == slots_.end()) return false;
-
-        Slot &slot = it->second;
-        auto active = slot.by_replica.find(anchor_replica_id_);
-        if (active != slot.by_replica.end()) {
-            selected = transparentPacket(active->second);
-            finish(it);
-            return true;
-        }
-        auto standby = slot.by_replica.find(standby_replica_id_);
-        if (standby != slot.by_replica.end()) {
-            selected = transparentPacket(standby->second);
-            logStandbySelected(*standby, next_emit_id_, true);
-            finish(it);
-            return true;
+        while (!slots_.empty()) {
+            auto it = slots_.begin();
+            if (!draining) {
+                if (strict && it->first != next_emit_id_) return false;
+                if (!strict) next_emit_id_ = it->first;
+                const int64_t delay = frame_step_ * static_cast<int64_t>(playout_delay_frames_);
+                if (delay > 0 && highest_seen_id_ < it->first + delay) return false;
+            }
+            auto &replicas = it->second.by_replica;
+            auto chosen = replicas.find(anchor_replica_id_);
+            if (chosen == replicas.end()) {
+                chosen = replicas.find(standby_replica_id_);
+                if (chosen != replicas.end()) logStandbySelected(*chosen, it->first, strict);
+            }
+            if (chosen != replicas.end()) {
+                selected = transparentPacket(chosen->second);
+                finish(it);
+                return true;
+            }
+            if (!draining) return false;
+            slots_.erase(it);
         }
         return false;
     }
