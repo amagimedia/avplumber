@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../node_common.hpp"
+#include "fabric_wire.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -10,59 +11,6 @@
 #include <string>
 
 namespace avp_fabric {
-
-inline constexpr uint32_t MAGIC = 0x46505641;
-// The layout of WireHeader and MediaHeader below. Adding a codec code or a message type does not
-// change it; bump this only when an existing field moves, changes width, or changes meaning (or a
-// field is added to either struct), and expect every peer to be rebuilt.
-inline constexpr uint16_t VERSION = 2;
-inline constexpr uint16_t MSG_MEDIA = 1;
-inline constexpr uint16_t MSG_FRAME_STATUS = 2;
-inline constexpr uint32_t FLAG_KEYFRAME = 1u << 0;
-inline constexpr uint32_t CODEC_H264_INTRA = 1;
-inline constexpr uint32_t CODEC_JPEG = 2;
-inline constexpr uint32_t CODEC_HEVC_INTRA = 3;
-inline constexpr uint32_t CODEC_JPEG2000 = 4;
-inline constexpr uint32_t CODEC_PRORES = 5;
-
-// Key/fill transport: one frame travels as two media records, the fill (the picture) and the alpha
-// (its key). Both carry the same stream identity, PTS, timebase and geometry, so a consumer pairs
-// them by PTS; nothing in the wire pairs them, and a consumer that never configured an alpha path
-// fails on the first alpha record instead of decoding it as a picture.
-inline constexpr uint32_t PLANE_FILL = 0;
-inline constexpr uint32_t PLANE_ALPHA = 1;
-
-struct __attribute__((packed)) WireHeader {
-    uint32_t magic;
-    uint16_t version;
-    uint16_t header_bytes;
-    uint16_t message_type;
-    uint16_t flags;
-    uint32_t header_crc;
-    uint32_t payload_crc;
-    uint32_t payload_bytes;
-};
-
-struct __attribute__((packed)) MediaHeader {
-    uint64_t stream_id_hash;
-    uint32_t replica_id;
-    uint64_t generation;
-    int64_t pts;
-    int64_t dts;
-    int32_t time_base_num;
-    int32_t time_base_den;
-    uint32_t media_type;
-    uint32_t codec;
-    uint32_t plane;
-    uint32_t packet_format;
-    uint32_t packet_flags;
-    int64_t duration;
-    uint32_t width;
-    uint32_t height;
-    uint32_t pixel_format;
-    uint32_t real_pixel_format;
-    uint64_t sender_wallclock_ns;
-};
 
 inline uint64_t monotonicNs() {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -131,15 +79,15 @@ inline AVCodecID codecIdFromName(const std::string &codec) {
     throw Error("fabric unsupported codec: " + codec);
 }
 
-/// The wire code a `codec` parameter value is sent as. Kept beside codecIdFromName() so a codec
-/// cannot be taught to the sender and missed in the receiver's name table.
-inline uint32_t codecToWire(const std::string &codec) {
-    if (codec == "h264_intra") return CODEC_H264_INTRA;
-    if (isHevcCodecName(codec)) return CODEC_HEVC_INTRA;
-    if (isJpegCodecName(codec)) return CODEC_JPEG;
-    if (isJpeg2000CodecName(codec)) return CODEC_JPEG2000;
-    if (isProresCodecName(codec)) return CODEC_PRORES;
-    throw Error("fabric unsupported codec: " + codec);
+inline uint32_t codecToWire(AVCodecID codec) {
+    switch (codec) {
+        case AV_CODEC_ID_H264: return CODEC_H264_INTRA;
+        case AV_CODEC_ID_HEVC: return CODEC_HEVC_INTRA;
+        case AV_CODEC_ID_MJPEG: return CODEC_JPEG;
+        case AV_CODEC_ID_JPEG2000: return CODEC_JPEG2000;
+        case AV_CODEC_ID_PRORES: return CODEC_PRORES;
+        default: throw Error(std::string("fabric unsupported upstream codec: ") + avcodec_get_name(codec));
+    }
 }
 
 /// The libavcodec id to decode a wire codec code with.
@@ -160,18 +108,17 @@ inline AVCodecID codecIdFromWire(uint32_t codec, const std::string &node_name) {
 
 inline void validateWireRecord(const WireHeader &wire, size_t len, size_t max_payload_bytes, const std::string &node_name) {
     if (wire.magic != MAGIC) throw Error(node_name + " bad magic");
-    if (wire.version != VERSION) {
-        throw Error(node_name + " unsupported wire version " + std::to_string(wire.version) +
-                    ", this build speaks " + std::to_string(VERSION));
+    if (!headerBytes(wire.version)) {
+        throw Error(node_name + " unsupported wire version " + std::to_string(wire.version));
     }
     if (wire.message_type != MSG_MEDIA && wire.message_type != MSG_FRAME_STATUS) {
         throw Error(node_name + " unsupported message_type");
     }
-    if (wire.header_bytes != sizeof(WireHeader) + sizeof(MediaHeader)) {
+    if (wire.header_bytes != headerBytes(wire.version)) {
         throw Error(node_name + " unsupported header size");
     }
     if (wire.payload_bytes > max_payload_bytes) throw Error(node_name + " payload exceeds max_payload_bytes");
-    if (len != wire.header_bytes + wire.payload_bytes) throw Error(node_name + " message length mismatch");
+    if (len < wire.header_bytes || len - wire.header_bytes != wire.payload_bytes) throw Error(node_name + " message length mismatch");
 }
 
 } // namespace avp_fabric

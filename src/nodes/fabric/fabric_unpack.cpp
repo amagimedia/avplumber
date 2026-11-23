@@ -52,8 +52,9 @@ public:
 
         const AVCodecID codec_id = avp_fabric::codecIdFromWire(fp.codec, "fabric_unpack");
         if (source_stream_.raw()->codecpar->codec_id != codec_id) {
-            source_stream_.raw()->codecpar->codec_id = codec_id;
-            codec_ = av::findEncodingCodec(codec_id);
+            throw Error(std::string("fabric_unpack configured for ") +
+                        avcodec_get_name(source_stream_.raw()->codecpar->codec_id) +
+                        " but received " + avcodec_get_name(codec_id));
         }
         this->sink_->put(pkt);
     }

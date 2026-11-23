@@ -97,18 +97,16 @@ std::vector<char> readBinaryFile(const std::string &path) {
 // provider reports completion), and a contiguous copy for providers without scatter-gather.
 struct TxOp {
     fi_context2 ctx;            // first member: the completion's op_context is this op
-    uint8_t header[sizeof(avp_fabric::WireHeader) + sizeof(avp_fabric::MediaHeader)];
+    uint8_t header[sizeof(avp_fabric::WireHeader) + sizeof(avp_fabric::MediaHeader)]{};
     av::Packet payload;
     std::vector<uint8_t> copy;
-    size_t message_bytes = 0;
-
-    size_t payloadBytes() const {
-        return message_bytes - sizeof(header);
+    size_t headerBytes() const {
+        avp_fabric::WireHeader wire;
+        std::memcpy(&wire, header, sizeof(wire));
+        return wire.header_bytes;
     }
-    void clear() {
-        payload = av::Packet();
-        message_bytes = 0;
-    }
+    size_t messageBytes() const { return headerBytes() + payload.size(); }
+    void clear() { payload = av::Packet(); }
 };
 
 class FabricRdmSender {
@@ -229,17 +227,17 @@ public:
         int ret;
         if (scatterGather() && op.payload.size()) {
             iovec iov[2] = {
-                {op.header, sizeof(op.header)},
+                {op.header, op.headerBytes()},
                 {const_cast<uint8_t *>(op.payload.data()), op.payload.size()},
             };
             ret = fi_sendv(ep_, iov, nullptr, 2, peer_, &op.ctx);
         } else if (op.payload.size()) {
-            op.copy.resize(op.message_bytes);
-            std::memcpy(op.copy.data(), op.header, sizeof(op.header));
-            std::memcpy(op.copy.data() + sizeof(op.header), op.payload.data(), op.payload.size());
+            op.copy.resize(op.messageBytes());
+            std::memcpy(op.copy.data(), op.header, op.headerBytes());
+            std::memcpy(op.copy.data() + op.headerBytes(), op.payload.data(), op.payload.size());
             ret = fi_send(ep_, op.copy.data(), op.copy.size(), nullptr, peer_, &op.ctx);
         } else {
-            ret = fi_send(ep_, op.header, sizeof(op.header), nullptr, peer_, &op.ctx);
+            ret = fi_send(ep_, op.header, op.headerBytes(), nullptr, peer_, &op.ctx);
         }
         if (ret == -FI_EAGAIN) return false;
         check(ret, "fi_send");
@@ -284,7 +282,7 @@ class FabricPacketSink: public NodeMultiInput<av::Packet>,
     // One plane's wire configuration: the fill is the picture, the alpha its key. The alpha plane
     // exists only when the node has an alpha_src edge.
     struct PlaneSpec {
-        uint32_t codec = avp_fabric::CODEC_HEVC_INTRA;
+        uint32_t codec = avp_fabric::CODEC_H264_INTRA;
         uint32_t width = 0;
         uint32_t height = 0;
         av::PixelFormat pixel_format{AV_PIX_FMT_NONE};
@@ -341,10 +339,29 @@ class FabricPacketSink: public NodeMultiInput<av::Packet>,
     };
     std::array<RepairStore, 2> repair_;
 
+    static uint32_t planeCodec(const Parameters &params, const char *key,
+                               const std::shared_ptr<Edge<av::Packet>> &edge, uint32_t fallback) {
+        AVCodecID upstream = AV_CODEC_ID_NONE;
+        if (auto encoder = edge->findNodeUp<IEncoder>()) {
+            const auto *cp = encoder->codecParameters();
+            if (cp) upstream = cp->codec_id;
+            if (upstream == AV_CODEC_ID_NONE && !encoder->encodingCodec().isNull())
+                upstream = encoder->encodingCodec().raw()->id;
+        }
+        if (params.count(key)) {
+            const auto declared = avp_fabric::codecIdFromName(params.at(key).get<std::string>());
+            if (upstream != AV_CODEC_ID_NONE && upstream != declared)
+                throw Error(std::string("fabric_sink ") + key + " disagrees with upstream " +
+                            avcodec_get_name(upstream));
+            return avp_fabric::codecToWire(declared);
+        }
+        return upstream == AV_CODEC_ID_NONE ? fallback : avp_fabric::codecToWire(upstream);
+    }
+
 public:
     FabricPacketSink(const Parameters &params,
-                     std::shared_ptr<IVideoFormatSource> fill_md,
-                     std::shared_ptr<IVideoFormatSource> alpha_md):
+                     const std::shared_ptr<Edge<av::Packet>> &fill_edge,
+                     const std::shared_ptr<Edge<av::Packet>> &alpha_edge):
         NodeMultiInput<av::Packet>() {
         provider_ = params.value("provider", "tcp");
         remote_host_ = params.at("remote_host").get<std::string>();
@@ -385,8 +402,8 @@ public:
         }
 
         PlaneSpec &fill = planes_[avp_fabric::PLANE_FILL];
-        fill.codec = avp_fabric::codecToWire(params.value("codec", "hevc_intra"));
-        if (fill_md) {
+        fill.codec = planeCodec(params, "codec", fill_edge, avp_fabric::CODEC_H264_INTRA);
+        if (auto fill_md = fill_edge->findNodeUp<IVideoFormatSource>()) {
             fill.width = fill_md->width();
             fill.height = fill_md->height();
             fill.pixel_format = fill_md->pixelFormat();
@@ -409,8 +426,7 @@ public:
                 throw Error("fabric_sink alpha_src must be a different edge from src");
             }
             PlaneSpec &alpha = planes_[avp_fabric::PLANE_ALPHA];
-            const std::string alpha_codec = params.value("alpha_codec", params.value("codec", std::string("hevc_intra")));
-            alpha.codec = avp_fabric::codecToWire(alpha_codec);
+            alpha.codec = planeCodec(params, "alpha_codec", alpha_edge, fill.codec);
             alpha.width = fill.width;
             alpha.height = fill.height;
             // A key plane is a single component; an upstream alpha edge that advertises its own
@@ -432,7 +448,7 @@ public:
                     ? av::PixelFormat("gray")
                     : alpha.pixel_format;
             }
-            if (alpha_md) {
+            if (auto alpha_md = alpha_edge->findNodeUp<IVideoFormatSource>()) {
                 alpha.width = alpha_md->width();
                 alpha.height = alpha_md->height();
                 if (alpha.width != fill.width || alpha.height != fill.height) {
@@ -443,12 +459,12 @@ public:
                 }
             }
             logstream << "fabric_sink alpha plane enabled"
-                      << " codec=" << alpha_codec
+                      << " wire_codec=" << alpha.codec
                       << " pixel_format=" << alpha_pixel_format
                       << " real_pixel_format=" << alpha.real_pixel_format.name();
         }
 
-        const size_t max_msg = sizeof(TxOp::header) + max_payload_bytes_;
+        const size_t max_msg = avp_fabric::headerBytes(avp_fabric::wireVersion(fill.codec, alpha_enabled_)) + max_payload_bytes_;
         for (size_t i = 0; i < queue_depth_; ++i) {
             ops_.push_back(std::make_unique<TxOp>());
             free_.push_back(ops_.back().get());
@@ -537,12 +553,9 @@ public:
         EdgeManager &edges = nci.edges;
         const Parameters &params = nci.params;
         std::shared_ptr<Edge<av::Packet>> fill_edge = edges.find<av::Packet>(params["src"]);
-        std::shared_ptr<IVideoFormatSource> fill_md = fill_edge->findNodeUp<IVideoFormatSource>();
-        std::shared_ptr<IVideoFormatSource> alpha_md;
-        if (params.count("alpha_src")) {
-            alpha_md = edges.find<av::Packet>(params["alpha_src"])->findNodeUp<IVideoFormatSource>();
-        }
-        return std::make_shared<FabricPacketSink>(params, fill_md, alpha_md);
+        std::shared_ptr<Edge<av::Packet>> alpha_edge;
+        if (params.count("alpha_src")) alpha_edge = edges.find<av::Packet>(params["alpha_src"]);
+        return std::make_shared<FabricPacketSink>(params, fill_edge, alpha_edge);
     }
 
 private:
@@ -578,20 +591,18 @@ private:
                                 pts >= promote_from_pts_;
         if (send_media) {
             op->payload = pkt;
-            op->message_bytes = sizeof(op->header) + pkt.size();
         } else {
             // A standby sends a header-only record for every input frame. The selector treats this
             // cadence as the replica's liveness: records older than active_timeout_ms stop counting
             // as live for promotion and strict playout gating.
             fillHeader(op->header, pkt, AVPF_MSG_FRAME_STATUS, plane);
-            op->message_bytes = sizeof(op->header);
         }
         if (frames_sent_ < 5) {
             logstream << "fabric_sink sending"
                       << " pts=" << pts
                       << " plane=" << avp_fabric::planeName(plane)
                       << " type=" << (send_media ? "media" : "status")
-                      << " message_bytes=" << op->message_bytes
+                      << " message_bytes=" << op->messageBytes()
                       << " payload_bytes=" << (send_media ? pkt.size() : 0)
                       << " payload_prefix=" << hexPrefix(pkt.data(), pkt.size());
         }
@@ -653,8 +664,8 @@ private:
         avp_fabric::WireHeader wire = {};
         avp_fabric::MediaHeader media = {};
         wire.magic = AVPF_MAGIC;
-        wire.version = avp_fabric::VERSION;
-        wire.header_bytes = sizeof(wire) + sizeof(media);
+        wire.version = avp_fabric::wireVersion(spec.codec, alpha_enabled_);
+        wire.header_bytes = avp_fabric::headerBytes(wire.version);
         wire.message_type = message_type;
         wire.flags = 0;
         wire.payload_bytes = message_type == AVPF_MSG_MEDIA ? pkt.size() : 0;
@@ -681,11 +692,11 @@ private:
         }
 
         std::memcpy(dst, &wire, sizeof(wire));
-        std::memcpy(dst + sizeof(wire), &media, sizeof(media));
+        avp_fabric::writeMediaHeader(dst + sizeof(wire), media, wire.version);
         if (header_crc_) {
             auto *wirep = reinterpret_cast<avp_fabric::WireHeader *>(dst);
             wirep->header_crc = 0;
-            wirep->header_crc = crc32_ieee(dst, sizeof(wire) + sizeof(media));
+            wirep->header_crc = crc32_ieee(dst, wire.header_bytes);
         }
         return media.pts;
     }
@@ -732,7 +743,6 @@ private:
             TxOp *op = acquireOp();
             std::memcpy(op->header, it->second.header, sizeof(op->header));
             op->payload = it->second.payload;
-            op->message_bytes = sizeof(op->header) + op->payload.size();
             post(op);
             sent = true;
             logstream << "fabric_sink repair sent pts=" << pts

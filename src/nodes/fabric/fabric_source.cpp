@@ -115,7 +115,7 @@ public:
             stream_.setAverageFrameRate(frame_rate);
             AVCodecParameters *cp = stream_.raw()->codecpar;
             cp->codec_type = AVMEDIA_TYPE_VIDEO;
-            cp->codec_id = avp_fabric::codecIdFromName(params.value("codec", std::string("hevc_intra")));
+            cp->codec_id = avp_fabric::codecIdFromName(params.value("codec", std::string("h264_intra")));
             cp->width = width;
             cp->height = height;
             cp->format = real_pixel_format.get();
@@ -123,11 +123,18 @@ public:
         if (params.count("alpha_dst")) {
             // Geometry and timing are the fill's: a key plane covers the picture it keys.
             alpha_enabled_ = true;
-            const std::string alpha_codec = params.value("alpha_codec", params.value("codec", std::string("hevc_intra")));
+            const AVCodecID alpha_codec = params.count("alpha_codec")
+                ? avp_fabric::codecIdFromName(params.at("alpha_codec").get<std::string>())
+                : stream_.raw()->codecpar->codec_id;
             const std::string alpha_pixel_format_name = params.value("alpha_pixel_format", std::string("gray"));
             const av::PixelFormat alpha_pixel_format(alpha_pixel_format_name);
             if (alpha_pixel_format == AV_PIX_FMT_NONE) {
                 throw Error("fabric_source unknown alpha_pixel_format: " + alpha_pixel_format_name);
+            }
+            const auto alpha_layout = av::PixelFormat(params.value("alpha_real_pixel_format",
+                alpha_pixel_format == AV_PIX_FMT_CUDA ? std::string("gray") : alpha_pixel_format_name));
+            if (alpha_layout == AV_PIX_FMT_NONE || (av_pix_fmt_desc_get(alpha_layout.get())->flags & AV_PIX_FMT_FLAG_HWACCEL)) {
+                throw Error("fabric_source alpha_real_pixel_format must be a software pixel format");
             }
             alpha_stream_ = alpha_format_ctx_.addStream();
             alpha_stream_.setTimeBase(stream_.timeBase());
@@ -135,10 +142,10 @@ public:
             alpha_stream_.setAverageFrameRate(stream_.frameRate());
             AVCodecParameters *cp = alpha_stream_.raw()->codecpar;
             cp->codec_type = AVMEDIA_TYPE_VIDEO;
-            cp->codec_id = avp_fabric::codecIdFromName(alpha_codec);
+            cp->codec_id = alpha_codec;
             cp->width = stream_.raw()->codecpar->width;
             cp->height = stream_.raw()->codecpar->height;
-            cp->format = alpha_pixel_format.get();
+            cp->format = alpha_layout.get();
         }
     }
 
@@ -288,17 +295,17 @@ private:
         if (!nextMessage(receiver_idx, msg)) return false;
         avp_fabric::RdmReceiver *receiver = receivers_[receiver_idx].get();
         const size_t len = msg.len;
-        if (len < sizeof(avp_fabric::WireHeader) + sizeof(avp_fabric::MediaHeader)) {
+        if (len < sizeof(avp_fabric::WireHeader)) {
             receiver->release(msg);
             throw Error("fabric_source received message shorter than AVP headers");
         }
 
         const auto *wire = reinterpret_cast<const avp_fabric::WireHeader *>(msg.data);
-        const auto *media = reinterpret_cast<const avp_fabric::MediaHeader *>(
-            msg.data + sizeof(avp_fabric::WireHeader));
+        avp_fabric::MediaHeader media;
         try {
             avp_fabric::validateWireRecord(*wire, len, max_payload_bytes_, "fabric_source");
-            avp_fabric::validatePlane(media->plane, "fabric_source");
+            media = avp_fabric::readMediaHeader(msg.data + sizeof(*wire), wire->version);
+            avp_fabric::validatePlane(media.plane, "fabric_source");
         } catch (...) {
             receiver->release(msg);
             throw;
@@ -311,24 +318,24 @@ private:
         const uint32_t payload_bytes = wire->payload_bytes;
         out = FabricPacket();
         out.message_type = wire->message_type;
-        out.stream_id_hash = media->stream_id_hash;
-        out.replica_id = media->replica_id;
-        out.generation = media->generation;
-        out.raw_pts = media->pts;
-        out.raw_dts = media->dts;
-        out.time_base_num = media->time_base_num;
-        out.time_base_den = media->time_base_den;
-        out.media_type = media->media_type;
-        out.codec = media->codec;
-        out.plane = media->plane;
-        out.packet_format = media->packet_format;
-        out.packet_flags = media->packet_flags;
-        out.duration = media->duration;
-        out.width = media->width;
-        out.height = media->height;
-        out.pixel_format = media->pixel_format;
-        out.real_pixel_format = media->real_pixel_format;
-        out.sender_wallclock_ns = media->sender_wallclock_ns;
+        out.stream_id_hash = media.stream_id_hash;
+        out.replica_id = media.replica_id;
+        out.generation = media.generation;
+        out.raw_pts = media.pts;
+        out.raw_dts = media.dts;
+        out.time_base_num = media.time_base_num;
+        out.time_base_den = media.time_base_den;
+        out.media_type = media.media_type;
+        out.codec = media.codec;
+        out.plane = media.plane;
+        out.packet_format = media.packet_format;
+        out.packet_flags = media.packet_flags;
+        out.duration = media.duration;
+        out.width = media.width;
+        out.height = media.height;
+        out.pixel_format = media.pixel_format;
+        out.real_pixel_format = media.real_pixel_format;
+        out.sender_wallclock_ns = media.sender_wallclock_ns;
         out.receiver_wallclock_ns = avp_fabric::monotonicNs();
         out.complete = true;
 

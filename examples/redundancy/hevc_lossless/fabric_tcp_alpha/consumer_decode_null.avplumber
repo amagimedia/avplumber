@@ -15,7 +15,7 @@ queue.plan_capacity v_key_dec 4
 
 hwaccel.init { "name": "@gpu", "type": "cuda" }
 
-node.add { "type": "fabric_source", "dst": "v_fabric", "alpha_dst": "v_fabric_key", "group": "rx", "name": "AlphaFabricIn", "provider": "tcp", "bind_port": "5592", "stream_id": "main", "media_type": "video", "codec": "hevc_intra", "width": 1280, "height": 720, "pixel_format": "cuda", "real_pixel_format": "yuv444p", "alpha_codec": "hevc_intra", "alpha_pixel_format": "cuda", "time_base": "1/1000", "frame_rate": "30/1", "max_payload_bytes": 4194304, "queue_depth": 64 }
+node.add { "type": "fabric_source", "dst": "v_fabric", "alpha_dst": "v_fabric_key", "group": "rx", "name": "AlphaFabricIn", "provider": "tcp", "bind_port": "5592", "stream_id": "main", "media_type": "video", "codec": "hevc_intra", "width": 1280, "height": 720, "pixel_format": "cuda", "real_pixel_format": "yuv444p", "alpha_codec": "hevc_intra", "alpha_pixel_format": "cuda", "alpha_real_pixel_format": "yuv444p", "time_base": "1/1000", "frame_rate": "30/1", "max_payload_bytes": 4194304, "queue_depth": 64 }
 node.add { "type": "fabric_unpack", "src": "v_fabric", "dst": "v_fill_enc", "group": "rx", "name": "UnpackFill" }
 node.add { "type": "dec_video", "src": "v_fill_enc", "dst": "v_fill_dec", "group": "rx", "name": "DecodeFill", "pixel_format": "?cuda", "hwaccel": "@gpu", "codec_map": { "hevc": "hevc_cuvid" }, "hwaccel_only_for_codecs": ["hevc"] }
 node.add { "type": "null_sink<av::VideoFrame>", "src": "v_fill_dec", "group": "rx", "name": "DropFill" }

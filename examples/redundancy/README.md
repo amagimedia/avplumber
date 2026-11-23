@@ -116,7 +116,7 @@ alpha -> key encoder  -> fabric_sink.alpha_src
 ```
 
 Alpha is a normal encoded stream - encode the key plane as `gray` (or whatever the consumer's
-decoder expects) and hand the packets to `alpha_src`. `alpha_codec` defaults to `codec` and
+decoder expects) and hand the packets to `alpha_src`. `alpha_codec` defaults to the key encoder codec when available, otherwise the fill codec and
 `alpha_pixel_format` to `gray`; `alpha_real_pixel_format` describes the software layout behind a
 `cuda` alpha plane. The key takes the fill's geometry, and an alpha edge that advertises a
 different size fails the node.
@@ -129,7 +129,7 @@ fabric_source.alpha_dst -> selector -> fabric_unpack -> decoder -> key frames
 ```
 
 `alpha_dst` is optional on `fabric_source`, and each edge carries its own stream metadata
-(`alpha_codec`, `alpha_pixel_format`) so `fabric_unpack` describes the key correctly. A record with
+(`alpha_codec`, `alpha_real_pixel_format`) so `fabric_unpack` describes the key correctly. A record with
 `plane=alpha` arriving at a `fabric_source` without `alpha_dst` is an error, not a dropped packet.
 Each plane needs its own `redundancy_selector`: a selector that sees both planes on its inputs
 throws. Recombining decoded fill and key frames into a `yuva*` frame is a compositing step that has
@@ -150,7 +150,7 @@ the peer's connection loss is no longer fatal: `fabric_source` logs `peer closed
 endpoint, so either choice works. That report is best effort: the `tcp` provider does not surface a
 clean or idle close on an RDM endpoint, and it does not enable TCP keepalive for RDM peer
 connections, so a half-open producer stays invisible (see "Receiver Lifetime" in
-`doc/specs/fabric-sink.md`). Record cadence is the liveness signal instead: `idle_timeout_ms` for
+[the transport documentation](../../doc/fabric-transport.md)). Record cadence is the liveness signal instead: `idle_timeout_ms` for
 the source, and the selector's `active_timeout_ms` for failover. A standby stays eligible only while
 its input keeps producing status records, so keep that input flowing. If the new producer starts
 before the old one's records have drained, give it a new `generation` (or leave `generation: 0`) so
@@ -216,9 +216,9 @@ across chroma formats.
 
 `jpeg2000` lossy is Part 1 only - nvJPEG2000 has no target-PSNR rate control for HT codestreams.
 
-### Why `hevc_intra` is the default
+### Choosing a codec
 
-`codec` defaults to `hevc_intra`. It is the smallest at matched quality in every lossy row above,
+`hevc_intra` is the smallest at matched quality in every lossy row above,
 it wins lossless 4:2:0 on size and lossless 10-bit 4:4:4 outright, it is the only mode that
 decodes on NVDEC in every format tested, and it covers 8-bit and 10-bit from one setting.
 
@@ -232,10 +232,11 @@ Reasons to override it:
 - `jpeg` when throughput dominates and bitrate does not; it is 2-3x `hevc_intra` at equal luma
   PSNR.
 
-Both `fabric_sink` and `fabric_source` default to `hevc_intra`, so they stay consistent when
-neither sets `codec`. A producer and consumer that disagree are caught at the consumer: the wire
-codec is authoritative and an unknown code is rejected rather than decoded as the configured
-default.
+Set the receiver's `codec` (or provide a matching `reference_url`) before
+starting the graph. Without either, the receiver uses `h264_intra`. The sender
+uses upstream encoder metadata when available, checks an explicit codec
+against it, and falls back to H.264 when neither is supplied. The receiver
+rejects a wire codec that disagrees with its configured stream.
 
 See `TEST_CASES.md` for the latest measured failover results.
 See `EDGE_CASES.md` for the next failure scenarios to test.

@@ -1,4 +1,4 @@
-# AVP Libfabric Sink Node Spec
+# Libfabric media transport
 
 Date: 2026-05-05
 
@@ -121,7 +121,7 @@ Required parameters:
 | `replica_id` | uint32 | Producer instance identity |
 | `generation` | uint64 | Controller epoch; static for MVP |
 | `media_type` | string | Initially `video` |
-| `codec` | string | `hevc_intra` (default), `h264_intra`, `jpeg`/`jpeg444`, `jpeg2000`/`j2k`, `prores`/`prores4444` - see "Codec Mode Performance" |
+| `codec` | string | `h264_intra` (fallback), `hevc_intra`, `jpeg`/`jpeg444`, `jpeg2000`/`j2k`, `prores`/`prores4444` - see "Codec Mode Performance" |
 | `width` | uint32 | Encoded video width; may be discovered from upstream metadata |
 | `height` | uint32 | Encoded video height; may be discovered from upstream metadata |
 | `pixel_format` | string | Source/encoded frame pixel format, for example `cuda` or `nv12` |
@@ -198,8 +198,7 @@ These should not be required for the first point-to-point node.
 
 ## Codec Mode Performance
 
-Measured figures for each `codec` mode, and the reasoning behind the
-`hevc_intra` default, live with the demos that exercise them:
+Measured figures for each `codec` mode, including 8-bit and 10-bit HEVC 4:4:4, live with the demos that exercise them:
 `examples/redundancy/README.md`.
 
 ## SHM Address Exchange
@@ -279,12 +278,17 @@ fixed little-endian wire order. Pick one and keep it stable. The recommended
 MVP choice is little-endian because both initial hosts are x86_64, but the
 header must carry a version so this can be changed only by protocol version.
 
+Single-plane H.264 and JPEG use the original 116-byte v1 header. HEVC,
+JPEG 2000, ProRes and key/fill sessions use the 120-byte v2 header. Receivers
+read both layouts. Upgrade receivers before enabling any v2 mode. Status and
+repair records use the same layout as the corresponding media.
+
 Fixed wire header:
 
 ```cpp
 struct AvpFabricWireHeader {
     uint32_t magic;          // "AVPF"
-    uint16_t version;        // 2
+    uint16_t version;        // 1 or 2
     uint16_t header_bytes;   // wire + media + extensions
     uint16_t message_type;   // media, heartbeat, eof, config
     uint16_t flags;
@@ -309,7 +313,7 @@ struct AvpFabricMediaHeader {
 
     uint32_t media_type;
     uint32_t codec;
-    uint32_t plane;          // 0 fill, 1 alpha
+    uint32_t plane;          // v2 only: 0 fill, 1 alpha
     uint32_t packet_format;
     uint32_t packet_flags;
     int64_t duration;
