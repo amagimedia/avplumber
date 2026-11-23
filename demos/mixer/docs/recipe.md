@@ -85,7 +85,7 @@ are not pruned. Raw loops consume disk/cache space and upload bandwidth every fr
 `resident` additionally retains each loop in page-locked host memory to avoid
 repeated file reads after the first pass.
 
-Keys for an NDI sender come from `ndi_overlays.render(path, stream)`: a seamless loop of
+Keys for an NDI sender come from `ndi_overlays.render(path, variant=...)`: a seamless loop of
 straight-alpha BGRA canvases, `lower_third` (name plate over a news crawl) or `bugs` (corner
 logo and LIVE pill), 10 s by default, about 2.5 GB at 1080p30. The image's FFmpeg has no
 drawtext, so it draws with NumPy and the Noto Sans subsets in `fonts/` (OFL; `fonts/subset.py`

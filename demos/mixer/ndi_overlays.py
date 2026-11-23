@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Looped broadcast graphics for the demo's NDI sources with alpha (needs NumPy):
 
-    python3 -m demos.mixer.ndi_overlays lower_third.bgra --stream lower_third
+    python3 -m demos.mixer.ndi_overlays lower_third.bgra --variant lower_third
 
-A stream is a full canvas of straight (not premultiplied) BGRA pictures, back to back in a
-headerless file. "lower_third" carries the name plate with the news crawl under it, "bugs" the two
-corner bugs. The look follows the HTML keys in dsk/ (colours, proportions, and Noto Sans, which
-those pages get as system-ui in the browser image), kept inside the EBU R 95 graphics-safe area.
+A loop is a full canvas of straight (not premultiplied) BGRA pictures, back to back in a
+headerless file; its variant names the stream. "lower_third" carries the name plate with the news
+crawl under it, "bugs" the two corner bugs. The look follows the HTML keys in dsk/ (colours,
+proportions, and Noto Sans, which those pages get as system-ui in the browser image), kept inside
+the EBU R 95 graphics-safe area (5% from each edge).
 Every motion repeats a whole number of times per loop and the crawl moves a whole number of pixels
 a frame, so the last picture flows into the first. The right bug shows LIVE, not the HTML key's
 wall clock: a clock cannot loop.
@@ -117,7 +118,9 @@ class Font:
         """Segments in pixels (y down) of *text* set from *x* on *baseline*, and its advance width."""
         pen, previous, parts = 0.0, None, []
         for char in text:
-            glyph = self.cmap.get(char, 0)
+            glyph = self.cmap.get(char)
+            if glyph is None:
+                raise ValueError(f"the overlay fonts have no {char!r} (fonts/subset.py lists what they keep)")
             pen += self.kern.get((previous, glyph), 0)
             parts.append(self._outline(glyph) + (pen, 0, pen, 0))
             pen += self.advance[glyph] + tracking * self.em
@@ -257,9 +260,8 @@ def _lower_third(regular, bold, width, height, fps, count, people, headlines):
     """Name plate (orange accent bar, navy plate fading out to the right, name over role) that
     builds on and off once a person, then the crawl band under it; both within graphics safe."""
     u, left, bottom = min(width, height) / 1080, round(0.05 * width), round(0.95 * height)
-    if count % len(people) or count / len(people) / fps < 2.5:
-        raise ValueError(f"{count} frames cannot give each of {len(people)} people an even 2.5 s or more")
-    cycle = count // len(people)
+    if count // len(people) < 2.5 * fps:
+        raise ValueError(f"{count} frames cannot give each of {len(people)} people 2.5 s or more")
     # Crawl band: LATEST tag, then headlines moving a whole number of pixels a frame.
     band_h, band_w, size = round(72 * u), width - 2 * left, 36 * u
     baseline = band_h / 2 + bold.cap_height / bold.em * size / 2
@@ -293,14 +295,16 @@ def _lower_third(regular, bold, width, height, fps, count, people, headlines):
 
     def draw_plate(n):
         layer = np.zeros((plate_h, accent_w + plate_w, 4), np.float32)
-        t, out = (n % cycle) / fps, (cycle - 0.8 * fps) / fps   # seconds into this person, and when they go
+        person = n * len(people) // count   # people share the loop to within a frame
+        start, end = (-(-k * count // len(people)) for k in (person, person + 1))
+        t, out = (n - start) / fps, (end - start) / fps - 0.8   # seconds into this person, and when they go
         bar = _phase(t, 0, 0.3, SETTLE) * (1 - _phase(t, out + 0.5, 0.2, EASE_IN))
         slide = _phase(t, 0.15, 0.6, SETTLE) * (1 - _phase(t, out + 0.15, 0.4, EASE_IN))
         shown = 1 - _phase(t, out, 0.2)
         x = accent_w - round(1.04 * plate_w * (1 - slide))
         _blit(layer, plate, x, slide, accent_w)
-        for sprite, start in zip(texts[n // cycle % len(texts)], (0.35, 0.45)):
-            entered = _phase(t, start, 0.5, SETTLE)
+        for sprite, delay in zip(texts[person], (0.35, 0.45)):
+            entered = _phase(t, delay, 0.5, SETTLE)
             _blit(layer, sprite, x + round(0.4 * name_size * (1 - entered)), slide * entered * shown, accent_w)
         if bar:
             half = plate_h * bar / 2
@@ -357,20 +361,22 @@ def _bugs(bold, width, height, fps, count):
     return [(left, top, draw_mark), (right - pill_w, top + (side - pill_h) // 2, draw_pill)]
 
 
-def loop(stream, width=1920, height=1080, fps=30, seconds=10, people=PEOPLE, headlines=HEADLINES):
-    """(frames in the loop, frame(n) -> straight BGRA array height x width x 4) of *stream*; frame
-    is periodic in n. *people* ((name, role), ...) and *headlines* vary the lower_third stream."""
-    count = Fraction(fps) * Fraction(seconds)
-    if count.denominator != 1 or count < 1:
-        raise ValueError(f"{seconds} s at {fps} fps is not a whole number of frames")
-    count = int(count)
+def loop(width=1920, height=1080, fps=30, seconds=10, variant="lower_third", people=PEOPLE, headlines=HEADLINES):
+    """(frames in the loop, frame(n) -> straight BGRA array height x width x 4) of the stream
+    *variant* names; frame is periodic in n. The loop is fps * seconds frames, rounded, so a
+    fractional rate's loop is a little off *seconds*. *people* ((name, role), ...) and *headlines*
+    vary the lower_third stream: a long name runs off the plate, and headlines longer than about
+    CRAWL_SPEED * seconds pixels speed the crawl up instead."""
+    count = round(Fraction(fps) * Fraction(seconds))
+    if count < 1:
+        raise ValueError(f"{seconds} s at {fps} fps is no frame")
     regular, bold = Font(FONTS / "NotoSans-Regular.ttf"), Font(FONTS / "NotoSans-Bold.ttf")
-    if stream == "lower_third":
+    if variant == "lower_third":
         parts = _lower_third(regular, bold, width, height, float(fps), count, tuple(people), tuple(headlines))
-    elif stream == "bugs":
+    elif variant == "bugs":
         parts = _bugs(bold, width, height, float(fps), count)
     else:
-        raise ValueError(f"stream must be one of {', '.join(STREAMS)}")
+        raise ValueError(f"variant must be one of {', '.join(STREAMS)}")
 
     def frame(n):
         picture = np.zeros((height, width, 4), np.uint8)
@@ -382,11 +388,11 @@ def loop(stream, width=1920, height=1080, fps=30, seconds=10, people=PEOPLE, hea
     return count, frame
 
 
-def render(path, stream="lower_third", width=1920, height=1080, fps=30, seconds=10, people=PEOPLE,
+def render(path, width=1920, height=1080, fps=30, seconds=10, variant="lower_third", people=PEOPLE,
            headlines=HEADLINES):
-    """Write *stream*'s loop to *path*: frames of width * height * 4 bytes (straight-alpha BGRA, top
-    row first), back to back. Returns the number of frames."""
-    count, frame = loop(stream, width, height, fps, seconds, people, headlines)
+    """Write the loop() of *variant* to *path*: frames of width * height * 4 bytes (straight-alpha
+    BGRA, top row first), back to back. Returns the number of frames."""
+    count, frame = loop(width, height, fps, seconds, variant, people, headlines)
     with open(path, "wb") as out:
         for n in range(count):
             out.write(frame(n))
@@ -396,13 +402,13 @@ def render(path, stream="lower_third", width=1920, height=1080, fps=30, seconds=
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("path", type=Path)
-    parser.add_argument("--stream", choices=STREAMS, default="lower_third")
+    parser.add_argument("--variant", choices=STREAMS, default="lower_third")
     parser.add_argument("--width", type=int, default=1920)
     parser.add_argument("--height", type=int, default=1080)
     parser.add_argument("--fps", type=Fraction, default=Fraction(30))
     parser.add_argument("--seconds", type=Fraction, default=Fraction(10))
     args = parser.parse_args()
-    count = render(args.path, args.stream, args.width, args.height, args.fps, args.seconds)
+    count = render(args.path, args.width, args.height, args.fps, args.seconds, args.variant)
     print(f"{args.path}: {count} frames of {args.width}x{args.height} BGRA")
 
 

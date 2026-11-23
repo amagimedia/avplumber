@@ -1,4 +1,6 @@
 """The NDI overlay loops: file layout, seamless loop, alpha and safe area; no FFmpeg or GPU."""
+from fractions import Fraction
+
 import pytest
 
 np = pytest.importorskip("numpy")
@@ -9,15 +11,15 @@ SMALL = dict(width=384, height=216, fps=10, seconds=10)
 
 @pytest.fixture(scope="module", params=STREAMS)
 def small(request):
-    count, frame = loop(request.param, **SMALL)
+    count, frame = loop(**SMALL, variant=request.param)
     return request.param, count, [frame(n) for n in range(count + 1)]
 
 
 def test_render_writes_whole_bgra_frames_back_to_back(tmp_path):
     path = tmp_path / "bugs.bgra"
-    assert render(path, "bugs", 192, 108, 5, 6) == 30
+    assert render(path, 192, 108, 5, 6, "bugs") == 30
     data = np.fromfile(path, np.uint8).reshape(30, 108, 192, 4)
-    assert (data[7] == loop("bugs", 192, 108, 5, 6)[1](7)).all()
+    assert (data[7] == loop(192, 108, 5, 6, variant="bugs")[1](7)).all()
 
 
 def test_loop_is_seamless_and_never_repeats_a_frame(small):
@@ -37,21 +39,25 @@ def test_streams_are_transparent_outside_their_graphics(small):
 
 @pytest.mark.parametrize("stream", STREAMS)
 def test_graphics_stay_in_the_graphics_safe_area(stream):
-    count, frame = loop(stream)
+    count, frame = loop(variant=stream)
     alpha = np.maximum.reduce([frame(n)[..., 3] for n in range(0, count, 15)])
     assert alpha[54:1026, 96:1824].any()
     assert not alpha[:54].any() and not alpha[1026:].any() and not alpha[:, :96].any() and not alpha[:, 1824:].any()
 
 
-def test_name_plate_is_off_at_both_ends_of_the_loop():
-    count, frame = loop("lower_third", **SMALL)
+@pytest.mark.parametrize("fps,frames", [(10, 100), (Fraction(60000, 1001), 599)])
+def test_name_plate_is_off_at_both_ends_of_the_loop(fps, frames):
+    count, frame = loop(**{**SMALL, "fps": fps}, variant="lower_third")
+    assert count == frames   # 599 frames: the two people get 300 and 299
     plate = slice(0, 190)   # everything above the crawl band (rows 191 to 205)
-    assert not frame(0)[plate, ..., 3].any() and not frame(count - 1)[plate, ..., 3].any()
-    assert frame(count // 4)[plate, ..., 3].any()
+    for n in (0, count // 2 - 1, count // 2, count - 1):
+        assert not frame(n)[plate, ..., 3].any()
+    assert frame(count // 4)[plate, ..., 3].any() and frame(3 * count // 4)[plate, ..., 3].any()
+    assert (frame(count) == frame(0)).all()
 
 
 def test_crawl_moves_a_whole_number_of_pixels_a_frame():
-    frame = loop("lower_third", **SMALL)[1]
+    frame = loop(**SMALL, variant="lower_third")[1]
     middle = slice(120, 300)
     band = [frame(n)[193:203] for n in range(3)]
     for before, after in zip(band, band[1:]):
@@ -59,7 +65,7 @@ def test_crawl_moves_a_whole_number_of_pixels_a_frame():
 
 
 def test_alpha_is_straight_not_premultiplied():
-    count, frame = loop("lower_third")
+    count, frame = loop(variant="lower_third")
     picture = frame(count // 4)
     fade = picture[830, 900:1100]   # the plate's right end fading out, no text there
     assert ((fade[:, 3] > 0) & (fade[:, 3] < 200)).sum() > 100
@@ -73,8 +79,8 @@ def test_coverage_is_exact_along_a_row_and_kerning_applies():
     assert bold.width("AV", 100) < bold.width("A", 100) + bold.width("V", 100)
 
 
-@pytest.mark.parametrize("stream,options", [("ticker", {}), ("bugs", {"fps": 29.97}),
-                                            ("lower_third", {"seconds": 4})])
-def test_rejects_unknown_streams_and_loops_that_cannot_close(stream, options):
+@pytest.mark.parametrize("variant,options", [("ticker", {}), ("bugs", {"seconds": 0}), ("lower_third", {"seconds": 4}),
+                                             ("lower_third", {"headlines": ["Up \u2191"]})])
+def test_rejects_unknown_streams_short_loops_and_missing_glyphs(variant, options):
     with pytest.raises(ValueError):
-        loop(stream, **{**SMALL, **options})
+        loop(**{**SMALL, **options}, variant=variant)
