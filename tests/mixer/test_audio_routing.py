@@ -253,7 +253,7 @@ def test_aux_bus_with_audio_port_gets_its_own_outputs_entry(native_boundary, mon
     import pyplumber.mixer.aux as aux_module
 
     class FakeAuxBus:
-        def __init__(self, avp, api, mixer, cfg, bus):
+        def __init__(self, avp, api, mixer, cfg, bus, index):
             self.bus, self.pgm_edge = bus, None
             self.node_name = f"aux_{bus.id}_comp"
 
