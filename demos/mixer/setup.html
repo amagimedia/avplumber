@@ -274,6 +274,8 @@ function sourceAvailable(i){
 }
 function sourceTypeMax(i,counts){
  if(!sourceAvailable(i))return 0;
+ // A show has MXL or NDI sources, not both (setup_runtime.recipe_for): the full show leaves the CPUs room for one.
+ if(i===7&&counts[8]>0||i===8&&counts[7]>0)return 0;
  let max=sourceLimit()-counts.reduce((n,v,k)=>n+(k===i?0:v),0);
  for(const [indices,costs,limit] of sourceBudgets()){
   const k=indices.indexOf(i);if(k<0)continue;

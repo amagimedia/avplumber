@@ -1820,6 +1820,8 @@ def test_ndi_sources_are_sent_from_their_own_clips_up_to_the_profile_limit(tmp_p
     assert [s["name"] for s in ndi] == [f"avp-{s['id']}" for s in ndi]
     assert all(s["extra_ips"] == "127.0.0.1" and s["color"] == "sdr" for s in ndi)
     assert next(s for s in show["scenes"] if s["id"] == "ndi")["items"][0]["source"] == ndi[0]["id"]
+    with pytest.raises(ValueError, match="MXL or NDI sources, not both"):
+        recipe_for(L4, {**NDI_SHOW, "source_count": 170, "weights": [105, 0, 0, 0, 36, 26, 0, 1, 2]})
     with pytest.raises(ValueError, match="NDI is limited to 2"):
         source_counts(L4, 3, [0] * 8 + [1], 30)
     assert source_counts(L4, 8, [0, 0, 0, 0, 1, 0, 0, 0, 1], 60) == [0, 0, 0, 0, 7, 0, 0, 0, 1]   # 1 at 60 fps

@@ -180,6 +180,10 @@ def recipe_for(profile, settings):
                            weights, settings["fps"], len(dsk))
     _check_hdr_decodes(profile, counts[1], settings["fps"])
     _check_live(profile, "mxl", counts[7], settings["fps"])
+    # The demo's writers and the mixer's readers of either load the host's CPUs beside the full show,
+    # which leaves room for one kind: a show has MXL or NDI sources.
+    if counts[7] and counts[8]:
+        raise ValueError("A show has MXL or NDI sources, not both")
     width, height = PROGRAM_SIZE
     recipe = json.loads((DEMO_DIR / "demo.example.json").read_text())
     recipe["canvas"].update(profile.get("canvas", {}))
