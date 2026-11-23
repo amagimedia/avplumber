@@ -194,6 +194,9 @@ def test_an_ndi_source_is_received_converted_to_nv12_and_uploaded(native_boundar
     assert (received["type"], received["url"], received["format"]) == ("input", "HOST (avp-smoke)", "libndi_newtek")
     assert received["options"] == {"wait_sources": "5", "extra_ips": "127.0.0.1"} and received["timeout"] == 2
     assert "loop" not in received and nodes["demux_0"]["src"] == received["dst"] and received["auto_restart"] == "group"
+    pacing = nodes["realtime_0"]
+    # Arrival-paced with a frame of jitter buffer, resynced when frames run ahead (a stale anchor).
+    assert pacing["discontinuity_threshold"] == 0.1 and pacing["jitter_margin"] == pacing["initial_jitter_margin"] > 0
     # Its restart while the show starts does not fail the start.
     assert app.live_inputs == ("input_0",)
     assert nodes["decode_0"]["auto_restart"] == "group" and nodes["decode_0"]["hwaccel_only_for_codecs"] == []

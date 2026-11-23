@@ -47,6 +47,11 @@ NDI_INPUT_OPTIONS = {"wait_sources": "5"}
 # Seconds an NDI read may bring nothing before its input fails and the source's group restarts with a
 # new receiver: a receiver left unread for a while (as by a show's slow start) can go silent for good.
 NDI_READ_TIMEOUT_S = 2
+# NDI is paced by arrival, as a network feed: a frame held a frame period absorbs arrival jitter, and
+# frames this far ahead of the timeline (anchored on a picture that waited, as during a show's slow
+# start) resync it. Held longer, they back up into the input, whose receiver then drops frames, and
+# the gaps would hold the next ones longer still.
+NDI_EARLY_RESYNC_S = 0.1
 # Nothing in a show reads what input_rec stamps on decoded frames (realtime's frame counters serve
 # its teams and the OBS embedding, speed nodes read frame_ts); stamping costs every hop a copy.
 SOURCE_FRAME_METADATA: list = []
@@ -1086,6 +1091,8 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
                     decoder_params={**_decoder_params(source, cfg), **({"hwaccel_only_for_codecs": []} if source.alpha or ndi else {})},
                     decoded_ahead=cfg.decoded_frames_ahead,
                     has_audio=source.has_audio, sync_team=(f"input_{index}_av_sync" if source.has_audio else None),
+                    **({"realtime_params": {"jitter_margin": fps_den / fps_num, "initial_jitter_margin": fps_den / fps_num,
+                                            "discontinuity_threshold": NDI_EARLY_RESYNC_S}} if ndi else {}),
                     **file_params)
                 if audio_edge:
                     audio_edges.append((source.id, audio_edge))
