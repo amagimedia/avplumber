@@ -283,6 +283,16 @@ IRAP, so the source freezes for the rest of its GOP, and a GOP longer than 200 p
 ends the decoder node. The surface gate (`extra_hw_frames` + 1 held frames) keeps the
 mixer from getting there.
 
+The gate is also the decoders' pacing whenever it closes, which shows in CPU load: with too
+few extra surfaces each decoder waits until a compositor retires one of its frames, and the
+compositors retire them at the frame tick, so every such decoder wakes in the same few
+milliseconds of each frame. On the 192-source L4 demo (105 HEVC CUarray sources, 1080p30,
+12 vCPU) `extra_hw_frames` 4 woke each decoder 4.4 times a frame and the 1-minute load
+average swung 6-15 (mean 8.6, CPU pressure 12%); 12, the L4 profile's value, wakes each 1.2
+times a frame at its own source's phase (mean 6.9, steady peaks under 9, pressure 9%) for
+about 2.6 GB more VRAM. Size it so the gate stays open in steady state: the decoders' log
+counts each closing (`decoder resumed after N ms (M pauses so far)`).
+
 Interlaced sources: NVDEC never deinterlaces on this path (`vpp.progressive_frame = 1`,
 no CUarray deinterlacer exists, `bwdif_cuda`/`yadif_cuda` read linear CUDA frames only).
 An H.264 field-coded or MBAFF stream comes out as weaved frames flagged interlaced, which
