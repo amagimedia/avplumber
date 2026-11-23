@@ -66,6 +66,54 @@ memory. Cached clips are reused. Keep that directory writable and mount it
 whole: Setup atomically replaces the generated show. Capacity comes from the
 selected [instance profile](instance_profiles.py), not a universal source limit.
 
+### RTX 5080 and 5090 desktops
+
+Use native x86-64 Linux, an R615+ NVIDIA driver, Docker Compose and the NVIDIA
+Container Toolkit. From a fresh checkout, run the single-stream GPU smoke check
+first, then start the 96-input mixer.
+
+```sh
+git clone --branch develop --recurse-submodules https://github.com/amagimedia/avplumber.git
+cd avplumber
+./demos/mixer/desktop.sh smoke
+./demos/mixer/desktop.sh
+```
+
+First start builds the remaining images and generates the Low show. The desktop
+build leaves the optional MXL SDK disabled (`WITH_MXL=0`). Open
+<http://127.0.0.1:7681/setup/> to follow preparation. When it says **Mixer ready**,
+open the [controls](http://127.0.0.1:7681/), [wall](http://127.0.0.1:7681/wall)
+or [live graph](http://127.0.0.1:7681/graph/). To change the load, choose
+**Low** or **High**, then **Apply setup**. Both are
+1920×1080p25 SDR shows with 256 scenes, four downstream keys, Program and
+clean Program, Program/Preview and Multiviewer. You can lower **Unique sources**
+before applying. The launcher keeps shows and the CUDA JIT cache in
+`media/desktop/` across restarts.
+
+| Preset | Total inputs | HEVC decoded | Raw NV12 | Browser scene sources | Browser keys |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Low | 96 | 60 | 16 | 16 | 4 |
+| High | 192 | 120 | 32 | 36 | 4 |
+
+Setup suggests High with at least 20 GiB free on a
+single visible GPU at startup. Otherwise it suggests Low. The 192-input,
+26-output L4 reference run peaked at 19,295 MiB on a card reporting
+23,034 MiB usable. Desktop throughput and peak memory remain unmeasured.
+The driver allows 12 concurrent GeForce encode sessions per system, shared
+with other applications. [L4 measurements](https://amagimedia.github.io/avplumber/demos/mixer/docs/capacity-l4.json) ·
+[NVIDIA session limits](https://developer.nvidia.com/video-encode-decode-support-matrix)
+
+The launcher selects GPU 0's NVIDIA render node for both Wayland and Chromium.
+It advertises the default network interface's IPv4 address for WebRTC. Set
+`JANUS_HOST_IP` to the desktop's LAN address if the default route uses a VPN.
+Use `./demos/mixer/desktop.sh check` for the host prerequisite checks alone.
+
+`smoke` builds the mixer image, encodes a short HEVC clip and checks
+50 decoded frames through the CUDA compositor against the linear CUDA
+reference, including timestamps. It can run before the show starts.
+Use `./demos/mixer/desktop.sh logs -f mixer` for startup logs and
+`./demos/mixer/desktop.sh down` to stop the stack.
+
 ## Controls
 
 - Preview/Program: select the next scene, or enable Direct to cut on selection.

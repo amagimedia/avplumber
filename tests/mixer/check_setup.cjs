@@ -19,7 +19,14 @@ const { chromium } = require('playwright');
     const html = fs.readFileSync(path.join(__dirname, '../../demos/mixer/setup.html'), 'utf8');
     // The status carries the instance's profile as webui.py serves it: the limits asserted below are tesla_t4's.
     const profiles = JSON.parse(execFileSync(process.env.PYTHON || 'python3', ['-c',
-      'import json; from demos.mixer.instance_profiles import INSTANCE_PROFILES as p; print(json.dumps({t.value: v for t, v in p.items()}))'],
+      [
+        'import json',
+        'from demos.mixer.instance_profiles import INSTANCE_PROFILES, InstanceType, mxl_sources',
+        'profiles = {t.value: dict(p) for t, p in INSTANCE_PROFILES.items()}',
+        // As on the MXL-enabled L4 backend, add the capability detected at runtime.
+        'profiles[InstanceType.NVIDIA_L4_CUARRAY]["mxl_sources"] = mxl_sources("8.9")',
+        'print(json.dumps(profiles))',
+      ].join('\n')],
       {cwd: path.join(__dirname, '../..')}));
     let instanceType = 'tesla_t4';
     await page.route('http://mixer.test/**', route => {
@@ -410,6 +417,32 @@ const { chromium } = require('playwright');
     await count('sdr420').fill('0');
     await count('hlg420').fill('999');
     assert.equal(await count('hlg420').inputValue(),'53','HDR surface budget is separate from total NVDEC');
+    // Desktop buttons stage a complete setup without posting. A saved Low keeps its
+    // own mix on reload even when the host suggests High.
+    instanceType='geforce';
+    const desktopPreset=(source_count,weights)=>({source_count,weights,scene_count:256,
+      orientation:'landscape',fps:25,bit_depth:8,chroma:'420',layout:'balanced',extra_aux:0,
+      clean_feed:true,dsk:['lower_third','ticker','bug_left','bug_right'],encodes:{}});
+    const presets={low:desktopPreset(92,[60,0,0,0,16,16,0,0]),high:desktopPreset(188,[120,0,0,0,36,32,0,0])};
+    auxStatus={aux_buses:ownAux,janus_api:true,desktop:{presets,suggested:'high',free_mib_at_start:26000}};
+    await reset();
+    assert.equal(await sources.inputValue(),'92','a fresh desktop starts with Low even with ample free VRAM');
+    const before=submissions.length;
+    await page.getByRole('button',{name:'Low · 96 inputs'}).click();
+    assert.equal(submissions.length,before);
+    assert.equal(await page.locator('#source-total').textContent(),'96');
+    const low=await apply();
+    assert.deepEqual(low.weights,presets.low.weights);
+    assert.equal(low.source_count+low.dsk.length,96);
+    await reset(low);
+    assert.deepEqual((await apply()).weights,low.weights);
+    await page.getByRole('button',{name:'High · 192 inputs'}).click();
+    const high=await apply();
+    assert.deepEqual(high.weights,presets.high.weights);
+    assert.equal(high.source_count+high.dsk.length,192);
+    assert.equal(await extraAux.getAttribute('max'),'8');
+    await sources.fill('8');
+    assert.equal((await apply()).source_count,8);
     assert.deepEqual(errors, []);
     console.log('PASS: Balanced source counts, the maximum total, per-output encodes, NVENC budget and extra aux outputs');
   } finally {

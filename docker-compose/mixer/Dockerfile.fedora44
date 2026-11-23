@@ -315,8 +315,8 @@ RUN git init --quiet /build \
         commit --quiet --allow-empty -m "workspace ${AVPLUMBER_REVISION}"
 
 # CUDA kernels take the Makefile default image format: fatbin with SASS for
-# sm_75 to sm_89 plus PTX, so the driver never JIT-compiles avplumber's own
-# kernels. NEURAL_NET and HAVE_TENSORRT follow WITH_TENSORRT; the Makefile
+# sm_75, sm_80, sm_86 and sm_89 plus compute_89 PTX for newer GPUs such as
+# desktop Blackwell. NEURAL_NET and HAVE_TENSORRT follow WITH_TENSORRT; the Makefile
 # ignores TENSORRT_ROOT when they are off.
 RUN set -e; for target in avplumber python_module; do \
     make -j"${BUILD_JOBS}" "$target" \
@@ -385,7 +385,7 @@ WORKDIR /build
 
 COPY --from=builder /etc/ld.so.conf.d/avplumber.conf /etc/ld.so.conf.d/
 COPY --from=builder /usr/local/bin/ffmpeg /usr/local/bin/ffprobe /usr/local/bin/
-COPY --from=builder /usr/local/lib/libav*.so* /usr/local/lib/libsw*.so* /usr/local/lib/libpostproc.so* /usr/local/lib/
+COPY --from=builder /usr/local/lib/libav*.so* /usr/local/lib/libsw*.so* /usr/local/lib/
 COPY --from=builder /opt/tensorrt /opt/tensorrt
 COPY --from=builder /opt/mxl /opt/mxl
 COPY --from=builder /opt/ndi/6.4/lib /opt/ndi/6.4/lib

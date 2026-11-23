@@ -10,8 +10,8 @@ def configure(parser):
     parser.add_argument("--manage-setup", action="store_true", help="Own and restart the demo mixer process")
     instance_types = [t.value for t in InstanceType]
     parser.add_argument("--instance-type", choices=instance_types,
-                        help="The host type whose measured source limits the setup applies (instance_profiles.py); "
-                             "required with --manage-setup")
+                        help="Setup capacity profile. GeForce offers experimental desktop workloads. "
+                             "Required with --manage-setup.")
     parser.add_argument("--media-dir", type=Path, default=Path("/media"))
     parser.add_argument("--recipe", type=Path, default=Path("/media/demo.json"))
     parser.add_argument("--dmabuf-rest", default="http://127.0.0.1:9009")
@@ -26,7 +26,7 @@ def parse_args(argv=None):
     if args.critical_nice and not args.manage_setup:
         argparse.ArgumentParser().error("--critical-nice needs --manage-setup")
     if args.manage_setup and not args.instance_type:
-        argparse.ArgumentParser().error("--manage-setup needs --instance-type: source limits are measured per host type")
+        argparse.ArgumentParser().error("--manage-setup needs --instance-type")
     return args
 
 
@@ -34,7 +34,7 @@ def create_setup(args, bridge):
     if not args.manage_setup:
         return None
     if not args.instance_type:
-        raise ValueError("--manage-setup needs --instance-type: source limits are measured per host type")
+        raise ValueError("--manage-setup needs --instance-type")
     return SetupRuntime(args.media_dir, args.recipe, bridge, args.instance_type, args.mixer_args,
                         args.dmabuf_rest, args.janus_api)
 

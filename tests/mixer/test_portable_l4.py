@@ -3,12 +3,14 @@
 import importlib.util
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from demos.mixer.instance_profiles import INSTANCE_PROFILES, InstanceType
 from demos.mixer.prepare_demo import plan
-from demos.mixer.setup_runtime import DEFAULT_SETTINGS, recipe_for, source_limit
+from demos.mixer.setup_runtime import DEFAULT_SETTINGS, SetupRuntime, desktop_preset, extra_aux_limit, recipe_for, source_limit
+from pyplumber.mixer.config import parse
 
 
 PACKAGE = Path(__file__).resolve().parents[2] / "docker-compose/mixer/deploy/l4"
@@ -45,6 +47,36 @@ def test_seed_does_not_replace_an_adopted_show(tmp_path):
     l4_seed.seed(PACKAGE / "settings.json", tmp_path)
     assert path.read_text() == '{"custom": true}'
     assert not (tmp_path / "demo.json").exists()
+
+
+@pytest.mark.parametrize(("size", "total", "decoded", "raw", "browser"), [
+    ("low", 96, 60, 16, 20), ("high", 192, 120, 32, 40),
+])
+def test_desktop_presets_plan_exact_inputs_and_fit_session_limit(tmp_path, size, total, decoded, raw, browser):
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps(desktop_preset(size)))
+    l4_seed.seed("low" if size == "low" else path, tmp_path, "geforce")
+    recipe = json.loads((tmp_path / "demo.json").read_text())
+    show = plan(recipe, tmp_path)[0]
+    assert len(show["sources"]) == total
+    assert recipe["setup"]["weights"] == [decoded, 0, 0, 0, browser - 4, raw, 0, 0]
+    assert len(recipe["dsk"]) == 4
+    assert len(show["scenes"]) == 256
+    assert show["canvas"]["fps"] == 25 and show["canvas"]["working_format"] == "nv12"
+    assert len(show["renditions"]) == len(show["aux_buses"]) == 2
+    profile = INSTANCE_PROFILES[InstanceType.GEFORCE]
+    assert extra_aux_limit(profile, parse(show), recipe["setup"]["encodes"]) == 8
+
+
+@pytest.mark.parametrize(("sample", "suggested"), [("16384", "low"), ("20480", "high"),
+                                                 ("32768\n8192", "low"), ("[N/A]", "low")])
+def test_desktop_suggests_a_preset_from_free_memory_at_start(tmp_path, monkeypatch, sample, suggested):
+    monkeypatch.setattr("demos.mixer.setup_runtime.subprocess.check_output", lambda *a, **kw: sample)
+    runtime = SetupRuntime(tmp_path, tmp_path / "demo.json", SimpleNamespace(port=7777), "geforce")
+    status = runtime.status()
+    assert status["desktop"]["suggested"] == suggested
+    assert status["desktop"]["free_mib_at_start"] == (int(sample) if sample.isdigit() else None)
+    assert status["phase"] == "idle"
 
 
 def test_seed_accepts_low_bandwidth_hevc_monitors_and_scales_extra_count(tmp_path):

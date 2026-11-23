@@ -26,7 +26,7 @@ services:
   seed:
     image: *mixer-image
     entrypoint: [python3, docker-compose/mixer/deploy/l4/seed.py]
-    command: [/initial-settings.json, /media]
+    command: ["${MIXER_SEED_SETTINGS:-/initial-settings.json}", /media, "${MIXER_INSTANCE_TYPE:-nvidia_l4_cuarray}"]
     volumes:
       - ${MIXER_MEDIA_DIR}:/media:rw,z
       - ${MIXER_INITIAL_SETTINGS}:/initial-settings.json:ro,z

@@ -27,6 +27,7 @@ services:
     extends: {file: ../../docker-compose/dmabuf/compose.yaml, service: dma-browser}
     environment:
       DMA_BROWSER_AUTO_OPEN_URL: ""
+      DMA_BROWSER_RENDER_NODE: ${WLR_RENDER_DRM_DEVICE:-}
       DMA_BROWSER_MAX_WINDOWS: ${MIXER_BROWSER_CAPACITY:-40}
       DMA_BROWSER_WINDOWS_PER_PROCESS: 8
       # Opt-in: workers start their 60 fps frames at different points of the frame period
@@ -71,7 +72,7 @@ services:
       - ../../media:/media:rw,z
     command:
       - --manage-setup
-      # The measured demo host. Another machine needs its own profile in instance_profiles.py first.
+      # Select geforce for the editable desktop workloads or a measured T4/L4 profile.
       - --instance-type
       - ${MIXER_INSTANCE_TYPE:-tesla_t4}
       - --recipe
