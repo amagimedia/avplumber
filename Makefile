@@ -212,8 +212,10 @@ endif
 
 ifeq ($(HAVE_CUDA)$(HAVE_NVCC),11)
 NODES_SRC += $(SRCDIR)/nodes/hwaccel/cuda_to_v210.cpp
-$(eval $(call ptx_kernel,$(SRCDIR)/nodes/hwaccel/v210_pack.cu,avpl_v210_pack_ptx,objs/src/nodes/hwaccel/cuda_to_v210.o objs/src/nodes/hwaccel/raw_video_file_cuda.o))
-# CudaPinnedUploader's v210 unpack, which raw_video_file_cuda offers as pixel_format v210.
+NODES_SRC += $(SRCDIR)/nodes/hwaccel/uyvy422_to_cuda.cpp
+$(eval $(call ptx_kernel,$(SRCDIR)/nodes/hwaccel/v210_pack.cu,avpl_v210_pack_ptx,objs/src/nodes/hwaccel/cuda_to_v210.o objs/src/nodes/hwaccel/raw_video_file_cuda.o objs/src/nodes/hwaccel/uyvy422_to_cuda.o))
+# CudaPinnedUploader's unpack of packed pictures: v210, which raw_video_file_cuda offers as
+# pixel_format v210, and UYVY, which is all uyvy422_to_cuda does.
 override CXXFLAGS += -DHAVE_V210_KERNELS=1
 ifeq ($(HAVE_MXL),1)
 override CXXFLAGS += -DHAVE_MXL=1

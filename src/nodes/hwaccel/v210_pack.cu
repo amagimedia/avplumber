@@ -164,3 +164,57 @@ extern "C" __global__ void unpack_v210_##format( \
 UNPACK(p210le, uint16_t, uint64_t, 1)
 UNPACK(p010le, uint16_t, uint64_t, 2)
 UNPACK(nv12, uint8_t, uint32_t, 2)
+
+// ---- Unpack: UYVY rows (8-bit 4:2:2, the bytes Cb Y Cr Y; what an NDI receiver delivers) to nv12 ----
+//
+// Not in FFmpeg's hwupload_cuda: the kernels the two files share end above this line.
+// CudaPinnedUploader launches it for uyvy422_to_cuda. `input_pitch` is a multiple of 16 bytes
+// (uyvy422Stride), so a thread's 8 pixels are two aligned words of each of its two picture rows.
+
+// The even bytes of a word, as four bytes.
+INLINE uint32_t evenBytes(uint64_t word)
+{
+    word &= 0x00ff00ff00ff00ffull;
+    word = (word | word >> 8) & 0x0000ffff0000ffffull;
+    return static_cast<uint32_t>(word | word >> 16);
+}
+
+// 8 samples of a plane row from sample x: one word store, or sample by sample where the picture ends.
+INLINE void store8(uint8_t *plane, int pitch, int row, int x, int width, uint64_t samples)
+{
+    uint8_t *dst = plane + static_cast<size_t>(row) * pitch + x;
+    if (x + 8 <= width) {
+        *reinterpret_cast<uint64_t *>(dst) = samples;
+    } else {
+        for (int i = 0; x + i < width; i++)
+            dst[i] = samples >> i * 8;
+    }
+}
+
+extern "C" __global__ void unpack_uyvy422_nv12(
+    const uint8_t *input, int input_pitch, int width, int height, int interlaced,
+    uint8_t *output_y, int y_pitch, uint8_t *output_uv, int uv_pitch)
+{
+    const int x = (blockIdx.x * blockDim.x + threadIdx.x) * 8;
+    const int chroma = blockIdx.y * blockDim.y + threadIdx.y;
+    // The two picture rows of the chroma row, of its field in an interlaced frame: as in unpack()
+    // above, whose text the FFmpeg patch pins, so the rule is written out here again.
+    const int first = chroma * 2 - (interlaced ? chroma & 1 : 0), next = first + 1 + (interlaced ? 1 : 0);
+    if (x >= width || first >= height) return;
+    const int second = next < height ? next : first;
+    const uint64_t *a = reinterpret_cast<const uint64_t *>(input + static_cast<size_t>(first) * input_pitch) + x / 4;
+    const uint64_t *b = reinterpret_cast<const uint64_t *>(input + static_cast<size_t>(second) * input_pitch) + x / 4;
+    const uint64_t a0 = a[0], a1 = a[1], b0 = b[0], b1 = b[1];
+    // Luma is the odd bytes. Chroma, the even ones, is already in nv12's order (Cb Cr): the
+    // rounded mean of the two rows, each sum in the 16 bits of its byte pair.
+    const auto luma = [](uint64_t w0, uint64_t w1) { return evenBytes(w0 >> 8) | static_cast<uint64_t>(evenBytes(w1 >> 8)) << 32; };
+    const auto mean = [](uint64_t p, uint64_t q) {
+        const uint64_t even = 0x00ff00ff00ff00ffull;
+        return evenBytes(((p & even) + (q & even) + 0x0001000100010001ull) >> 1);
+    };
+    store8(output_y, y_pitch, first, x, width, luma(a0, a1));
+    if (second != first)
+        store8(output_y, y_pitch, second, x, width, luma(b0, b1));
+    if (chroma * 2 < height)   // a last bottom-field row can lie below the last chroma row
+        store8(output_uv, uv_pitch, chroma, x, width, mean(a0, b0) | static_cast<uint64_t>(mean(a1, b1)) << 32);
+}

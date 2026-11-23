@@ -176,7 +176,7 @@ def test_an_alpha_source_reaches_the_canvas_as_straight_rgba(native_boundary):
 
 def test_an_ndi_source_is_received_converted_to_nv12_and_uploaded(native_boundary):
     """FFmpeg's libndi_newtek device receives the named source (found at extra_ips besides mDNS);
-    its packed 4:2:2 decodes in software, becomes tagged NV12 and is uploaded after pacing, and
+    its packed 4:2:2 is wrapped in software, uploaded after pacing and unpacked to tagged NV12 there, and
     its audio joins the show's like a video file's. NDI never ends: no loop, the group restarts."""
     api = fake_api()
     api.MixerGraphBuilder = native_boundary[1]
@@ -209,7 +209,9 @@ def test_an_ndi_source_is_received_converted_to_nv12_and_uploaded(native_boundar
     assert nodes["decode_0"]["auto_restart"] == "group" and nodes["decode_0"]["hwaccel_only_for_codecs"] == []
     upload = nodes["ndi_upload_0"]
     assert upload["src"] == "input_0_realtime" and app.input_edges[0] == "input_0_nv12"
-    assert upload["graph"] == f"format=nv12,{cfg.sources[0].color.setparams},hwupload_cuda=pinned=1" and upload["threads"] == 1
+    # Unpacked into NV12 by the device, not converted on the CPU: no filter graph.
+    assert upload["type"] == "uyvy422_to_cuda" and upload["frame_color"] == cfg.sources[0].color.tags
+    assert (upload["hwaccel"], upload["auto_restart"]) == ("mixer_gpu", "group") and "graph" not in upload
     # A sender lost on program restarts the chain: its EOF stops at the guard before the fan-out.
     live = next(n for n in nodes.values() if n.get("dst") == nodes["mixer_otm_cam"]["src"])
     assert live["type"] == "assume_video_format" and live["ignore_eof"] and (live["width"], live["height"]) == (1920, 1080)

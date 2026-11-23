@@ -1097,6 +1097,21 @@ duration of the last read and upload (`read_us`, `upload_us`).
 The upload half is `src/nodes/hwaccel/CudaPinnedUploader.hpp`, which any source able to write
 its samples where it is told can use.
 
+### `uyvy422_to_cuda`
+
+Packed UYVY frames in host memory (8-bit 4:2:2, `uyvy422`: what an NDI receiver or a capture card
+delivers) as NV12 CUDA frames. Each picture is copied once, as it is, into page-locked host memory;
+the device takes it from there and one kernel pass unpacks it into the frame, 4:2:0 chroma being the
+mean of two rows (of the same field in an interlaced frame). The filter graph for the same,
+`format=nv12,hwupload_cuda`, converts every picture with swscale on the CPU first. Timestamps,
+metadata and side data pass through. It needs a `HAVE_NVCC=1` build.
+
+-   `src`, `dst` (string) - mandatory, video frame edges
+-   `hwaccel` (string, name of instance-shared object) - mandatory, a CUDA device
+-   `frame_color` (object) - colour tags to stamp on the frames, as `raw_video_file_cuda`'s
+
+`stats` (`node.object.get`): `frames`, and the last picture's `copy_us` and `upload_us`.
+
 ### `ipc_audio_source`
 
 Get audio frames from named pipe. See `src/nodes/ipc_audio_source.cpp` for header structure. Header must be followed by interleaved audio samples.

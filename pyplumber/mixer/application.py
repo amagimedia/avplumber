@@ -687,6 +687,7 @@ def load_avp_api():
         ResampleAudioForwardChannels,
         SmoothTimestamps,
         Split,
+        Uyvy422ToCuda,
     )
     from pyplumber.rtcp_feedback import RtcpFeedbackListener
 
@@ -726,6 +727,7 @@ def load_avp_api():
         RtcpFeedbackListener=RtcpFeedbackListener,
         SmoothTimestamps=SmoothTimestamps,
         Split=Split,
+        Uyvy422ToCuda=Uyvy422ToCuda,
     )
 
 
@@ -1111,13 +1113,12 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
                     # After pacing, not between decoder and pacing: a seek walks up from the realtime
                     # node to the decoder, and a filter in that path stops it.
                     stored = "nv12" if ndi else "rgba"
-                    # NDI: pinned staging on the upload's own stream, not the program compositors'
-                    # default one, on one thread rather than a slice thread per CPU per source.
-                    avp.addNode(api.FilterVideo({
-                        "name": f"{'ndi' if ndi else 'alpha'}_upload_{index}", "src": edge, "dst": f"input_{index}_{stored}",
-                        "graph": f"format=nv12,{source.color.setparams},hwupload_cuda=pinned=1" if ndi else ALPHA_UPLOAD,
-                        **({"threads": 1} if ndi else {}), "hwaccel": HWACCEL, "group": group, "auto_restart": "group",
-                    }))
+                    upload = {"name": f"{'ndi' if ndi else 'alpha'}_upload_{index}", "src": edge, "dst": f"input_{index}_{stored}",
+                              "hwaccel": HWACCEL, "group": group, "auto_restart": "group"}
+                    # NDI: the device unpacks the packed picture into NV12 itself; converting it on
+                    # the CPU first (format=nv12 in a filter graph) was a quarter of a core a source.
+                    avp.addNode(api.Uyvy422ToCuda({**upload, "frame_color": source.color.tags}) if ndi
+                                else api.FilterVideo({**upload, "graph": ALPHA_UPLOAD}))
                     edge = f"input_{index}_{stored}"
         if source.transform:
             transformed_edge = f"input_{index}_transformed"

@@ -15,6 +15,18 @@ extern "C" {
 /// described here as GRAY8 rows of this many bytes.
 inline int v210Stride(int width) { return (width + 47) / 48 * 128; }
 
+/// Bytes of a packed UYVY row (AV_PIX_FMT_UYVY422, two a pixel) padded to whole 16-byte groups
+/// of 8 pixels, which is what the device unpacks at a time.
+inline int uyvy422Stride(int width) { return (2 * width + 15) / 16 * 16; }
+
+/// What a picture handed to the device is packed as, when not the planes of its frames' format.
+enum class PackedPicture { None, V210, Uyvy422 };
+
+/// The bytes of a row of `packed`; a picture of it is laid out as GRAY8 rows of that many.
+inline int packedStride(PackedPicture packed, int width) {
+    return packed == PackedPicture::V210 ? v210Stride(width) : uyvy422Stride(width);
+}
+
 /// One picture as contiguous planes, each row exactly its samples.
 struct RawPictureLayout {
     int64_t frame_size = 0;

@@ -196,6 +196,10 @@ class RawVideoFileCuda(InternalNode):
     TYPE = "raw_video_file_cuda"
 
 
+class Uyvy422ToCuda(InternalNode):
+    TYPE = "uyvy422_to_cuda"
+
+
 class DrmPrimeToEglImage(InternalNode):
     TYPE = "drm_prime_to_egl_image"
 

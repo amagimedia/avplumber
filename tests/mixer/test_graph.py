@@ -172,7 +172,7 @@ def fake_api():
         "Mux": "mux", "OneToMany": "one_to_many", "Output": "output", "PreheatVideoRouter": "preheat_video_router",
         "RawVideoFileCuda": "raw_video_file_cuda", "Realtime": "realtime", "RepeatLastFrame": "repeat_last_frame",
         "ResampleAudio": "resample_audio",
-        "SmoothTimestamps": "smooth_timestamps", "Split": "split",
+        "SmoothTimestamps": "smooth_timestamps", "Split": "split", "Uyvy422ToCuda": "uyvy422_to_cuda",
     }
     return SimpleNamespace(AVPlumber=FakeAvp, MixerGraphBuilder=FakeMixer,
                            RtcpFeedbackListener=FakeRtcpFeedbackListener,

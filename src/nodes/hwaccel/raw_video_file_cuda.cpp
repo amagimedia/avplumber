@@ -104,7 +104,8 @@ public:
         NodeSingleOutput::init(edges, params);
         const auto makeUploader = [&](size_t pictures) {
             uploader_ = std::make_unique<CudaPinnedUploader>(hwaccel_, sw_format_, width_, height_, write_combined_,
-                                                             pictures, pool_frames_, v210_, field_flags_ != 0);
+                                                             pictures, pool_frames_,
+                                                             v210_ ? PackedPicture::V210 : PackedPicture::None, field_flags_ != 0);
         };
         if (isMxlUrl(path_)) {
             flow_ = std::make_unique<MxlFlowReader>(path_, width_, height_);
