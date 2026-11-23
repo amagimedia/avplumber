@@ -49,16 +49,7 @@ check_host() {
 
 case "${1:-}" in
     check) check_host; "$stack" config --quiet ;;
-    smoke)
-        check_host
-        "$stack" build mixer
-        "$stack" run --rm --no-deps -T -v "$repo/tests/cuda:/smoke:ro,z" --entrypoint sh mixer -ec '
-            ffmpeg -hide_banner -loglevel error -f lavfi -i testsrc2=size=320x192:rate=25 \
-                -frames:v 50 -c:v hevc_nvenc -g 1 -bf 0 -preset p1 /tmp/desktop-smoke.mp4
-            python3 /smoke/nvdec/compositor_decode.py --input /tmp/desktop-smoke.mp4 \
-                --width 320 --height 192 --frames 50 --rounds 1
-        '
-        ;;
+    smoke) check_host; exec "$stack" "$@" ;;
     "")
         check_host
         "$stack" build

@@ -25,6 +25,7 @@ def test_seed_generates_portable_recipe_and_preserves_edits(tmp_path):
     recipe = json.loads(path.read_text())
     show = plan(recipe, tmp_path)[0]
     assert len(show["sources"]) == 192
+    assert show["canvas"]["raw_upload"] == "resident"
     assert len(show["scenes"]) == 256
     assert [bus["id"] for bus in show["aux_buses"][:2]] == ["mv", "mv2"]
     assert len(show["aux_buses"]) == 15
@@ -61,6 +62,7 @@ def test_desktop_presets_plan_exact_inputs_and_fit_session_limit(tmp_path, size,
     assert len(show["sources"]) == total
     assert recipe["setup"]["weights"] == [decoded, 0, 0, 0, browser - 4, raw, 0, 0]
     assert len(recipe["dsk"]) == 4
+    assert show["canvas"]["raw_upload"] == "resident"
     assert len(show["scenes"]) == 256
     assert show["canvas"]["fps"] == 25 and show["canvas"]["working_format"] == "nv12"
     assert len(show["renditions"]) == len(show["aux_buses"]) == 2

@@ -123,8 +123,12 @@ It advertises the default network interface's IPv4 address for WebRTC. Set
 `JANUS_HOST_IP` to the desktop's LAN address if the default route uses a VPN.
 Use `./demos/mixer/desktop.sh check` for the host prerequisite checks alone.
 
-`smoke` builds the mixer image, encodes a short HEVC clip and checks
-50 decoded frames through the CUDA compositor against the linear CUDA
+The raw NV12 inputs in both presets keep their loops in page-locked host RAM.
+CUDA allocation failures stop the raw input. The pinned buffers consume system
+RAM in addition to the GPU memory needed for the show.
+
+`smoke` builds the mixer image, compares raw uploads from pinned memory byte
+for byte, then encodes a short HEVC clip and checks 50 decoded frames through the CUDA compositor against the linear CUDA
 reference, including timestamps. It can run before the show starts.
 Use `./demos/mixer/desktop.sh logs -f mixer` for startup logs and
 `./demos/mixer/desktop.sh down` to stop the stack.

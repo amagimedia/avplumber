@@ -40,7 +40,7 @@ if [[ -n "${MIXER_HTPASSWD:-}" ]]; then
     export MIXER_AUTH_REALM=Mixer
 fi
 if [[ $# == 0 ]]; then
-    echo "Usage: $0 {build|up -d|down|logs -f|config|...}" >&2
+    echo "Usage: $0 {build|smoke|up -d|down|logs -f|config|...}" >&2
     exit 2
 fi
 if [[ $1 == up && $MIXER_INSTANCE_TYPE == nvidia_l4_cuarray ]] && command -v nvidia-smi >/dev/null; then
@@ -62,5 +62,10 @@ case "${ENABLE_NDI:-0}" in
     1) ndi_compose=(-f "$here/ndi.yaml") ;;
     *) echo 'ENABLE_NDI must be 0 or 1' >&2; exit 2 ;;
 esac
+if [[ $1 == smoke ]]; then
+    [[ $# == 1 ]] || { echo "Usage: $0 smoke" >&2; exit 2; }
+    set -- run --build --rm --no-deps -T -v "$repo/tests/cuda:/smoke:ro,z" \
+        --entrypoint sh mixer /smoke/smoke_portable_mixer.sh
+fi
 exec docker compose --env-file /dev/null --project-directory "$repo/docker-compose/mixer" \
     -f "$repo/docker-compose/mixer/compose.yaml" -f "$here/compose.yaml" "${ndi_compose[@]}" "$@"
