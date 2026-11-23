@@ -167,7 +167,7 @@ def fake_api():
         "DrmPrimeToCuda": "drm_prime_to_cuda", "EncAudio": "enc_audio", "EncVideo": "enc_video",
         "FilterAudio": "filter_audio", "FilterVideo": "filter_video",
         "ResampleAudioForwardChannels": "resample_audio_forward_channels",
-        "ForceFPS": "force_fps", "ForceKeyFrame": "force_key_frame", "InputRec": "input_rec",
+        "ForceFPS": "force_fps", "ForceKeyFrame": "force_key_frame", "Input": "input", "InputRec": "input_rec",
         "IpcDmabufSource": "ipc_dmabuf_source", "MixerCompositor": "mixer_compositor", "MixerKeyer": "mixer_keyer", "MixerDelivery": "mixer_delivery",
         "Mux": "mux", "OneToMany": "one_to_many", "Output": "output", "PreheatVideoRouter": "preheat_video_router",
         "RawVideoFileCuda": "raw_video_file_cuda", "Realtime": "realtime", "RepeatLastFrame": "repeat_last_frame",

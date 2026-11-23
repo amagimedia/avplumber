@@ -44,6 +44,9 @@ HWACCEL = "mixer_gpu"
 ALPHA_UPLOAD = "format=rgba,hwupload_cuda"
 # NDI (FFmpeg's libndi_newtek, ENABLE_NDI=1 images): source discovery waits this long when opening.
 NDI_INPUT_OPTIONS = {"wait_sources": "5"}
+# Seconds an NDI read may bring nothing before its input fails and the source's group restarts with a
+# new receiver: a receiver left unread for a while (as by a show's slow start) can go silent for good.
+NDI_READ_TIMEOUT_S = 2
 # Nothing in a show reads what input_rec stamps on decoded frames (realtime's frame counters serve
 # its teams and the OBS embedding, speed nodes read frame_ts); stamping costs every hop a copy.
 SOURCE_FRAME_METADATA: list = []
@@ -1067,7 +1070,8 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
                 edge, audio_edge = build_input(
                     avp, api, str(index), source.location, continuous_loop=True,
                     **({"input_params": {"format": "libndi_newtek", "options": {
-                        **NDI_INPUT_OPTIONS, **({"extra_ips": source.extra_ips} if source.extra_ips else {})}}} if ndi else {}),
+                        **NDI_INPUT_OPTIONS, **({"extra_ips": source.extra_ips} if source.extra_ips else {})}},
+                        "live_timeout": NDI_READ_TIMEOUT_S} if ndi else {}),
                     # NVDEC drops alpha: an alpha source decodes in software, in its codec's own
                     # format (argb, yuva444p12...), and is uploaded as RGBA after its chain. NDI's
                     # packed 4:2:2 (UYVY) is no codec NVDEC has: its frames go the same way, as NV12.

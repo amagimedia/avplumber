@@ -28,14 +28,21 @@ INPUT_TIMEOUT_S = 3_942_000_000
 
 
 def _add_packet_input(avp, api, tag: str, params: dict, *, group: str,
-                      routing: dict, demux: bool, restart: dict) -> None:
-    """Route input packets directly or through a separately named demux node."""
+                      routing: dict, demux: bool, restart: dict, live_timeout: Optional[int] = None) -> None:
+    """Route input packets directly or through a separately named demux node. With *live_timeout*
+    a live feed is read by the plain `input` node, whose read that brings nothing for that many
+    seconds fails it, so the source's group restarts: input_rec is for files and replays (seeking,
+    speed, recording), and its reads wait as long as INPUT_TIMEOUT_S."""
     packets = f"input_{tag}_packets"
-    avp.addNode(api.InputRec({
-        "name": f"input_{tag}", **({"dst": packets} if demux else {"routing": routing}),
-        "initial_timeout": 20, "timeout": INPUT_TIMEOUT_S, "group": group, **params,
-    }))
-    if demux:
+    if live_timeout is None:
+        avp.addNode(api.InputRec({
+            "name": f"input_{tag}", **({"dst": packets} if demux else {"routing": routing}),
+            "initial_timeout": 20, "timeout": INPUT_TIMEOUT_S, "group": group, **params,
+        }))
+    else:
+        avp.addNode(api.Input({"name": f"input_{tag}", "dst": packets, "initial_timeout": 20,
+                               "timeout": live_timeout, "group": group, **params}))
+    if demux or live_timeout is not None:
         avp.addNode(api.Demux({
             "name": f"demux_{tag}", "src": packets, "routing": routing,
             "wait_for_keyframe": False, "group": group, **restart,
@@ -53,7 +60,7 @@ def build_input(avp, api, tag: str, url: str, *, group: str, fps: int, fps_den: 
                 auto_restart: Optional[str] = "group", event_loop: Optional[str] = None,
                 native_rate: bool = False, frame_metadata: Optional[Sequence[str]] = None,
                 demux: bool = True, decoded_ahead: Optional[int] = None, has_audio: bool = False,
-                audio_sample_rate: int = 48000) -> tuple[str, Optional[str]]:
+                audio_sample_rate: int = 48000, live_timeout: Optional[int] = None) -> tuple[str, Optional[str]]:
     """Add the chain for one source; return its (paced video edge, audio edge or None).
 
     ``native_rate`` preserves source cadence for a clocked compositor; otherwise
@@ -100,7 +107,7 @@ def build_input(avp, api, tag: str, url: str, *, group: str, fps: int, fps_den: 
     if has_audio and sync_team is None:
         sync_team = f"input_{tag}_av_sync"
     sync = {} if sync_team is None else {"sync_team": sync_team}
-    _add_packet_input(avp, api, tag, {
+    _add_packet_input(avp, api, tag, {"url": url, **(input_params or {})} if live_timeout is not None else {
         "url": url, "loop": loop, "loop_continuous_ts": loop and continuous_loop,
         # Host sync (AVP_CLOCK_ORIGIN=tai): keep the source's own timestamps. Started at zero, they
         # count from when this host joined the stream, and two hosts would put different pictures
@@ -108,7 +115,7 @@ def build_input(avp, api, tag: str, url: str, *, group: str, fps: int, fps_den: 
         **({"keep_source_ts": True} if os.environ.get("AVP_CLOCK_ORIGIN") == "tai" else {}),
         **_frame_metadata(frame_metadata), **(input_params or {}),
     }, group=group, routing={"?v:0": edge("video_packets"), **({"?a:0": edge("audio_packets")} if has_audio else {})},
-       demux=demux, restart=restart)
+       demux=demux, restart=restart, live_timeout=live_timeout)
     audio_edge = None
     if has_audio:
         avp.addNode(api.DecAudio({
