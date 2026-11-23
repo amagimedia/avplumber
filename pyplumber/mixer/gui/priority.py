@@ -23,7 +23,7 @@ log = logging.getLogger("webui")
 # aux_<bus>_encoder, which the cut hides when the bus id is longer than five characters.
 # The pass-through nodes between these stages (OneToMany mixer_otm_*, SourceSwitcher
 # mixer_out_sel/mixer_wipe_sel, Split split_clean, janus_force_keyframe, janus_format,
-# janus_repeat_headers, janus_mux, janus_rtp_output) are left at nice 0: each runs for
+# janus_mux, janus_rtp_output) are left at nice 0: each runs for
 # microseconds per frame and sleeps otherwise, which CFS already wakes promptly. Widen the set
 # only after measuring that it moves the missed-deadline counter.
 CRITICAL_THREADS = re.compile(r"^(mixer_comp_|dsk_comp|mixer_pts_gate|EventLoop|cuda-EvtHandlr|udp-tx)|_encod")

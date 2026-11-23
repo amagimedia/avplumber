@@ -146,6 +146,8 @@ class AuxBus:
             fps=rate_pair(fps)[0], fps_den=rate_pair(fps)[1], width=r.width, height=r.height, hwaccel=self.hwaccel, group=self.group,
             codec=r.codec, preset=r.preset, profile=r.profile or ("main" if "hevc" in r.codec else "high"), enc_format="nv12",
             prefix=self.prefix, failure_mode="off", dpb_size=r.dpb_size, edge_capacity=1,
+            # Without a conversion the encoder reads the bus compositor's own canvas size and storage.
+            source_declares_format=not needs_conversion,
             hold=True)   # MixerApplication releases every output together once the show has settled
         # Prefer the mixer's copy: build_application clears it when no has_audio sources
         # remain, while a stale options.audio_router_node would still wire an unfed edge.

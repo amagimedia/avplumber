@@ -1470,6 +1470,37 @@ def test_janus_keyframe_limit_is_configurable(minimum):
     assert node.parameters["min_interval_ms"] == minimum
 
 
+@pytest.mark.parametrize("declared", [False, True])
+def test_janus_chain_has_no_node_that_only_passes_data(declared):
+    """The encoder feeds the RTP muxer (NVENC repeats its parameter sets in-band), and a source that
+    declares its own format needs no assume_video_format node."""
+    from pyplumber.mixer.janus import JanusVideoConfig, build_janus_output
+    avp = FakeAvp()
+    build_janus_output(avp, fake_api(), "program", JanusVideoConfig(), fps=30, width=1920, height=1080,
+                       source_declares_format=declared)
+    nodes = {n.parameters["name"]: n.parameters for n in avp.nodes}
+    assert list(nodes) == ["janus_fps", "janus_force_keyframe", *([] if declared else ["janus_format"]),
+                           "janus_encoder", "janus_mux", "janus_rtp_output"]
+    chain = [nodes[name] for name in nodes]
+    assert chain[0]["src"] == "program" and chain[-2]["src"] == [chain[-3]["dst"]]
+    assert all(below["src"] == above["dst"] for above, below in zip(chain[:-3], chain[1:-2]))
+    assert chain[-1]["src"] == chain[-2]["dst"]
+
+
+@pytest.mark.parametrize("declared", [False, True])
+def test_janus_chain_queues_what_it_did_with_the_nodes_it_lost(declared):
+    """The queue before each node that is gone holds that node's item too, so a stalled encoder
+    fills the compositor's output no sooner than it did."""
+    from pyplumber.mixer.janus import JanusVideoConfig, build_janus_output
+    avp = FakeAvp()
+    build_janus_output(avp, fake_api(), "bus", JanusVideoConfig(), fps=30, width=1920, height=1080, prefix="aux_1",
+                       failure_mode="off", edge_capacity=1, source_declares_format=declared)
+    plans = dict(avp.edges.plans)
+    frames = [plans[e] for e in ("aux_1_fps", "aux_1_keyframed", "aux_1_video") if e in plans]
+    assert frames == ([1, 2] if declared else [1, 1, 1]) and sum(frames) == 3
+    assert plans["aux_1_encoded"] == 2 and plans["aux_1_video_rtp_mux"] == 1
+
+
 @pytest.mark.parametrize("minimum", [-1, 0.2, True, "200", 2**31])
 def test_janus_rejects_invalid_keyframe_limit(minimum):
     from pyplumber.mixer.janus import JanusVideoConfig
