@@ -1097,6 +1097,29 @@ duration of the last read and upload (`read_us`, `upload_us`).
 The upload half is `src/nodes/hwaccel/CudaPinnedUploader.hpp`, which any source able to write
 its samples where it is told can use.
 
+### `packed_to_cuda`
+
+Packed frames in host memory as CUDA frames: UYVY (8-bit 4:2:2, `uyvy422`: what an NDI receiver or a
+capture card delivers) and 8-bit RGB with a fourth byte (`bgra`, `bgr0`, `rgba`, `rgb0`: what an NDI
+receiver delivers for a sender with alpha). Each picture is copied once, as it is, into page-locked
+host memory; the device takes it from there and one kernel pass unpacks it into the frame. The filter
+graph for the same, `format=nv12,hwupload_cuda`, converts every picture with swscale on the CPU
+first. Timestamps, metadata and side data pass through. It needs a `HAVE_NVCC=1` build.
+
+-   `src`, `dst` (string) - mandatory, video frame edges
+-   `hwaccel` (string, name of instance-shared object) - mandatory, a CUDA device
+-   `storage` (string) - what the frames are, whatever arrives: `nv12` (default) or `bgra`.
+    `nv12`: 4:2:0 chroma is the mean of two rows (of the same field in an interlaced frame), of 2x2
+    pixels for RGB, whose alpha is dropped. `bgra`: for a source keyed or blended by its alpha;
+    `bgra` frames are uploaded as they are, alpha straight or premultiplied as it came, and frames
+    without alpha (`uyvy422`, `bgr0`, `rgb0`) become opaque.
+-   `frame_color` (object) - colour tags to stamp on the frames, as `raw_video_file_cuda`'s. Its
+    `colorspace` and `color_range` are also the matrix and range between RGB and Y'CbCr (BT.709,
+    limited range without them).
+
+`stats` (`node.object.get`): `frames`, the last picture's `copy_us` and `upload_us`, and the
+`pixel_format` that arrives.
+
 ### `ipc_audio_source`
 
 Get audio frames from named pipe. See `src/nodes/ipc_audio_source.cpp` for header structure. Header must be followed by interleaved audio samples.

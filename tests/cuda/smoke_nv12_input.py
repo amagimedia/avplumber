@@ -69,7 +69,7 @@ def check(fmt, upload, native_rate=False, *, composite=False):
             finish(avp, nodes)
 
 
-def check_v210(width, native_rate=False):
+def check_v210(width, native_rate=False, direct=False):
     height, fps = 64, 30
     expected = [sample_planes(width, height, i) for i in range(6)]
     with tempfile.TemporaryDirectory() as directory:
@@ -80,7 +80,9 @@ def check_v210(width, native_rate=False):
         try:
             edge = build_v210_input(avp, api, "raw", str(path), width=width, height=height,
                                     fps=fps, group="probe", hwaccel="v210_gpu", loop=True,
-                                    color=COLOR["ramp"], native_rate=native_rate)
+                                    # The node's frame_color has no chroma_location.
+                                    color={k: v for k, v in COLOR["ramp"].items() if not direct or k != "chroma_location"},
+                                    native_rate=native_rate, direct=direct)
             # Force a GPU read before release, exercising recycled pool ordering.
             verify = api.FilterVideo({"name": "verify", "src": edge, "dst": "result",
                                       "group": "probe", "hwaccel": "v210_gpu", "threads": 1,
@@ -105,7 +107,8 @@ def check_v210(width, native_rate=False):
             assert len(seen) == 24 and len(set(seen)) >= 3, seen
             assert any(b < a for a, b in zip(seen, seen[1:])), "v210 did not loop"
             assert np.allclose(np.diff(timestamps), 1 / fps, atol=.001), timestamps
-            print(f"PASS: 24 paced v210 frames at width {width}, looping, byte-exact GPU unpack, native_rate={native_rate}", flush=True)
+            print(f"PASS: 24 paced v210 frames at width {width}, looping, byte-exact GPU unpack "
+                  f"({'raw_video_file_cuda' if direct else 'hwupload_cuda'}), native_rate={native_rate}", flush=True)
         finally:
             finish(avp, nodes)
 
@@ -118,4 +121,5 @@ if __name__ == "__main__":
                 if native_rate:
                     check(fmt, upload, native_rate, composite=True)
         for width in (48, 50, 1920):
-            check_v210(width, native_rate)
+            for direct in (False, True):   # the FFmpeg filter's kernels, and the node's copy of them
+                check_v210(width, native_rate, direct)

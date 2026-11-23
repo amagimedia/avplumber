@@ -44,6 +44,20 @@ HWACCEL = "mixer_gpu"
 ALPHA_UPLOAD = "format=rgba,hwupload_cuda"
 # NDI (FFmpeg's libndi_newtek, ENABLE_NDI=1 images): source discovery waits this long when opening.
 NDI_INPUT_OPTIONS = {"wait_sources": "5"}
+# Seconds an NDI read may bring nothing before its input fails and the source's group restarts with a
+# new receiver: a receiver left unread for a while (as by a show's slow start) can go silent for good.
+NDI_READ_TIMEOUT_S = 2
+# NDI is paced by arrival, as a network feed: a frame held a frame period absorbs arrival jitter, and
+# frames this far ahead of the timeline (anchored on a picture that waited, as during a show's slow
+# start) resync it. Held longer, they back up into the input, whose receiver then drops frames, and
+# the gaps would hold the next ones longer still.
+NDI_EARLY_RESYNC_S = 0.1
+# Pacing releases one picture per picture received, so pictures that once queued up in front of it
+# (a show's slow start, a stall) stay queued: the chain's queues stay full, every late read loses a
+# picture in the receiver, and the source runs a queue's worth behind. More than NDI_BACKLOG_MAX
+# frame periods between the picture being paced and the newest one received: the older ones are
+# dropped until NDI_BACKLOG_KEEP are left. Between whole periods, so that jitter decides neither.
+NDI_BACKLOG_MAX, NDI_BACKLOG_KEEP = 3.5, 1.5
 # Nothing in a show reads what input_rec stamps on decoded frames (realtime's frame counters serve
 # its teams and the OBS embedding, speed nodes read frame_ts); stamping costs every hop a copy.
 SOURCE_FRAME_METADATA: list = []
@@ -216,6 +230,9 @@ class MixerApplication:
     start_stable_sec: float = START_STABLE_SEC
     start_stable_timeout_sec: float = START_STABLE_TIMEOUT_SEC
     compositor_inputs: tuple[tuple[int, ...], ...] = ()   # a compositor's inputs per input_edges entry; routed: none
+    # Input nodes of live sources that restart their own group when a read times out (NDI): their
+    # failure while the show starts is that restart, not the start's.
+    live_inputs: tuple[str, ...] = ()
     absent_inputs: tuple[str, ...] = field(default=(), init=False)   # edges of sources that gave no frame
     startup: dict | None = field(default=None, init=False)   # how going on air went; `mixer.startup` answers with it
     _startup_error: str | None = field(default=None, init=False, repr=False)
@@ -347,7 +364,7 @@ class MixerApplication:
         original = self.avp.on_exception
         self._startup_error = None
         def failed(name, kind, message):
-            if self._startup_error is None:
+            if self._startup_error is None and name not in self.live_inputs:
                 self._startup_error = f"Mixer startup failed at {name} ({kind}): {message}"
             original(name, kind, message)
         self.avp.on_exception = failed
@@ -653,6 +670,7 @@ def load_avp_api():
         FilterVideo,
         ForceFPS,
         ForceKeyFrame,
+        Input,
         InputRec,
         IpcDmabufSource,
         MixerCompositor,
@@ -669,6 +687,7 @@ def load_avp_api():
         ResampleAudioForwardChannels,
         SmoothTimestamps,
         Split,
+        PackedToCuda,
     )
     from pyplumber.rtcp_feedback import RtcpFeedbackListener
 
@@ -690,6 +709,7 @@ def load_avp_api():
         FilterVideo=FilterVideo,
         ForceFPS=ForceFPS,
         ForceKeyFrame=ForceKeyFrame,
+        Input=Input,
         InputRec=InputRec,
         IpcDmabufSource=IpcDmabufSource,
         MixerCompositor=MixerCompositor,
@@ -707,6 +727,7 @@ def load_avp_api():
         RtcpFeedbackListener=RtcpFeedbackListener,
         SmoothTimestamps=SmoothTimestamps,
         Split=Split,
+        PackedToCuda=PackedToCuda,
     )
 
 
@@ -798,6 +819,12 @@ def _flag_renditions(options: MixerOptions, width: int, height: int) -> tuple:
                                     _kbps(options.bitrate), options.codec, preset="p3")
     janus = mixer_config.Rendition("janus", "janus", width, height, options.fps, options.janus_video_bitrate_kbps)
     return tuple(r for r, wanted in ((record, options.output), (janus, options.janus_output)) if wanted)
+
+
+def _alpha_storage(source) -> str | None:
+    """What an alpha source's frames are on the GPU: decoded video is uploaded as RGBA, NDI
+    delivers BGRA. None for a source without alpha."""
+    return {"video": "rgba", "ndi": "bgra"}[source.kind] if source.alpha else None
 
 
 def _hdr_metadata(r: "mixer_config.Rendition", target) -> dict | None:
@@ -1020,6 +1047,7 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
     next_input = 0
     demux = cfg.input_routing == "demux"
     audio_edges: list[tuple[str, str]] = []  # (source.id, audio edge), only sources with has_audio
+    live_inputs: list[str] = []
     for index, source in enumerate(cfg.sources):
         group = _input_group(index)
         raw_storage = mixer_config.RAW_STORAGE.get(source.kind)   # what a raw source's frames arrive as
@@ -1064,28 +1092,45 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
                     pool_frames=cfg.raw_pool_frames, color=source.color, **file_params)
             else:
                 ndi = source.kind == "ndi"
+                if ndi:
+                    live_inputs.append(f"input_{index}")
                 edge, audio_edge = build_input(
                     avp, api, str(index), source.location, continuous_loop=True,
                     **({"input_params": {"format": "libndi_newtek", "options": {
-                        **NDI_INPUT_OPTIONS, **({"extra_ips": source.extra_ips} if source.extra_ips else {})}}} if ndi else {}),
+                        **NDI_INPUT_OPTIONS, **({"extra_ips": source.extra_ips} if source.extra_ips else {})}},
+                        "live_timeout": NDI_READ_TIMEOUT_S} if ndi else {}),
                     # NVDEC drops alpha: an alpha source decodes in software, in its codec's own
                     # format (argb, yuva444p12...), and is uploaded as RGBA after its chain. NDI's
                     # packed 4:2:2 (UYVY) is no codec NVDEC has: its frames go the same way, as NV12.
                     decoder_params={**_decoder_params(source, cfg), **({"hwaccel_only_for_codecs": []} if source.alpha or ndi else {})},
                     decoded_ahead=cfg.decoded_frames_ahead,
-                    has_audio=source.has_audio, sync_team=(f"input_{index}_av_sync" if source.has_audio else None),
+                    # realtime measures and drops a backlog as a member of a team, also one of its own.
+                    has_audio=source.has_audio, sync_team=(f"input_{index}_av_sync" if source.has_audio or ndi else None),
+                    # Not with audio: its realtime node gets the same parameters and shares the team,
+                    # and audio queued in its own chain would flush the pictures with it (untested).
+                    **({"realtime_params": {"jitter_margin": fps_den / fps_num, "initial_jitter_margin": fps_den / fps_num,
+                                            "discontinuity_threshold": NDI_EARLY_RESYNC_S,
+                                            **({} if source.has_audio else {
+                                                "input_ts_queue": f"input_{index}_packets",
+                                                "intermediate_queues": [f"input_{index}_video_packets"],
+                                                "max_buffered": NDI_BACKLOG_MAX * fps_den / fps_num,
+                                                "min_buffered": NDI_BACKLOG_KEEP * fps_den / fps_num})}} if ndi else {}),
                     **file_params)
                 if audio_edge:
                     audio_edges.append((source.id, audio_edge))
                 if source.alpha or ndi:
                     # After pacing, not between decoder and pacing: a seek walks up from the realtime
                     # node to the decoder, and a filter in that path stops it.
-                    stored = "nv12" if ndi else "rgba"
-                    avp.addNode(api.FilterVideo({
-                        "name": f"{'ndi' if ndi else 'alpha'}_upload_{index}", "src": edge, "dst": f"input_{index}_{stored}",
-                        "graph": f"format=nv12,{source.color.setparams},hwupload_cuda" if ndi else ALPHA_UPLOAD,
-                        "hwaccel": HWACCEL, "group": group, "auto_restart": "group",
-                    }))
+                    stored = _alpha_storage(source) or "nv12"
+                    upload = {"name": f"{'ndi' if ndi else 'alpha'}_upload_{index}", "src": edge, "dst": f"input_{index}_{stored}",
+                              "hwaccel": HWACCEL, "group": group, "auto_restart": "group"}
+                    # NDI: the device unpacks the packed picture into NV12 itself; converting it on
+                    # the CPU first (format=nv12 in a filter graph) was a quarter of a core a source.
+                    # With alpha its BGRA goes to the device as it is; a sender's frames without
+                    # alpha (UYVY, BGRX) become opaque BGRA there. Whichever the sender delivers,
+                    # the frames are what the source declares.
+                    avp.addNode(api.PackedToCuda({**upload, "storage": stored, "frame_color": source.color.tags}) if ndi
+                                else api.FilterVideo({**upload, "graph": ALPHA_UPLOAD}))
                     edge = f"input_{index}_{stored}"
         if source.transform:
             transformed_edge = f"input_{index}_transformed"
@@ -1118,17 +1163,19 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
             # The reusable builder shares conversion and fan-out for identical edges.
             mixer.add_source(mixer_config.alias_name(source.id, k), pre_otm_edge=edge,
                              input_group=group, picture=source.picture,
-                             reconnects=(source.width, source.height) if source.kind == "mxl" else None,
+                             # A lost MXL flow or NDI sender restarts the source's group, whose EOF
+                             # would otherwise end a program showing only such sources for good.
+                             reconnects=(source.width, source.height) if source.kind in ("mxl", "ndi") else None,
                              fan_out_loop=_pacing_loop(index) if cfg.source_fan_out == "event_loop" else None,
                              color=None if source.filter_graph else source.color,
                              # Raw upload stamps tags; transforms preserve frame properties.
                              # User filters/hooks can change them, so keep normalization there.
                              color_tagged=((source.kind in mixer_config.RAW_STORAGE or source.id in external) and
-                                           not source.filter_graph and process_source is None),
+                                           not source.alpha and not source.filter_graph and process_source is None),
                              packed_rgb=source.kind == "browser" or source.alpha,
                              # Decoded alpha is straight; only browser pages arrive premultiplied.
                              premultiplied_alpha=source.kind == "browser" and source.id in blended_sources,
-                             pixel_format="rgba" if source.alpha else source.filter_output_format or
+                             pixel_format=_alpha_storage(source) or source.filter_output_format or
                              (source.transform.sw_format if source.transform
                               else source.decoded_format or ("nv12" if source.id in external else raw_storage)))
     for scene in cfg.scenes:
@@ -1290,7 +1337,8 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
                         wipe_files=tuple(w.path for w in cfg.wipes), browser_windows=tuple(s.id for s in browsers.values()),
                         browser_input_edges=tuple(input_edges[i] for i in browsers),
                         delivery_monitor=True,
-                        aux_buses=aux, audio_edges=tuple(audio_edges), optional_input_edges=tuple(optional_input_edges))
+                        aux_buses=aux, audio_edges=tuple(audio_edges), optional_input_edges=tuple(optional_input_edges),
+                        live_inputs=tuple(live_inputs))
 
 
 def _startup_result(error=None):

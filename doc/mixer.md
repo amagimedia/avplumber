@@ -142,13 +142,23 @@ for revision-specific evidence and the ranked optimization list.
 
 ## NDI sources
 
-A source `{"kind": "ndi", "name": "HOST (stream)", "color": "sdr"}` receives that NDI sender with
+A source `{"kind": "ndi", "name": "HOST (stream)", "width": 1920, "height": 1080, "color": "sdr"}` receives that NDI sender with
 FFmpeg's `libndi_newtek` device, which images built with `ENABLE_NDI=1` have (see
 `docker-compose/mixer/deploy/l4/README.md` for the discovery service). `extra_ips` lists addresses to
 find the sender at besides mDNS, e.g. `"127.0.0.1"` for one on the same host. NDI video is packed
-4:2:2 (UYVY), no codec NVDEC has: it decodes in software, is converted to NV12 with the declared
-colour tags and uploaded after pacing, as an alpha source is RGBA. `has_audio` takes its audio into
-the show like a video file's. The source never loops; when the sender is lost the chain restarts.
+4:2:2 (UYVY), no codec NVDEC has: after pacing `packed_to_cuda` copies each packed picture once into
+page-locked memory and the device unpacks it into NV12 with the declared colour tags (a `HAVE_NVCC=1`
+build, as the mixer's are); no CPU converts it. A sender with alpha delivers BGRA instead, which the
+device converts to NV12 the same way, without its alpha. `"alpha": true` keeps it: the source's frames
+are then BGRA with straight alpha on the GPU (NDI's alpha is not premultiplied), composited as packed
+RGB like a browser page, so a scene item with `blend` or a downstream key draws the graphics over what
+is beneath; frames such a sender delivers without alpha become opaque. A sender that changes between
+the two restarts the source. Pictures that queue up in front of pacing (a show's slow
+start) are dropped, not kept: the source would stay that far behind, and its receiver lose pictures
+(not yet for a source with `has_audio`, whose audio node would share the rule). `has_audio` takes its audio into
+the show like a video file's. The source never loops; when the sender is lost the chain restarts, and an
+`assume_video_format` with `ignore_eof` at the declared size before its fan-out, as for MXL, keeps that
+restart's EOF from ending a program that shows only NDI sources.
 
 ## MXL sources and outputs
 
@@ -272,6 +282,16 @@ picture that references the lost one (`Error constructing the frame RPS`) until 
 IRAP, so the source freezes for the rest of its GOP, and a GOP longer than 200 pictures
 ends the decoder node. The surface gate (`extra_hw_frames` + 1 held frames) keeps the
 mixer from getting there.
+
+The gate is also the decoders' pacing whenever it closes, which shows in CPU load: with too
+few extra surfaces each decoder waits until a compositor retires one of its frames, and the
+compositors retire them at the frame tick, so every such decoder wakes in the same few
+milliseconds of each frame. On the 192-source L4 demo (105 HEVC CUarray sources, 1080p30,
+12 vCPU) `extra_hw_frames` 4 woke each decoder 4.4 times a frame and the 1-minute load
+average swung 6-15 (mean 8.6, CPU pressure 12%); 12, the L4 profile's value, wakes each 1.2
+times a frame at its own source's phase (mean 6.7, steady peaks under 10, pressure 9%) for
+3.8 GB more VRAM (19.4 of the L4's 23 GB in use). Size it so the gate stays open in steady state: the decoders' log
+counts each closing (`decoder resumed after N ms (M pauses so far)`).
 
 Interlaced sources: NVDEC never deinterlaces on this path (`vpp.progressive_frame = 1`,
 no CUarray deinterlacer exists, `bwdif_cuda`/`yadif_cuda` read linear CUDA frames only).

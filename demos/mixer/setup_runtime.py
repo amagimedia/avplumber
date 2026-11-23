@@ -12,11 +12,12 @@ import sys
 import threading
 import time
 
-from . import prepare_demo
+from . import ndi_senders, prepare_demo
 from .demo_recipe import DSK_PAGES, allocate, validate_dsk
 from .instance_profiles import INSTANCE_PROFILES, InstanceType, mxl_sources
 from pyplumber.mixer.color import TRANSFER_TAGS
 from pyplumber.mixer.config import CANVAS_RATES, parse, parse_rate, rate_number, rate_weight
+from pyplumber.mixer.gui.storage import write_atomic
 from pyplumber.mixer.gui.telemetry import _static_facts
 from pyplumber.mixer.gui.setup_runtime import (
     SetupRuntime as BaseSetupRuntime, for_mode, extra_aux_limit as output_limit,
@@ -27,7 +28,7 @@ DEMO_DIR = Path(__file__).resolve().parent
 # The demo is 1080p only: every source is a unique 1920x1080 input, in either orientation.
 PROGRAM_SIZE = (1920, 1080)
 DEFAULT_SETTINGS = dict(orientation="portrait", fps=60, bit_depth=10, chroma="422",
-                        source_count=16, scene_count=32, layout="balanced", weights=[8, 4, 2, 0, 2, 0, 0, 0],
+                        source_count=16, scene_count=32, layout="balanced", weights=[8, 4, 2, 0, 2, 0, 0, 0, 0],
                         encodes={}, dsk=[], clean_feed=False, extra_aux=0, browser_motion="static",
                         decode_mix="profile")
 # What the SDR 4:2:0 group's clips are coded as: the profile's choice (the qualified show; HLG clips
@@ -45,7 +46,7 @@ def desktop_preset(size):
     factor = {"low": 1, "high": 2}[size]
     return {**DEFAULT_SETTINGS, "orientation": "landscape", "fps": 25, "bit_depth": 8, "chroma": "420",
             "scene_count": 256, "source_count": 96 * factor - len(DSK_PAGES),
-            "weights": [60 * factor, 0, 0, 0, 20 * factor - len(DSK_PAGES), 16 * factor, 0, 0],
+            "weights": [60 * factor, 0, 0, 0, 20 * factor - len(DSK_PAGES), 16 * factor, 0, 0, 0],
             "dsk": list(DSK_PAGES), "clean_feed": True}
 
 
@@ -69,8 +70,8 @@ def current_settings(profile, settings):
     """Saved *settings* in the current shape, every program encode filled in. Saved before extra
     aux outputs, they had none; the browser frames in flight the page no longer sets go, and the show
     takes the frame rate's default (config.default_browser_frame_queue); one program bitrate_kbps
-    sets the SDR program and its clean copy, the HLG program in the defaults' ratio to it; seven
-    weights, saved before MXL sources, have none."""
+    sets the SDR program and its clean copy, the HLG program in the defaults' ratio to it; seven or
+    eight weights, saved before MXL or NDI sources, have none of them."""
     if not isinstance(settings, dict):
         return settings
     weights = settings.get("weights")
@@ -88,7 +89,8 @@ def current_settings(profile, settings):
                for o, e in encodes.items()}
     return {"extra_aux": 0, "browser_motion": "static", "decode_mix": "profile",
             **{k: v for k, v in settings.items() if k not in ("browser_frame_queue", "browser_ring_size", "bitrate_kbps")},
-            "encodes": encodes, **({"weights": [*weights, 0]} if isinstance(weights, list) and len(weights) == 7 else {})}
+            "encodes": encodes, **({"weights": [*weights, *[0] * (9 - len(weights))]}
+                                   if isinstance(weights, list) and len(weights) in (7, 8) else {})}
 
 
 def extra_aux_limit(profile, cfg, encodes):
@@ -120,6 +122,7 @@ def source_counts(profile, total, weights, fps=25, reserved_browsers=0):
             ((2, 3), (1, 1), profile["hlg_v210"], "4:2:2 upload"),
             ((4,), (1,), browser_limit(profile, fps) - reserved_browsers, "Browser"),
             ((0, 1), (1, 1), profile["nvdec_decodes"][fps], "Combined NVDEC"),
+            ((8,), (1,), profile.get("ndi_sources", {}).get(fps, 0), "NDI"),
             ((5, 6, 7), (1, 2, 1), profile["raw_upload_units"][fps], "Raw 4:2:0 upload units")):
         group = [(i, cost) for i, cost in zip(indices, costs) if i < len(weights)]
         if sum(counts[i] * cost for i, cost in group) > limit:
@@ -185,8 +188,8 @@ def recipe_for(profile, settings):
             raise ValueError(f"encodes.{output}: bitrate_kbps must be an integer from {low} to {high}")
     weights = settings["weights"]
     most = max(profile["sources"].values())   # the page sends source counts as weights
-    if not isinstance(weights, list) or len(weights) != 8 or any(type(w) is not int or not 0 <= w <= most for w in weights):
-        raise ValueError(f"Provide eight integer source weights from 0 to {most}")
+    if not isinstance(weights, list) or len(weights) != 9 or any(type(w) is not int or not 0 <= w <= most for w in weights):
+        raise ValueError(f"Provide nine integer source weights from 0 to {most}")
     if settings["bit_depth"] == 8 and (any(weights[1:4]) or weights[6]):
         raise ValueError("8-bit mode supports SDR 4:2:0 and browser sources only")
     if settings["bit_depth"] == 8 and settings["chroma"] != "420":
@@ -196,7 +199,11 @@ def recipe_for(profile, settings):
     counts = source_counts(for_mode(profile, settings["bit_depth"], settings["chroma"]), settings["source_count"],
                            weights, settings["fps"], len(dsk))
     _check_hdr_decodes(profile, counts[1], settings["fps"])
-    _check_mxl(profile, counts[7], settings["fps"])
+    _check_live(profile, "mxl", counts[7], settings["fps"])
+    # The demo's writers and the mixer's readers of either load the host's CPUs beside the full show,
+    # which leaves room for one kind: a show has MXL or NDI sources.
+    if counts[7] and counts[8]:
+        raise ValueError("A show has MXL or NDI sources, not both")
     width, height = PROGRAM_SIZE
     recipe = json.loads((DEMO_DIR / "demo.example.json").read_text())
     recipe["canvas"].update(profile.get("canvas", {}))
@@ -228,6 +235,8 @@ def recipe_for(profile, settings):
                              "chroma": "420", "storage": "p010"})
     # Packed v210 loops, which the MXL writers copy into their flows (prepare_demo.plan).
     recipe["inputs"].append({"id": "sdr_mxl", "kind": "generated", "color": "sdr", "chroma": "420", "mxl": True})
+    # Packed UYVY loops, which the same writers process sends as NDI sources.
+    recipe["inputs"].append({"id": "sdr_ndi", "kind": "generated", "color": "sdr", "chroma": "420", "ndi": True})
     for source, count in zip(recipe["inputs"], counts):
         source["weight"] = count
         if source["kind"] == "browser":
@@ -241,7 +250,7 @@ def recipe_for(profile, settings):
             layouts.update(pip=3, random=3)
             if counts[4] and sum(counts[:4]) + sum(counts[5:]):
                 layouts["alpha_overlay"] = 2
-                for index in (0, 5, 1, 6, 2, 3, 7):
+                for index in (0, 5, 1, 6, 2, 3, 7, 8):
                     if counts[index]:
                         source = recipe["inputs"][index]
                         recipe["alpha_background"] = source["id"] + ("_001" if counts[index] > 1 else "_000")
@@ -261,19 +270,34 @@ def _check_hdr_decodes(profile, count, fps):
         raise ValueError(f"HDR NVDEC inputs are limited to {maximum} at {rate_number(parse_rate(fps))} fps to reserve VRAM")
 
 
-def _check_mxl(profile, count, fps):
-    maximum = profile.get("mxl_sources", {}).get(rate_weight(parse_rate(fps)), 0)
+LIVE_KINDS = {"mxl": ("mxl_sources", "MXL"), "ndi": ("ndi_sources", "NDI")}
+
+
+def _check_live(profile, kind, count, fps):
+    """MXL or NDI inputs: no more than the instance profile holds at the rate, none without an entry."""
+    key, name = LIVE_KINDS[kind]
+    maximum = profile.get(key, {}).get(rate_weight(parse_rate(fps)), 0)
     if count > maximum:
-        raise ValueError(f"MXL inputs are limited to {maximum} at {rate_number(parse_rate(fps))} fps" if maximum else
-                         "MXL inputs are not available on this instance")
+        raise ValueError(f"{name} inputs are limited to {maximum} at {rate_number(parse_rate(fps))} fps" if maximum else
+                         f"{name} inputs are not available on this instance")
 
 
-def mxl_available(ffmpeg="ffmpeg"):
-    """Whether this image's FFmpeg has the MXL demuxer (Dockerfile.fedora44 WITH_MXL=1)."""
+def _ffmpeg_lists(listing, name, ffmpeg="ffmpeg"):
+    """Whether this image's FFmpeg has *name* among its -demuxers or -devices *listing*."""
     if not shutil.which(ffmpeg):
         return False
-    demuxers = subprocess.run([ffmpeg, "-hide_banner", "-demuxers"], capture_output=True, text=True).stdout
-    return any(line.split()[1:2] == ["mxl"] for line in demuxers.splitlines())
+    lines = subprocess.run([ffmpeg, "-hide_banner", f"-{listing}"], capture_output=True, text=True).stdout
+    return any(line.split()[1:2] == [name] for line in lines.splitlines())
+
+
+def mxl_available():
+    """Whether this image's FFmpeg has the MXL demuxer (Dockerfile.fedora44 WITH_MXL=1)."""
+    return _ffmpeg_lists("demuxers", "mxl")
+
+
+def ndi_available():
+    """Whether this image's FFmpeg has the NDI input device (Dockerfile.fedora44 ENABLE_NDI=1)."""
+    return _ffmpeg_lists("devices", "libndi_newtek")
 
 
 # The writers create every flow once its loop is read into the page cache: within seconds of their
@@ -287,6 +311,11 @@ def _mxl_flows(show):
     return [Path(s["url"]) / f"{s['flow']}.mxl-flow" for s in show.get("sources", []) if s.get("kind") == "mxl" and "clip" in s]
 
 
+def _ndi_sources(show):
+    """The NDI sources this setup's writers process sends (those with a clip)."""
+    return [s for s in show.get("sources", []) if s.get("kind") == "ndi" and "clip" in s]
+
+
 class SetupRuntime(BaseSetupRuntime):
     # Synthetic clips use NVENC on the same GPU as the current show.
     prepare_while_running = False
@@ -297,6 +326,8 @@ class SetupRuntime(BaseSetupRuntime):
         if mxl_available():   # the page offers MXL from this table, and the limits refuse it without
             gpu = next(iter(_static_facts().values()), {})
             profile = {**profile, "mxl_sources": mxl_sources(gpu.get("compute_capability"))}
+        if not ndi_available():   # measured on the instance, offered only where FFmpeg receives NDI
+            profile = {k: v for k, v in profile.items() if k != "ndi_sources"}
         # The MXL writers (mxl_writers.py): a process of their own beside the mixer, started before
         # it and stopped after it, with the flows it publishes.
         self.writers, self.writer_flows, self.writers_lock = None, [], threading.Lock()
@@ -327,25 +358,34 @@ class SetupRuntime(BaseSetupRuntime):
         self._stop_writers()
 
     def _start_writers(self, config):
-        """The writers process for the MXL sources of the show at *config*, replacing one still running
-        (a mixer restarted after it exited on its own has not stopped it). Returns once every flow
-        exists: a mixer that opens a missing flow fails its source."""
+        """The writers process for the MXL and NDI sources of the show at *config*, replacing one still
+        running (a mixer restarted after it exited on its own has not stopped it). Returns once every
+        flow exists and every NDI source's full name is in the show: a mixer that opens a missing flow
+        or an unknown name fails its source."""
         self._stop_writers()
-        flows = _mxl_flows(json.loads(config.read_text()))
-        if not flows:
+        show = json.loads(config.read_text())
+        flows, ndi, names = _mxl_flows(show), _ndi_sources(show), ndi_senders.names_path(config)
+        if not flows and not ndi:
             return
         with self.writers_lock:
             for flow in flows:   # one left by a killed writer would pass for a started one
                 shutil.rmtree(flow, ignore_errors=True)
-            flows[0].parent.mkdir(parents=True, exist_ok=True)
+            names.unlink(missing_ok=True)
+            if flows:
+                flows[0].parent.mkdir(parents=True, exist_ok=True)
             process = self.writers = subprocess.Popen([sys.executable, "-u", "-m", "demos.mixer.mxl_writers", str(config)],
                                                       start_new_session=True)
             self.writer_flows = flows
-        log.info("MXL writers process %s started (%d flows)", process.pid, len(flows))
+        log.info("Writers process %s started (%d MXL flows, %d NDI sources)", process.pid, len(flows), len(ndi))
         deadline = time.monotonic() + MXL_WRITERS_START_TIMEOUT_SEC
-        while not all(flow.exists() for flow in flows):
+        while not (all(flow.exists() for flow in flows) and (not ndi or names.exists())):
             if process.poll() is not None or time.monotonic() > deadline or self.closing.wait(.5):
                 raise RuntimeError("MXL writers did not start; see container logs")
+        if ndi:   # NDI names a source by its machine and stream: the senders know the machine's part
+            full = json.loads(names.read_text())
+            for source in ndi:
+                source["name"] = full[source["id"]]
+            write_atomic(config, json.dumps(show, indent=2) + "\n")
         threading.Thread(target=self._watch_writers, args=(process, config), daemon=True).start()
 
     def _watch_writers(self, process, config):
@@ -402,6 +442,7 @@ class SetupRuntime(BaseSetupRuntime):
         cfg = parse(show)
         _check_hdr_decodes(self.profile, sum(s.kind == "video" and s.color_trc not in ("", TRANSFER_TAGS["sdr"])
                                             for s in cfg.sources), cfg.fps)
-        _check_mxl(self.profile, len(_mxl_flows(show)), cfg.fps)
+        _check_live(self.profile, "mxl", len(_mxl_flows(show)), cfg.fps)
+        _check_live(self.profile, "ndi", len(_ndi_sources(show)), cfg.fps)
         encodes = current_settings(self.profile, settings or self.settings or {})["encodes"]
         extra_aux_limit(self.profile, cfg, encodes)

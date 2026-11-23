@@ -185,7 +185,7 @@ const { chromium } = require('playwright');
 
     // Editing the global total restores Balanced counts, the docs' table with four key pages
     // (cookbook source-limits.html: SDR NVDEC, HLG NVDEC, HLG v210, browser, NV12, P010).
-    assert.equal(await page.locator('#source-controls input[type=number]').count(), 8);
+    assert.equal(await page.locator('#source-controls input[type=number]').count(), 9);
     assert.equal(await page.locator('#count-sdr_mxl').isVisible(), false, 'no MXL without a measured limit');
     const balanced = {'8:420': [[40, 0, 0, 36, 30, 0], [36, 0, 0, 36, 34, 0], [22, 0, 0, 36, 20, 0], [18, 0, 0, 36, 17, 0]],
       '10:420': [[16, 19, 0, 31, 10, 10], [15, 18, 0, 30, 12, 11], [10, 12, 0, 34, 7, 6], [8, 10, 0, 28, 6, 5]],
@@ -285,14 +285,14 @@ const { chromium } = require('playwright');
     await page.locator('#scenes').fill('257');
     assert.equal((await apply()).scene_count,256,'only L4 exposes the validated 256-scene limit');
     assert.match(await text('source-limit'), /^Maximum 88 .* measured on nvidia_l4\.$/);
-    assert.deepEqual((await apply()).weights, [22, 22, 4, 0, 40, 0, 0, 0]);
+    assert.deepEqual((await apply()).weights, [22, 22, 4, 0, 40, 0, 0, 0, 0]);
     await page.locator('#mode').selectOption('10:420');
     assert.match(await text('source-limit'), /^Maximum 88 /);
-    assert.deepEqual((await apply()).weights, [22, 26, 0, 0, 40, 0, 0, 0]);   // the v210 share folds into the HLG decodes
+    assert.deepEqual((await apply()).weights, [22, 26, 0, 0, 40, 0, 0, 0, 0]);   // the v210 share folds into the HLG decodes
     await page.locator('#fps').selectOption('30');
     await page.locator('#mode').selectOption('8:420');
     assert.match(await text('source-limit'), /^Maximum 170 /);
-    assert.deepEqual((await apply()).weights, [83, 0, 0, 0, 40, 47, 0, 0]);
+    assert.deepEqual((await apply()).weights, [83, 0, 0, 0, 40, 47, 0, 0, 0]);
     // The adopted L4 show has 26 managed AUX, not 28 fixed outputs. HDR60 reduces that tail.
     auxStatus = {aux_buses: ownAux, janus_api: true};
     await reset({...eight, fps: 25, bit_depth: 8, chroma: '420', extra_aux: 26,
@@ -328,9 +328,9 @@ const { chromium } = require('playwright');
         assert.ok(setup.weights[1]<=profiles.nvidia_l4.nvdec_hdr_decodes[fps]);
       }
     }
-    const v210Error=await page.evaluate(()=>{try{sourceCounts(5,[0,0,0,1,0,0,0,0]);return '';}catch(error){return error.message;}});
+    const v210Error=await page.evaluate(()=>{try{sourceCounts(5,[0,0,0,1,0,0,0,0,0]);return '';}catch(error){return error.message;}});
     assert.match(v210Error, /4:2:2 upload is limited to 4/);
-    assert.deepEqual(await page.evaluate(()=>sourceCounts(4,[0,0,1,1,0,0,0,0])), [0,0,2,2,0,0,0,0]);
+    assert.deepEqual(await page.evaluate(()=>sourceCounts(4,[0,0,1,1,0,0,0,0,0])), [0,0,2,2,0,0,0,0,0]);
     instanceType = 'nvidia_l4_cuarray';
     await reset();
     await page.locator('#mode').selectOption('10:420');
@@ -358,22 +358,22 @@ const { chromium } = require('playwright');
     await count('sdr420_raw').fill('0');
     assert.equal(await sources.inputValue(), '115');
     await count('browser').fill('0');
-    assert.deepEqual((await apply()).weights, [105,0,0,0,0,0,0,0]);
+    assert.deepEqual((await apply()).weights, [105,0,0,0,0,0,0,0,0]);
     assert.equal(await count('browser').isVisible(),true);
     assert.equal(await count('sdr420_raw').isVisible(),true);
     await count('sdr420').fill('999');
     assert.equal(await count('sdr420').inputValue(), '105', 'NVDEC cannot exceed its pool');
     await page.locator('#fps').selectOption('60');
-    assert.deepEqual((await apply()).weights,[40,0,0,0,0,0,0,0], 'rate changes reduce counts without filling disabled types');
+    assert.deepEqual((await apply()).weights,[40,0,0,0,0,0,0,0,0], 'rate changes reduce counts without filling disabled types');
     await page.locator('#fps').selectOption('30');
     await sources.fill('192');
-    assert.deepEqual((await apply()).weights,[105,0,0,0,40,47,0,0], 'global total restores the default mix');
+    assert.deepEqual((await apply()).weights,[105,0,0,0,40,47,0,0,0], 'global total restores the default mix');
     // MXL sources take raw upload units, up to the profile's limit.
     await count('sdr420_raw').fill('31');
     await count('sdr_mxl').fill('99');
     assert.equal(await count('sdr_mxl').inputValue(),'16');
     assert.match(await text('engine-split'), / 16 MXL /);
-    assert.deepEqual((await apply()).weights,[105,0,0,0,40,31,0,16]);
+    assert.deepEqual((await apply()).weights,[105,0,0,0,40,31,0,16,0]);
     await count('sdr420_raw').fill('99');
     assert.equal(await count('sdr420_raw').inputValue(),'31', 'the units MXL holds are not free');
     await sources.fill('192');
@@ -423,7 +423,7 @@ const { chromium } = require('playwright');
     const desktopPreset=(source_count,weights)=>({source_count,weights,scene_count:256,
       orientation:'landscape',fps:25,bit_depth:8,chroma:'420',layout:'balanced',extra_aux:0,
       clean_feed:true,dsk:['lower_third','ticker','bug_left','bug_right'],encodes:{}});
-    const presets={low:desktopPreset(92,[60,0,0,0,16,16,0,0]),high:desktopPreset(188,[120,0,0,0,36,32,0,0])};
+    const presets={low:desktopPreset(92,[60,0,0,0,16,16,0,0,0]),high:desktopPreset(188,[120,0,0,0,36,32,0,0,0])};
     auxStatus={aux_buses:ownAux,janus_api:true,desktop:{presets,suggested:'high',free_mib_at_start:26000}};
     await reset();
     assert.equal(await sources.inputValue(),'92','a fresh desktop starts with Low even with ample free VRAM');

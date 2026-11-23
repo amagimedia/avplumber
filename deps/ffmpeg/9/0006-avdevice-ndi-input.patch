@@ -8,8 +8,8 @@ Subject: [PATCH] avdevice: receive audio and video with the NDI 6.4 SDK
  doc/indevs.texi                 |  52 ++++++++
  libavdevice/Makefile            |   1 +
  libavdevice/alldevices.c        |   1 +
- libavdevice/libndi_newtek_dec.c | 205 ++++++++++++++++++++++++++++++++
- 5 files changed, 264 insertions(+)
+ libavdevice/libndi_newtek_dec.c | 206 ++++++++++++++++++++++++++++++++
+ 5 files changed, 265 insertions(+)
  create mode 100644 libavdevice/libndi_newtek_dec.c
 
 diff --git a/configure b/configure
@@ -138,10 +138,10 @@ index 573595f416..3fc15e933e 100644
  extern const FFOutputFormat ff_fbdev_muxer;
 diff --git a/libavdevice/libndi_newtek_dec.c b/libavdevice/libndi_newtek_dec.c
 new file mode 100644
-index 0000000000..639528befe
+index 0000000000..b9fbf781ba
 --- /dev/null
 +++ b/libavdevice/libndi_newtek_dec.c
-@@ -0,0 +1,205 @@
+@@ -0,0 +1,206 @@
 +/* SPDX-License-Identifier: LGPL-2.1-or-later */
 +#include <Processing.NDI.Lib.h>
 +#include "libavcodec/avcodec.h"
@@ -252,6 +252,7 @@ index 0000000000..639528befe
 +        st->codecpar->width = v->xres;
 +        st->codecpar->height = v->yres;
 +        st->avg_frame_rate = (AVRational){ v->frame_rate_N, v->frame_rate_D };
++        st->r_frame_rate = st->avg_frame_rate;   // else probing falls back to 1/time_base: 10 MHz
 +        st->codecpar->field_order = v->frame_format_type == NDIlib_frame_format_type_interleaved ?
 +                                    AV_FIELD_TT : AV_FIELD_PROGRESSIVE;
 +    }

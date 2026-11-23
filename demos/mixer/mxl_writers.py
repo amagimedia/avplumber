@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Writer of the demo's MXL sources, one process beside the mixer (setup_runtime.py starts it before
-the mixer and stops it after). It stands in for the producers outside the mixer, so it uses no GPU
+"""Writer of the demo's MXL sources and sender of its NDI ones (ndi_senders.py), one process beside
+the mixer (setup_runtime.py starts it before the mixer and stops it after). It stands in for the producers outside the mixer, so it uses no GPU
 and decodes nothing: each source's own clip (the source's "clip" in the show, a file of packed v210
 pictures at the canvas rate that prepare_demo.plan renders once) is mapped from the page cache, and
 at every grain of the MXL clock one thread copies each flow's next picture straight into its ring
@@ -19,7 +19,10 @@ import os
 from pathlib import Path
 import signal
 import sys
+import threading
+import time
 
+from demos.mixer import ndi_senders
 from pyplumber.mixer.config import parse_rate
 from pyplumber.mixer.inputs import v210_row_stride
 
@@ -106,11 +109,27 @@ def map_clip(path, grain_bytes):
 
 
 def main(config):
-    rate, flows = plan(json.loads(Path(config).read_text()))
-    mxl, rate = load_mxl(), Rational(rate.numerator, rate.denominator)
-    stop = []
+    show = json.loads(Path(config).read_text())
+    rate, flows = plan(show)
+    stop, stopped = [], threading.Event()
     for sig in (signal.SIGINT, signal.SIGTERM):   # a flag, so that no grain is left open
-        signal.signal(sig, lambda *_: stop.append(True))
+        signal.signal(sig, lambda *_: (stop.append(True), stopped.set()))
+    senders = []
+    try:
+        senders = ndi_senders.start(show, config, map_clip, stopped)
+        if flows:
+            write_flows(flows, rate, stop)
+        while senders and not stop:   # NDI alone: its threads send until a signal
+            time.sleep(.2)
+    finally:
+        stopped.set()
+        for thread in senders:
+            thread.join()
+
+
+def write_flows(flows, rate, stop):
+    """Write every flow of *flows* at the MXL clock of *rate* until *stop* holds anything."""
+    mxl, rate = load_mxl(), Rational(rate.numerator, rate.denominator)
 
     def check(ok, what, flow):
         if not ok:

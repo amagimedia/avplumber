@@ -176,11 +176,15 @@ def test_an_alpha_source_reaches_the_canvas_as_straight_rgba(native_boundary):
 
 def test_an_ndi_source_is_received_converted_to_nv12_and_uploaded(native_boundary):
     """FFmpeg's libndi_newtek device receives the named source (found at extra_ips besides mDNS);
-    its packed 4:2:2 decodes in software, becomes tagged NV12 and is uploaded after pacing, and
+    its packed 4:2:2 is wrapped in software, uploaded after pacing and unpacked to tagged NV12 there, and
     its audio joins the show's like a video file's. NDI never ends: no loop, the group restarts."""
-    api = fake_api()
-    api.MixerGraphBuilder = native_boundary[1]
-    ndi = {"id": "cam", "kind": "ndi", "name": "HOST (avp-smoke)", "extra_ips": "127.0.0.1", "color": "sdr"}
+    def fake_api_with(boundary):
+        api = fake_api()
+        api.MixerGraphBuilder = boundary[1]
+        return api
+    api = fake_api_with(native_boundary)
+    ndi = {"id": "cam", "kind": "ndi", "name": "HOST (avp-smoke)", "extra_ips": "127.0.0.1", "color": "sdr",
+           "width": 1920, "height": 1080}
     def ndi_show(source):
         return config.parse({"canvas": CONFIG["canvas"], "renditions": [{"id": "record", "target": "program.ts"}],
                              "sources": [source, {**CONFIG["sources"][0], "id": "idle", "path": "idle.mp4"}],
@@ -189,16 +193,50 @@ def test_an_ndi_source_is_received_converted_to_nv12_and_uploaded(native_boundar
     app = build_application(cfg, api=api)
     nodes = {n.parameters["name"]: n.parameters for n in app.avp.nodes}
     received = nodes["input_0"]
-    assert (received["url"], received["format"], received["loop"]) == ("HOST (avp-smoke)", "libndi_newtek", False)
-    assert received["options"] == {"wait_sources": "5", "extra_ips": "127.0.0.1"}
+    # The plain input node, whose reads time out: a silent receiver fails it and its group restarts.
+    assert (received["type"], received["url"], received["format"]) == ("input", "HOST (avp-smoke)", "libndi_newtek")
+    assert received["options"] == {"wait_sources": "5", "extra_ips": "127.0.0.1"} and received["timeout"] == 2
+    assert "loop" not in received and nodes["demux_0"]["src"] == received["dst"] and received["auto_restart"] == "group"
+    pacing = nodes["realtime_0"]
+    # Arrival-paced with a frame of jitter buffer, resynced when frames run ahead (a stale anchor).
+    assert pacing["discontinuity_threshold"] == 0.1 and pacing["jitter_margin"] == pacing["initial_jitter_margin"] > 0
+    fps_num, fps_den = config.rate_pair(cfg.fps)
+    period = fps_den / fps_num
+    assert pacing["jitter_margin"] == period
+    # A backlog in front of pacing (what arrived against what is being paced) is dropped, not kept,
+    # for a source without audio: with it the audio node would share the rule and the team.
+    assert pacing["team"] == "input_0_av_sync" and "input_ts_queue" not in pacing
+    silent = {n.parameters["name"]: n.parameters for n in build_application(ndi_show(ndi), api=fake_api_with(native_boundary)).avp.nodes}["realtime_0"]
+    assert (silent["team"], silent["input_ts_queue"], silent["intermediate_queues"]) == (
+        "input_0_av_sync", received["dst"], ["input_0_video_packets"])
+    assert (silent["max_buffered"], silent["min_buffered"]) == (3.5 * period, 1.5 * period)
+    # Its restart while the show starts does not fail the start.
+    assert app.live_inputs == ("input_0",)
     assert nodes["decode_0"]["auto_restart"] == "group" and nodes["decode_0"]["hwaccel_only_for_codecs"] == []
     upload = nodes["ndi_upload_0"]
     assert upload["src"] == "input_0_realtime" and app.input_edges[0] == "input_0_nv12"
-    assert upload["graph"] == f"format=nv12,{cfg.sources[0].color.setparams},hwupload_cuda"
+    # Unpacked into NV12 by the device, not converted on the CPU: no filter graph.
+    assert upload["type"] == "packed_to_cuda" and upload["frame_color"] == cfg.sources[0].color.tags
+    assert (upload["hwaccel"], upload["auto_restart"]) == ("mixer_gpu", "group") and "graph" not in upload
+    # A sender lost on program restarts the chain: its EOF stops at the guard before the fan-out.
+    live = next(n for n in nodes.values() if n.get("dst") == nodes["mixer_otm_cam"]["src"])
+    assert live["type"] == "assume_video_format" and live["ignore_eof"] and (live["width"], live["height"]) == (1920, 1080)
     (cam,) = [s for s in app.mixer._sources if s.name == "cam"]
     assert cam.pixel_format == "nv12" and not cam.packed_rgb
     assert "realtime_audio_0" in nodes
-    for bad, match in (({"color": "hlg"}, "SDR only"), ({"name": None}, "needs name"), ({"extra_ips": 1}, "extra_ips")):
+    assert upload["storage"] == "nv12" and live["real_pixel_format"] == "nv12"
+    # With alpha (graphics): BGRA on the GPU whatever the sender delivers, straight alpha, composited
+    # as packed RGB like a browser page, the guard declaring that format.
+    keyed = build_application(ndi_show({**ndi, "alpha": True}), api=fake_api_with(native_boundary))
+    nodes = {n.parameters["name"]: n.parameters for n in keyed.avp.nodes}
+    upload = nodes["ndi_upload_0"]
+    assert (upload["type"], upload["storage"], upload["dst"]) == ("packed_to_cuda", "bgra", "input_0_bgra")
+    live = next(n for n in nodes.values() if n.get("dst") == nodes["mixer_otm_cam"]["src"])
+    assert live["type"] == "assume_video_format" and live["ignore_eof"] and live["real_pixel_format"] == "bgra"
+    (cam,) = [s for s in keyed.mixer._sources if s.name == "cam"]
+    assert cam.packed_rgb and not cam.premultiplied_alpha and cam.pixel_format == "bgra" and not cam.color_tagged
+    for bad, match in (({"color": "hlg"}, "SDR only"), ({"name": None}, "needs name"), ({"width": None}, "width"),
+                       ({"extra_ips": 1}, "extra_ips")):
         with pytest.raises(config.ConfigError, match=match):
             ndi_show({k: v for k, v in {**ndi, **bad}.items() if v is not None})
     with pytest.raises(config.ConfigError, match="extra_ips"):
@@ -792,5 +830,6 @@ def test_the_v210_unpack_kernels_of_the_node_and_of_the_ffmpeg_patch_are_the_sam
     assert all(line.startswith("+") for line in hunk)
     kernels = "\n".join(line[1:] for line in hunk)
     start = "#define INLINE"
-    node = (repo / "src/nodes/hwaccel/v210_pack.cu").read_text()
+    # The node's file goes on with the UYVY and RGB unpacks (packed_to_cuda), which the patch does not have.
+    node = (repo / "src/nodes/hwaccel/v210_pack.cu").read_text().split("\n// ---- Unpack: UYVY rows")[0]
     assert node[node.index(start):].strip() == kernels[kernels.index(start):].strip()
