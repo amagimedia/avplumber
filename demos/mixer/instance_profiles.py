@@ -92,11 +92,12 @@ INSTANCE_PROFILES = {
         "raw_upload_units": {25: 47, 30: 47, 50: 22, 60: 19},   # NV12 = 1, P010 = 2, MXL = 1
         # NDI: the demo's sender encodes each source (SpeedHQ) and the mixer decodes it, both on the
         # host's 12 vCPUs: about 0.7 of a core per 1080p30 source in all (decode 0.38, encode 0.28,
-        # NV12 upload 0.05). A show has MXL or NDI sources: beside the full 188-source show, 4 NDI
-        # sources on program kept the host 83% busy with no missed deadlines and no repeat/drop pairs
-        # (16 MXL sources as well took it to 92% and flipped). 50/60 fps: not measured. Offered where
-        # FFmpeg receives NDI.
-        "ndi_sources": {25: 4, 30: 4, 50: 2, 60: 2},
+        # NV12 upload 0.05). A show has MXL or NDI sources: beside the full 188-source show with the
+        # NDI scene on program, 3 NDI sources kept the host 60% busy (load 9, CPU pressure 19%), 4
+        # took it to 85% (load 25, pressure 47%), both with no missed deadlines or repeat/drop pairs;
+        # 16 MXL sources as well took 2 NDI to 92% and flipped. A 50/60 fps source costs about twice
+        # as much (not measured). Offered where FFmpeg receives NDI.
+        "ndi_sources": {25: 3, 30: 3, 50: 1, 60: 1},
         # Beside 44 decodes and the browsers at 60 fps (88 inputs): NVDEC 84%, GPU 75%. Eight ran
         # NVDEC at 86% and the GPU at 81%, 98% while cutting.
         "hlg_v210": 4,
