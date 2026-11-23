@@ -77,6 +77,13 @@ class CreateHostTests(unittest.TestCase):
         self.assertEqual(args[args.index("--image-family") + 1], "avplumber-mixer-host")
         self.assertEqual(args[args.index("--image-project") + 1], "test-project")
         self.assertNotIn("--accelerator", args)
+        self.assertIn("avplumber-driver-version=", args[args.index("--metadata") + 1].split(","))
+
+    def test_explicit_newer_driver(self):
+        for mode in ("install", "verify"):
+            with self.subTest(mode=mode):
+                args = self.creation(HOST_SETUP_MODE=mode, NVIDIA_DRIVER_VERSION="620.73.04")
+                self.assertIn("avplumber-driver-version=620.73.04", args[args.index("--metadata") + 1].split(","))
 
     def test_fresh_ubuntu_keeps_security_defaults(self):
         args = self.creation(HOST_SETUP_MODE="install")
@@ -122,7 +129,7 @@ class CreateHostTests(unittest.TestCase):
 
     def test_invalid_settings_fail_before_cloud_calls(self):
         for overrides in ({"ENABLE_NDI": "yes"}, {"HOST_SETUP_MODE": "unexpected"}, {"DISABLE_MITIGATIONS": "yes"},
-                          {"NVIDIA_DRIVER_VERSION": "580.178.04"},
+                          {"NVIDIA_DRIVER_VERSION": "580.178.04"}, {"NVIDIA_DRIVER_VERSION": "595.58.03"},
                           {"HOST_SETUP_MODE": "install", "NVIDIA_DRIVER_VERSION": ""}):
             with self.subTest(overrides=overrides):
                 result, calls = self.run_creator(**overrides)

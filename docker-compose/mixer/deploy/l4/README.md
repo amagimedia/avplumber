@@ -14,9 +14,15 @@ Docker Compose and NVIDIA Container Toolkit. The measured host has 16 vCPUs,
 cp docker-compose/mixer/deploy/l4/.env.example docker-compose/mixer/deploy/l4/.env
 # Set destination addresses and optional authentication in .env.
 docker-compose/mixer/deploy/l4/stack.sh build
+docker-compose/mixer/deploy/l4/stack.sh smoke
 docker-compose/mixer/deploy/l4/stack.sh up -d
 docker-compose/mixer/deploy/l4/stack.sh logs -f mixer
 ```
+
+The same CUDA 13.4 mixer image runs on R615 and R620 hosts. The smoke check
+compares raw frames uploaded from page-locked host RAM byte for byte, then
+exercises HEVC encoding, decoding and CUDA composition. The raw loops in the
+show stay in pinned host RAM and require a successful CUDA host allocation.
 
 `stack.sh` pins FFmpeg from [bases.env](../../../../deps/ffmpeg/9/bases.env)
 and selects `nvidia_l4_cuarray`. Browser services come from the shared

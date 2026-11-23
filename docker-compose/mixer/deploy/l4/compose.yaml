@@ -2,6 +2,9 @@ name: avplumber-mixer-l4
 
 services:
   mixer:
+    # Resident raw sources allocate their loop buffers in page-locked host RAM.
+    ulimits:
+      memlock: {soft: -1, hard: -1}
     image: &mixer-image ${MIXER_IMAGE_PREFIX:-avplumber-mixer-l4}-mixer:${MIXER_RELEASE}
     environment:
       CUDA_DEVICE_MAX_CONNECTIONS: ${CUDA_DEVICE_MAX_CONNECTIONS:-32}

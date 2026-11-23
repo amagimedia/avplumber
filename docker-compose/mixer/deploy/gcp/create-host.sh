@@ -18,18 +18,18 @@ ENABLE_NDI="${ENABLE_NDI:-0}"
 HOST_SETUP_MODE="${HOST_SETUP_MODE:-verify}"
 case "$HOST_SETUP_MODE" in
   verify)
+    NVIDIA_DRIVER_VERSION="${NVIDIA_DRIVER_VERSION:-}"
     IMAGE_FAMILY="${IMAGE_FAMILY:-avplumber-mixer-host}"
     IMAGE_PROJECT="${IMAGE_PROJECT:-$PROJECT}"
     ;;
   install)
+    NVIDIA_DRIVER_VERSION="${NVIDIA_DRIVER_VERSION-615.71.09}"
     IMAGE_FAMILY="${IMAGE_FAMILY:-ubuntu-2604-lts-amd64}"
     IMAGE_PROJECT="${IMAGE_PROJECT:-ubuntu-os-cloud}"
     ;;
   *) echo 'ERROR: HOST_SETUP_MODE must be verify or install' >&2; exit 2 ;;
 esac
 IMAGE_NAME="${IMAGE_NAME:-}"
-# The driver the image carries; the Fedora 44 / CUDA 13.4 mixer image needs R615 or newer.
-NVIDIA_DRIVER_VERSION="${NVIDIA_DRIVER_VERSION-615.71.09}"
 DISABLE_MITIGATIONS="${DISABLE_MITIGATIONS:-0}"
 DISABLE_AUTO_UPGRADES="${DISABLE_AUTO_UPGRADES:-0}"
 for flag in "$DISABLE_MITIGATIONS" "$DISABLE_AUTO_UPGRADES"; do
