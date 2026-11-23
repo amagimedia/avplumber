@@ -71,7 +71,7 @@ def test_setup_keeps_cuarray_contract_without_changing_legacy_profiles(fps, dept
     settings = {**DEFAULT_SETTINGS, "fps": fps, "bit_depth": depth, "chroma": chroma,
                 "source_count": 16, "weights": [8, 0, 0, 0, 4, 4, 0] if depth == 8 else [6, 6, 0, 0, 4, 0, 0]}
     recipe = recipe_for(optimized, settings)
-    encoded = [s for s in recipe["inputs"] if s["kind"] == "generated" and not s.get("storage") and not s.get("mxl") and s["chroma"] == "420"]
+    encoded = [s for s in recipe["inputs"] if s["kind"] == "generated" and not s.get("storage") and not s.get("mxl") and not s.get("ndi") and s["chroma"] == "420"]
     assert all(s["codec"] == "hevc" and s["decode_storage"] == "cuarray" and s["extra_hw_frames"] == 12 for s in encoded)
     assert all("decode_storage" not in s for s in recipe_for(legacy, settings)["inputs"])
     assert source_limit(optimized, 25) == 192
@@ -105,7 +105,7 @@ def test_manual_source_counts_reach_generated_show_unchanged(tmp_path, counts):
     profile = INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY]
     recipe = recipe_for(profile, {**DEFAULT_SETTINGS, "fps": 30, "bit_depth": 8, "chroma": "420",
                                   "source_count": sum(counts), "weights": counts})
-    assert [s["weight"] for s in recipe["inputs"]] == counts + [0]   # no MXL
+    assert [s["weight"] for s in recipe["inputs"]] == counts + [0, 0]   # no MXL or NDI
     show = plan(recipe, tmp_path)[0]
     assert len(show["sources"]) == sum(counts)
     assert sum(s["kind"] == "browser" for s in show["sources"]) == counts[4]

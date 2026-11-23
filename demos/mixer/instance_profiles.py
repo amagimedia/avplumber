@@ -90,6 +90,9 @@ INSTANCE_PROFILES = {
         "nvdec_hdr_decodes": {25: 53, 30: 53, 50: 32, 60: 27},
         "browser_windows": 40,
         "raw_upload_units": {25: 47, 30: 47, 50: 22, 60: 19},   # NV12 = 1, P010 = 2, MXL = 1
+        # NDI: the demo's sender encodes each source (SpeedHQ) and the mixer decodes it, both on the
+        # host's 12 vCPUs, which the full show already loads: a few, offered where FFmpeg receives NDI.
+        "ndi_sources": {25: 4, 30: 4, 50: 2, 60: 2},
         # Beside 44 decodes and the browsers at 60 fps (88 inputs): NVDEC 84%, GPU 75%. Eight ran
         # NVDEC at 86% and the GPU at 81%, 98% while cutting.
         "hlg_v210": 4,

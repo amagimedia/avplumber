@@ -430,7 +430,7 @@ def test_hdr_422_cap_preserves_total_and_disabled_types(tmp_path, total, weights
     assert 0 < counts[2] <= 4
     assert counts[3] == 0
     assert sum(s["kind"] == "v210" for s in show["sources"]) == counts[2]
-    assert recipe["setup"]["weights"] == weights + [0, 0, 0]   # the raw 4:2:0 kinds and MXL
+    assert recipe["setup"]["weights"] == weights + [0, 0, 0, 0]   # the raw 4:2:0 kinds, MXL and NDI
 
 
 def test_four_hdr_422_inputs_can_be_used_alone():
@@ -456,7 +456,7 @@ def test_browser_cap_redistributes_without_exceeding_other_caps(weights, expecte
     # Above the capacity of a 10-bit 4:2:2 canvas at 25 fps the show is scaled down first.
     recipe = recipe_for(T4, {**DEFAULT_SETTINGS, 'source_count': 64, 'fps': 25, 'weights': weights + [0, 0]})
     capacity = min(64, source_limit(T4, 25, DEFAULT_SETTINGS['bit_depth'], DEFAULT_SETTINGS['chroma']))
-    assert [source['weight'] for source in recipe['inputs']] == source_counts(T4, capacity, weights) + [0, 0, 0]
+    assert [source['weight'] for source in recipe['inputs']] == source_counts(T4, capacity, weights) + [0, 0, 0, 0]
 
 
 def test_browser_only_limit():
@@ -1699,8 +1699,9 @@ def test_mxl_sources_take_raw_upload_units_up_to_the_profile_limit(tmp_path):
         recipe_for(L4, {**MXL_SHOW, "weights": [105, 0, 0, 0, 36, 30, 0, 17]})
     with pytest.raises(ValueError, match="MXL inputs are not available"):   # no measured limit on the T4
         recipe_for(T4, {**MXL_SHOW, "source_count": 16, "weights": [8, 0, 0, 0, 0, 0, 0, 8]})
-    # Settings saved before MXL sources have seven weights.
-    assert recipe_for(L4, {**MXL_SHOW, "weights": [105, 0, 0, 0, 36, 47, 0]})["setup"]["weights"] == [105, 0, 0, 0, 36, 47, 0, 0]
+    # Settings saved before MXL sources have seven weights, before NDI sources eight.
+    assert recipe_for(L4, {**MXL_SHOW, "weights": [105, 0, 0, 0, 36, 47, 0]})["setup"]["weights"] == [105, 0, 0, 0, 36, 47, 0, 0, 0]
+    assert recipe_for(L4, {**MXL_SHOW, "weights": [105, 0, 0, 0, 36, 47, 0, 0]})["setup"]["weights"] == [105, 0, 0, 0, 36, 47, 0, 0, 0]
 
 
 def test_mxl_writers_plan_one_v210_flow_per_mxl_source_with_a_clip():
@@ -1804,3 +1805,61 @@ def test_mxl_writers_start_before_the_mixer_and_stop_after_it(tmp_path, monkeypa
     monkeypatch.setattr(demo, "mxl_available", lambda: False)
     assert "mxl_sources" not in SetupRuntime(tmp_path, tmp_path / "demo.json", SimpleNamespace(port=7777),
                                              InstanceType.NVIDIA_L4_CUARRAY).profile
+
+
+NDI_SHOW = {**MXL_SHOW, "source_count": 172, "weights": [105, 0, 0, 0, 36, 27, 0, 0, 4]}
+
+
+def test_ndi_sources_are_sent_from_their_own_clips_up_to_the_profile_limit(tmp_path):
+    """Generated NDI sources: packed UYVY clips the writers process sends on this host, received
+    by stream name until the setup knows the full one; a few, for the host's CPUs."""
+    show, jobs, allocation = prepare_demo.plan(recipe_for(L4, NDI_SHOW), tmp_path)
+    ndi = [s for s in show["sources"] if s["kind"] == "ndi"]
+    assert allocation["sdr_ndi"] == len(ndi) == 4
+    assert all(s["clip"].endswith(".uyvy") and s["clip"] in map(str, jobs) for s in ndi)
+    assert [s["name"] for s in ndi] == [f"avp-{s['id']}" for s in ndi]
+    assert all(s["extra_ips"] == "127.0.0.1" and s["color"] == "sdr" for s in ndi)
+    assert next(s for s in show["scenes"] if s["id"] == "ndi")["items"][0]["source"] == ndi[0]["id"]
+    with pytest.raises(ValueError, match="NDI is limited to 4"):
+        source_counts(L4, 5, [0] * 8 + [1], 30)
+    assert source_counts(L4, 8, [0, 0, 0, 0, 1, 0, 0, 0, 1], 60) == [0, 0, 0, 0, 6, 0, 0, 0, 2]   # 2 at 60 fps
+    import demos.mixer.setup_runtime as demo
+    with pytest.raises(ValueError, match="NDI inputs are not available"):   # an image without NDI drops the entry
+        demo._check_live({k: v for k, v in L4.items() if k != "ndi_sources"}, "ndi", 1, 30)
+
+
+def test_ndi_senders_report_full_names_that_the_setup_puts_in_the_show_before_the_mixer(tmp_path, monkeypatch):
+    import ctypes
+    import demos.mixer.setup_runtime as demo
+    from demos.mixer import ndi_senders
+    assert ctypes.sizeof(ndi_senders.VideoFrame) == 72 and ndi_senders.FOURCC_UYVY == 0x59565955
+    events, stopped = [], threading.Event()
+    config = tmp_path / "mixer.demo.json"
+    source = {"id": "sdr_ndi_000", "kind": "ndi", "name": "avp-sdr_ndi_000", "extra_ips": "127.0.0.1",
+              "clip": "/media/clip.uyvy", "width": 1920, "height": 1080}
+    config.write_text(json.dumps({"canvas": {"fps": 30}, "sources": [source]}))
+    assert ndi_senders.plan(json.loads(config.read_text()))[1] == [
+        {"id": "sdr_ndi_000", "clip": "/media/clip.uyvy", "width": 1920, "height": 1080}]
+    def launch(command, **kwargs):
+        assert command[-3:] == ["-m", "demos.mixer.mxl_writers", str(config)]
+        events.append("writers start")
+        ndi_senders.names_path(config).write_text(json.dumps({"sdr_ndi_000": "HOST.EXAMPLE (avp-sdr_ndi_000)"}))
+        return SimpleNamespace(pid=1, returncode=0, poll=lambda: None, wait=lambda timeout=None: stopped.wait(3))
+    monkeypatch.setattr(demo.subprocess, "Popen", launch)
+    def killpg(pid, sig):
+        if not sig:
+            raise ProcessLookupError
+        events.append("writers stop")
+        stopped.set()
+    monkeypatch.setattr(demo.os, "killpg", killpg)
+    def mixer_start(self, started):
+        events.append("mixer start")
+        assert json.loads(started.read_text())["sources"][0]["name"] == "HOST.EXAMPLE (avp-sdr_ndi_000)"
+    monkeypatch.setattr(demo.BaseSetupRuntime, "_start", mixer_start)
+    monkeypatch.setattr(demo.BaseSetupRuntime, "_stop", lambda self: events.append("mixer stop"))
+    monkeypatch.setattr(demo, "ndi_available", lambda: True)
+    manager = SetupRuntime(tmp_path, tmp_path / "demo.json", SimpleNamespace(port=7777), InstanceType.NVIDIA_L4_CUARRAY)
+    assert manager.profile["ndi_sources"][30] == 4
+    manager._start(config)
+    manager._stop()
+    assert events == ["writers start", "mixer start", "mixer stop", "writers stop"]

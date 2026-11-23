@@ -25,6 +25,7 @@ from urllib.request import Request, urlopen
 
 import numpy as np
 
+from demos.mixer import ndi_senders
 from demos.mixer.sdr_patterns import GENERATORS, GOP_SHAPES, input_kbps, encoding_options, render
 from demos.mixer.demo_recipe import DSK_WINDOWS, allocate, scenes, validate_dsk, write_atomic
 from demos.mixer.hdr_patterns import write_hlg
@@ -281,15 +282,19 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
                 if color == "hlg" and codec != "hevc":
                     raise ValueError(f"{name}: codec must be h264 or hevc; HLG requires hevc")
                 gop = per_source(spec, "gop", index, tuple(GOP_SHAPES)) or "low_delay"
-                if any(key in spec for key in ("codec", "codecs", "gop", "gops", "mxl")) and (raw or chroma == "422"):
-                    raise ValueError(f"{name}: codec and gop apply only to encoded 4:2:0 inputs, as does mxl")
-                encoder = "v210" if spec.get("mxl") else f"{codec}_nvenc"
+                if any(key in spec for key in ("codec", "codecs", "gop", "gops", "mxl", "ndi")) and (raw or chroma == "422"):
+                    raise ValueError(f"{name}: codec and gop apply only to encoded 4:2:0 inputs, as do mxl and ndi")
+                if spec.get("mxl") and spec.get("ndi"):
+                    raise ValueError(f"{name}: a source is mxl or ndi, not both")
+                if spec.get("ndi") and color != "sdr":
+                    raise ValueError(f"{name}: ndi sources are SDR")
+                encoder = "v210" if spec.get("mxl") else "uyvy422" if spec.get("ndi") else f"{codec}_nvenc"
                 storage = raw or ("v210" if chroma == "422" else encoder)
                 # Version cache names when changing generation semantics. Every
                 # source has its own file, with its id burned in (id_overlay), so
                 # no two inputs share decode input or page cache; the name holds
                 # all that shapes the content, so re-applying reuses the file.
-                extension = raw or ("v210" if storage == "v210" else "mp4")
+                extension = raw or {"v210": "v210", "uyvy422": "uyvy"}.get(storage, "mp4")
                 version = 5 if extension == "mp4" else 4   # low-DPB encodes; raw pixels are unchanged
                 shape = f"_{input_kbps(index)}k" + ("" if gop == "low_delay" else f"_{gop}") if extension == "mp4" else ""
                 path = (media_dir / "assets" / f"synthetic_v{version}_{size}_{fps_name}_{seconds}s" /
@@ -314,6 +319,13 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
                     # (mxl_writers.py) loops the source's own clip, packed v210 pictures rendered
                     # above, into that flow; "clip" is the writer's key, which the mixer ignores.
                     source.update(kind="mxl", url=MXL_DOMAIN, flow=str(uuid.uuid5(uuid.NAMESPACE_URL, source["id"])),
+                                  clip=source.pop("path"))
+                elif spec.get("ndi"):
+                    # The mixer receives this source over NDI. The same writers process sends the
+                    # source's clip, packed UYVY pictures rendered above, as an NDI source on this
+                    # host; its stream name stands in until the setup puts the full name (machine
+                    # and stream, as NDI discovery lists it) in the show.
+                    source.update(kind="ndi", name=ndi_senders.stream_name(source["id"]), extra_ips="127.0.0.1",
                                   clip=source.pop("path"))
                 elif source["kind"] == "video":
                     # These clips are ours: 8-bit SDR or 10-bit HLG, 4:2:0, which NVDEC hands out as
@@ -369,14 +381,16 @@ def plan(recipe, media_dir, runtime_media_dir=None, ffmpeg="ffmpeg"):
         wipes.append({"id": pattern, "name": name, "path": runtime_path(wipe), "duration_seconds": 2})
     scene_list = scenes(sources, width, height, scene_count, recipe["layouts"], seed,
                         alpha_background=recipe.get("alpha_background"))
-    # The MXL sources also get one scene of their own, on program at start, so they are easy to find.
-    mxl = [s["id"] for s in sources if s.get("kind") == "mxl"]
-    if mxl:
-        side = math.ceil(math.sqrt(len(mxl)))
-        w, h = width // side // 2 * 2, height // side // 2 * 2
-        scene_list.insert(0, {"id": "mxl", "items": [
-            {"source": sid, "dst": {"x": i % side * w, "y": i // side * h, "w": w, "h": h}, "fit": "contain"}
-            for i, sid in enumerate(mxl)]})
+    # The MXL and NDI sources also get one scene each of their own, the first on program at start, so
+    # they are easy to find.
+    for live in ("ndi", "mxl"):
+        ids = [s["id"] for s in sources if s.get("kind") == live]
+        if ids:
+            side = math.ceil(math.sqrt(len(ids)))
+            w, h = width // side // 2 * 2, height // side // 2 * 2
+            scene_list.insert(0, {"id": live, "items": [
+                {"source": sid, "dst": {"x": i % side * w, "y": i // side * h, "w": w, "h": h}, "fit": "contain"}
+                for i, sid in enumerate(ids)]})
     # Keys are added after scene generation: ordinary sources that scenes could
     # use, but generated layouts should not scatter graphics into grids.
     pages = recipe.get("dsk", [])
