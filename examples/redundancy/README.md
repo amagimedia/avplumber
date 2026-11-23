@@ -83,6 +83,8 @@ examples/redundancy/jpeg2000_lossless/fabric_tcp/
 ProRes 4444 carries alpha inside the payload, so one stream is the whole picture - no key/fill
 pair, no merge step, and the stock libavcodec `prores` decoder returns the alpha plane.
 `codec` accepts `prores` / `prores4444`, which travel as one wire code (`CODEC_PRORES`).
+For MOV output, set the receiver to `prores4444` or supply a matching
+`reference_url` so the muxer writes the 4444 sample entry (`ap4h`).
 `prores_ks` encodes on the CPU (`{"profile": "4444"}` over a `yuva444p10le` input);
 [ProresNV](https://github.com/siml1169/ProresNV)'s CUDA `prores_nv` produces the same bitstream
 and can replace it later without a protocol change.

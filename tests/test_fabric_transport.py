@@ -9,12 +9,12 @@ from pathlib import Path
 import pytest
 
 
-def round_trip(binary, tmp_path, source, mode, alignment, codec, layout):
+def round_trip(binary, tmp_path, source, mode, alignment, codec, layout, container="nut"):
     width, height = 320, 240
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
-    output = tmp_path / "received.nut"
+    output = tmp_path / f"received.{container}"
     script = tmp_path / "graph.avplumber"
     commands = ["queue.plan_capacity * 32"]
 
@@ -29,7 +29,7 @@ def round_trip(binary, tmp_path, source, mode, alignment, codec, layout):
     node("redundancy_selector", "rx", src="received", dst="selected", mode=mode,
          alignment_mode=alignment, playout_delay_frames=4)
     node("fabric_unpack", "rx", src="selected", dst="packets")
-    node("mux", "rx", src="packets", dst="muxed", format="nut")
+    node("mux", "rx", src="packets", dst="muxed", format=container)
     node("output", "rx", src="muxed", url=str(output))
     node("input", "tx", url=str(source), dst="input_packets")
     node("demux", "tx", src="input_packets", routing={"v:0": "video"})
@@ -64,6 +64,7 @@ def round_trip(binary, tmp_path, source, mode, alignment, codec, layout):
     expected = frames(source)
     assert len(expected) == 16
     assert frames(output) == expected, log.read_text(errors="replace")
+    return output
 
 
 @pytest.fixture
@@ -110,3 +111,19 @@ def test_nvenc_fabric_round_trip(tmp_path, fabric_binary, encoder, codec, layout
 
 def test_key_stream_metadata_before_first_packet(fabric_binary, cpp_library_binary):
     subprocess.run([cpp_library_binary("test_fabric_metadata")], check=True, timeout=15)
+
+
+def test_prores_4444_mov_preserves_profile_and_alpha(tmp_path, fabric_binary):
+    if not shutil.which("ffprobe"):
+        pytest.skip("requires ffprobe")
+    source = tmp_path / "source.mov"
+    pattern = ("testsrc2=size=320x240:rate=25,format=yuva444p10le,"
+               "geq=lum='p(X,Y)':cb='p(X,Y)':cr='p(X,Y)':a='mod(X+N,256)*4'")
+    subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", pattern, "-frames:v", "16",
+                    "-c:v", "prores_ks", "-profile:v", "4444", "-threads", "1", str(source)], check=True)
+    output = round_trip(fabric_binary, tmp_path, source, "active_active", "strict", "prores4444",
+                        "yuva444p10le", container="mov")
+    tag = subprocess.check_output(["ffprobe", "-v", "error", "-select_streams", "v:0",
+                                   "-show_entries", "stream=codec_tag_string", "-of", "csv=p=0",
+                                   str(output)], text=True)
+    assert tag.strip() == "ap4h"

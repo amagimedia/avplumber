@@ -63,9 +63,8 @@ inline bool isJpeg2000CodecName(const std::string &codec) {
     return codec == "jpeg2000" || codec == "j2k" || codec == "nvjpeg2k";
 }
 
-// One wire code for every ProRes profile: the frame header carries the profile, so the fill and the
-// 4444 alpha profiles are told apart by the payload, and the pixel format travels in the media
-// header. The names exist so a graph reads like the profile it encodes.
+// The transport uses one ID for ProRes. A receiver remuxing 4444 also needs
+// the profile-specific container tag before the first packet arrives.
 inline bool isProresCodecName(const std::string &codec) {
     return codec == "prores" || codec == "prores4444" || codec == "prores_4444";
 }
@@ -77,6 +76,15 @@ inline AVCodecID codecIdFromName(const std::string &codec) {
     if (isJpeg2000CodecName(codec)) return AV_CODEC_ID_JPEG2000;
     if (isProresCodecName(codec)) return AV_CODEC_ID_PRORES;
     throw Error("fabric unsupported codec: " + codec);
+}
+
+inline void setStreamCodec(AVCodecParameters &parameters, const std::string &name) {
+    parameters.codec_id = codecIdFromName(name);
+    if (name == "prores4444" || name == "prores_4444") {
+        parameters.profile = AV_PROFILE_PRORES_4444;
+        // libavformat's default MOV tag lookup sees only the codec ID and picks apch (HQ).
+        parameters.codec_tag = MKTAG('a', 'p', '4', 'h');
+    }
 }
 
 inline uint32_t codecToWire(AVCodecID codec) {

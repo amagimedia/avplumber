@@ -167,7 +167,7 @@ public:
                     av_freep(&cp->extradata);
                     cp->extradata_size = 0;
                 }
-                cp->codec_tag = 0;
+                if (cp->codec_id != AV_CODEC_ID_PRORES) cp->codec_tag = 0;
             }
         }
         if (!stream_.isValid()) throw Error("redundancy_selector requires upstream InputStreamMetadata");

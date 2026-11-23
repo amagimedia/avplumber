@@ -97,7 +97,7 @@ public:
                 av_freep(&cp->extradata);
                 cp->extradata_size = 0;
             }
-            cp->codec_tag = 0;
+            if (cp->codec_id != AV_CODEC_ID_PRORES) cp->codec_tag = 0;
         } else {
             const int width = params.value("width", 1920);
             const int height = params.value("height", 1080);
@@ -115,7 +115,7 @@ public:
             stream_.setAverageFrameRate(frame_rate);
             AVCodecParameters *cp = stream_.raw()->codecpar;
             cp->codec_type = AVMEDIA_TYPE_VIDEO;
-            cp->codec_id = avp_fabric::codecIdFromName(params.value("codec", std::string("h264_intra")));
+            avp_fabric::setStreamCodec(*cp, params.value("codec", std::string("h264_intra")));
             cp->width = width;
             cp->height = height;
             cp->format = real_pixel_format.get();
@@ -123,9 +123,6 @@ public:
         if (params.count("alpha_dst")) {
             // Geometry and timing are the fill's: a key plane covers the picture it keys.
             alpha_enabled_ = true;
-            const AVCodecID alpha_codec = params.count("alpha_codec")
-                ? avp_fabric::codecIdFromName(params.at("alpha_codec").get<std::string>())
-                : stream_.raw()->codecpar->codec_id;
             const std::string alpha_pixel_format_name = params.value("alpha_pixel_format", std::string("gray"));
             const av::PixelFormat alpha_pixel_format(alpha_pixel_format_name);
             if (alpha_pixel_format == AV_PIX_FMT_NONE) {
@@ -142,7 +139,14 @@ public:
             alpha_stream_.setAverageFrameRate(stream_.frameRate());
             AVCodecParameters *cp = alpha_stream_.raw()->codecpar;
             cp->codec_type = AVMEDIA_TYPE_VIDEO;
-            cp->codec_id = alpha_codec;
+            if (params.count("alpha_codec")) {
+                avp_fabric::setStreamCodec(*cp, params.at("alpha_codec").get<std::string>());
+            } else {
+                const auto *fill = stream_.raw()->codecpar;
+                cp->codec_id = fill->codec_id;
+                cp->profile = fill->profile;
+                cp->codec_tag = fill->codec_tag;
+            }
             cp->width = stream_.raw()->codecpar->width;
             cp->height = stream_.raw()->codecpar->height;
             cp->format = alpha_layout.get();
