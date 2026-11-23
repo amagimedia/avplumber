@@ -178,8 +178,11 @@ def test_an_ndi_source_is_received_converted_to_nv12_and_uploaded(native_boundar
     """FFmpeg's libndi_newtek device receives the named source (found at extra_ips besides mDNS);
     its packed 4:2:2 is wrapped in software, uploaded after pacing and unpacked to tagged NV12 there, and
     its audio joins the show's like a video file's. NDI never ends: no loop, the group restarts."""
-    api = fake_api()
-    api.MixerGraphBuilder = native_boundary[1]
+    def fake_api_with(boundary):
+        api = fake_api()
+        api.MixerGraphBuilder = boundary[1]
+        return api
+    api = fake_api_with(native_boundary)
     ndi = {"id": "cam", "kind": "ndi", "name": "HOST (avp-smoke)", "extra_ips": "127.0.0.1", "color": "sdr",
            "width": 1920, "height": 1080}
     def ndi_show(source):
@@ -197,13 +200,16 @@ def test_an_ndi_source_is_received_converted_to_nv12_and_uploaded(native_boundar
     pacing = nodes["realtime_0"]
     # Arrival-paced with a frame of jitter buffer, resynced when frames run ahead (a stale anchor).
     assert pacing["discontinuity_threshold"] == 0.1 and pacing["jitter_margin"] == pacing["initial_jitter_margin"] > 0
-    # A backlog in front of pacing (what arrived against what is being paced) is dropped, not kept.
     fps_num, fps_den = config.rate_pair(cfg.fps)
     period = fps_den / fps_num
     assert pacing["jitter_margin"] == period
-    assert (pacing["team"], pacing["input_ts_queue"], pacing["intermediate_queues"]) == (
+    # A backlog in front of pacing (what arrived against what is being paced) is dropped, not kept,
+    # for a source without audio: with it the audio node would share the rule and the team.
+    assert pacing["team"] == "input_0_av_sync" and "input_ts_queue" not in pacing
+    silent = {n.parameters["name"]: n.parameters for n in build_application(ndi_show(ndi), api=fake_api_with(native_boundary)).avp.nodes}["realtime_0"]
+    assert (silent["team"], silent["input_ts_queue"], silent["intermediate_queues"]) == (
         "input_0_av_sync", received["dst"], ["input_0_video_packets"])
-    assert (pacing["max_buffered"], pacing["min_buffered"]) == (3.5 * period, 1.5 * period)
+    assert (silent["max_buffered"], silent["min_buffered"]) == (3.5 * period, 1.5 * period)
     # Its restart while the show starts does not fail the start.
     assert app.live_inputs == ("input_0",)
     assert nodes["decode_0"]["auto_restart"] == "group" and nodes["decode_0"]["hwaccel_only_for_codecs"] == []

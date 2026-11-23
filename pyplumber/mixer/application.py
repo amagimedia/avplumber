@@ -1100,12 +1100,15 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
                     decoded_ahead=cfg.decoded_frames_ahead,
                     # realtime measures and drops a backlog as a member of a team, also one of its own.
                     has_audio=source.has_audio, sync_team=(f"input_{index}_av_sync" if source.has_audio or ndi else None),
+                    # Not with audio: its realtime node gets the same parameters and shares the team,
+                    # and audio queued in its own chain would flush the pictures with it (untested).
                     **({"realtime_params": {"jitter_margin": fps_den / fps_num, "initial_jitter_margin": fps_den / fps_num,
                                             "discontinuity_threshold": NDI_EARLY_RESYNC_S,
-                                            "input_ts_queue": f"input_{index}_packets",
-                                            "intermediate_queues": [f"input_{index}_video_packets"],
-                                            "max_buffered": NDI_BACKLOG_MAX * fps_den / fps_num,
-                                            "min_buffered": NDI_BACKLOG_KEEP * fps_den / fps_num}} if ndi else {}),
+                                            **({} if source.has_audio else {
+                                                "input_ts_queue": f"input_{index}_packets",
+                                                "intermediate_queues": [f"input_{index}_video_packets"],
+                                                "max_buffered": NDI_BACKLOG_MAX * fps_den / fps_num,
+                                                "min_buffered": NDI_BACKLOG_KEEP * fps_den / fps_num})}} if ndi else {}),
                     **file_params)
                 if audio_edge:
                     audio_edges.append((source.id, audio_edge))

@@ -149,7 +149,8 @@ find the sender at besides mDNS, e.g. `"127.0.0.1"` for one on the same host. ND
 4:2:2 (UYVY), no codec NVDEC has: after pacing `uyvy422_to_cuda` copies each packed picture once into
 page-locked memory and the device unpacks it into NV12 with the declared colour tags (a `HAVE_NVCC=1`
 build, as the mixer's are); no CPU converts it. Pictures that queue up in front of pacing (a show's slow
-start) are dropped, not kept: the source would stay that far behind, and its receiver lose pictures. `has_audio` takes its audio into
+start) are dropped, not kept: the source would stay that far behind, and its receiver lose pictures
+(not yet for a source with `has_audio`, whose audio node would share the rule). `has_audio` takes its audio into
 the show like a video file's. The source never loops; when the sender is lost the chain restarts, and an
 `assume_video_format` with `ignore_eof` at the declared size before its fan-out, as for MXL, keeps that
 restart's EOF from ending a program that shows only NDI sources.
