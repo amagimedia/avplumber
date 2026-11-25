@@ -16,17 +16,16 @@ export MIXER_PUBLIC_BIND="${MIXER_PUBLIC_BIND:-127.0.0.1}"
 fail() { echo "Desktop mixer: $*" >&2; exit 1; }
 
 check_host() {
-    [[ "$(uname -sm)" == "Linux x86_64" ]] || fail "the mixer image requires native x86-64 Linux"
-    docker compose version
-    [[ "$(docker info --format '{{if index .Runtimes "nvidia"}}yes{{end}}')" == yes ]] ||
-        fail "enable the NVIDIA Container Toolkit runtime in the Docker daemon"
+    # Driver R615+, NVDEC/NVENC, EGL/GBM, modeset, Docker, Compose and the NVIDIA runtime, each with its fix.
+    # MIXER_SKIP_HOST_CHECK=1 starts anyway, for a host whose layout the check does not know.
+    [[ ${MIXER_SKIP_HOST_CHECK:-0} == 1 ]] || "$repo/docker-compose/mixer/host-setup.sh" check ||
+        fail "fix the items above (docker-compose/mixer/host-setup.sh install sets up Ubuntu), then rerun;" \
+             "MIXER_SKIP_HOST_CHECK=1 starts anyway"
     local info pci driver name free render
     info="$(nvidia-smi -i 0 --query-gpu=pci.bus_id,driver_version,name,memory.free --format=csv,noheader,nounits)" ||
         fail "nvidia-smi could not query GPU 0"
     IFS=, read -r pci driver name free <<< "$info"
     driver=${driver// /}
-    [[ ${driver%%.*} =~ ^[0-9]+$ ]] && (( ${driver%%.*} >= 615 )) ||
-        fail "the Fedora/CUDA 13.4 image requires R615 or newer (found $driver)"
     # nvidia-smi uses an eight-digit PCI domain; Linux sysfs uses four digits.
     pci=${pci,,}
     local -a nodes=(/sys/bus/pci/devices/"${pci: -12}"/drm/renderD*)

@@ -1,6 +1,7 @@
 # GCP mixer hosts
 
-Provision the host here, then deploy the [L4 stack](../l4/README.md).
+Provision the host here, then deploy the [L4 stack](../l4/README.md). Another cloud, a server
+or a desktop: [`host-setup.sh`](../../host-setup.sh) checks and installs the same pieces.
 No host CUDA/TensorRT SDK or copied Docker state is needed.
 
 ## Fresh Ubuntu 26.04
