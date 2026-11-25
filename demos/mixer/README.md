@@ -53,8 +53,10 @@ Open <http://127.0.0.1:7681/setup/>, choose sources, canvas and outputs, then
 **Apply setup**. Controls are at `/`, all outputs at `/wall`, and the standalone
 player at <http://127.0.0.1:8080>. Select SDR if HEVC playback is unavailable.
 
-For a remote host set `JANUS_HOST_IP=<host>`; allow TCP 7681/8080 and UDP
-20000–20100. Stop with `docker compose -f docker-compose/mixer/compose.yaml down`.
+Janus offers the address of the default route's interface to WebRTC viewers, and on GCE or EC2
+also the VM's public address from the instance metadata. Set `JANUS_HOST_IP` when viewers reach
+this host on another interface (a VPN, a second NIC), or `JANUS_NAT_1_1` for other 1:1 NAT.
+For a remote host allow TCP 7681/8080 and UDP 20000–20100. Stop with `docker compose -f docker-compose/mixer/compose.yaml down`.
 The page has no authentication: allow it only from trusted networks, or use the
 L4 preset's proxy with `MIXER_HTPASSWD`. The mixer's control port 7777 stays on loopback.
 `MIXER_BIND=127.0.0.1` keeps the page local.
