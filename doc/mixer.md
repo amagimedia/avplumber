@@ -413,6 +413,11 @@ Python boundaries are `gui.bridge` (AVP connection and command ordering),
 thread priority), and `gui.web` (HTTP and CLI). Existing public imports from
 `gui.web` remain available; new applications can use `pyplumber.mixer.gui`.
 
+Programs other than the control page drive the mixer through the optional
+[REST API](rest_api.md): `pyplumber.mixer.rest.mixer_router(bridge)` serves the
+takes, keys, AUX buses and audio as typed, OpenAPI-described routes over the same
+`MixerBridge`.
+
 ## Profiling
 
 The engine marks its timeline with NVTX ([timeline.hpp](../src/timeline.hpp)). Without a

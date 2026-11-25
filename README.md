@@ -186,6 +186,8 @@ From Python, `AVPlumber.enableControlServer(port, bind_address="127.0.0.1")` tak
 
 [Control protocol and all commands documentation](doc/control_protocol.md)
 
+An optional HTTP gateway (`python -m pyplumber.rest`) serves a subset of the commands as a REST API described by OpenAPI: [REST API](doc/rest_api.md). avplumber itself does not depend on it.
+
 ## Node object
 
 Each node is described by a JSON object consisting of the following fields:
