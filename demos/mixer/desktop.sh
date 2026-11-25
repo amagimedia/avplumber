@@ -17,8 +17,10 @@ fail() { echo "Desktop mixer: $*" >&2; exit 1; }
 
 check_host() {
     # Driver R615+, NVDEC/NVENC, EGL/GBM, modeset, Docker, Compose and the NVIDIA runtime, each with its fix.
-    "$repo/docker-compose/mixer/host-setup.sh" check ||
-        fail "fix the items above (docker-compose/mixer/host-setup.sh install sets up Ubuntu), then rerun"
+    # MIXER_SKIP_HOST_CHECK=1 starts anyway, for a host whose layout the check does not know.
+    [[ ${MIXER_SKIP_HOST_CHECK:-0} == 1 ]] || "$repo/docker-compose/mixer/host-setup.sh" check ||
+        fail "fix the items above (docker-compose/mixer/host-setup.sh install sets up Ubuntu), then rerun;" \
+             "MIXER_SKIP_HOST_CHECK=1 starts anyway"
     local info pci driver name free render
     info="$(nvidia-smi -i 0 --query-gpu=pci.bus_id,driver_version,name,memory.free --format=csv,noheader,nounits)" ||
         fail "nvidia-smi could not query GPU 0"
