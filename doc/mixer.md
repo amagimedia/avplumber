@@ -142,6 +142,8 @@ for revision-specific evidence and the ranked optimization list.
 
 ## NDI sources
 
+NDI® is a registered trademark of Vizrt NDI AB ([ndi.video](https://ndi.video/)).
+
 A source `{"kind": "ndi", "name": "HOST (stream)", "width": 1920, "height": 1080, "color": "sdr"}` receives that NDI sender with
 FFmpeg's `libndi_newtek` device, which images built with `ENABLE_NDI=1` have (see
 `docker-compose/mixer/deploy/l4/README.md` for the discovery service). `extra_ips` lists addresses to
