@@ -51,6 +51,10 @@ runs their writers beside the mixer and holds their flows in its own `/dev/shm` 
 
 ## Optional NDI input
 
+NDI® is a registered trademark of Vizrt NDI AB ([ndi.video](https://ndi.video/)). The NDI SDK and its runtime are proprietary and licensed by Vizrt under the SDK's own terms, which
+`setup-ndi.sh` accepts for you: an image built with `ENABLE_NDI=1` contains the NDI runtime and must not
+be pushed to a public registry or redistributed.
+
 Set `ENABLE_NDI=1` in the L4 stack's `.env`. On the Ubuntu L4 host run:
 
 ```sh

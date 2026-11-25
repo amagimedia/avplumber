@@ -226,6 +226,8 @@ Get current playback speed of the team `team_name`.
 
 ### Teams synchronization
 
+Across hosts: [host sync](host-sync.md) (`realtime.team.sync`, `realtime.team.source_shift`, `clock.info`).
+
 ```team.link<Pause> pause-team-A pause-team-B```
 ```team.link<Speed> speed-team-A speed-team-B```
 ```team.link<RealTime> realtime-team-A realtime-team-B```
