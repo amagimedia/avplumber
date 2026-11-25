@@ -180,6 +180,32 @@ RUN case "$ENABLE_NDI" in \
 RUN dnf -y install --setopt=install_weak_deps=False opus-devel \
     && dnf clean all
 
+# Replay recordings encode with libx264 on the CPU, so the show's NVENC sessions
+# stay with the program and WebRTC outputs. Fedora carries no x264 package and
+# RPM Fusion publishes no Fedora 44 repository, so build the pinned upstream
+# stable commit. PIC keeps the static archive usable, the shared library is what
+# FFmpeg links and the runtime image copies.
+ARG X264_COMMIT=b35605ace3ddf7c1a5d67a2eb553f034aef41d55
+RUN git init --quiet /tmp/x264 \
+    && git -C /tmp/x264 remote add origin https://code.videolan.org/videolan/x264.git \
+    && git -C /tmp/x264 fetch --quiet --depth 1 origin "$X264_COMMIT" \
+    && git -C /tmp/x264 checkout --quiet --detach FETCH_HEAD \
+    && test "$(git -C /tmp/x264 rev-parse HEAD)" = "$X264_COMMIT" \
+    && cd /tmp/x264 \
+    && ./configure \
+        --prefix=/usr/local \
+        --libdir=/usr/local/lib \
+        --enable-shared \
+        --enable-static \
+        --enable-pic \
+        --disable-cli \
+        --disable-opencl \
+    && make -j"${BUILD_JOBS}" \
+    && make install \
+    && test -f /usr/local/lib/pkgconfig/x264.pc \
+    && ldconfig \
+    && rm -rf /tmp/x264
+
 # FFmpeg's CUDA filters as fatbins with machine code for T4 (sm_75), A100 (sm_80),
 # A10 (sm_86) and L4 (sm_89), as the Makefile does for AVP's own kernels, plus
 # compute_89 PTX for newer GPUs. PTX alone made the driver JIT-compile every filter
@@ -195,7 +221,8 @@ RUN dnf -y install --setopt=install_weak_deps=False opus-devel \
 RUN cd /tmp/ffmpeg \
     && grep -q 'nvccflags="$nvccflags -ptx"' configure \
     && sed -i 's/nvccflags="$nvccflags -ptx"/nvccflags="$nvccflags -fatbin"/' configure \
-    && if [ "${WITH_MXL}" = 1 ]; then mxl=--enable-libmxl; export PKG_CONFIG_PATH=/opt/mxl/pkgconfig; else mxl=; fi \
+    && export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH} \
+    && if [ "${WITH_MXL}" = 1 ]; then mxl=--enable-libmxl; export PKG_CONFIG_PATH=/opt/mxl/pkgconfig:$PKG_CONFIG_PATH; else mxl=; fi \
     && if [ "${ENABLE_NDI}" = 1 ]; then \
            ndi=--enable-libndi_newtek; \
            export C_INCLUDE_PATH=/opt/ndi/6.4/include LIBRARY_PATH=/opt/ndi/6.4/lib; \
@@ -215,6 +242,7 @@ RUN cd /tmp/ffmpeg \
         --enable-ffnvcodec \
         --enable-libdrm \
         --enable-libopus \
+        --enable-libx264 \
         --enable-nvdec \
         --enable-nvenc \
         --disable-libnpp \
@@ -247,7 +275,7 @@ RUN cd /tmp/ffmpeg \
 # Scene, wipe and key composition use AVP nodes.
 RUN ffmpeg="/usr/local/bin/ffmpeg -hide_banner" \
     && for f in scale_cuda tonemap_cuda; do $ffmpeg -filters | grep -q " $f " || exit 1; done \
-    && for e in h264_nvenc hevc_nvenc libopus; do $ffmpeg -encoders | grep -q " $e " || exit 1; done \
+    && for e in h264_nvenc hevc_nvenc libopus libx264; do $ffmpeg -encoders | grep -q " $e " || exit 1; done \
     && $ffmpeg -decoders | grep -q ' h264_cuvid ' \
     && $ffmpeg -hwaccels | grep -qx cuda \
     && $ffmpeg -buildconf | grep -q -- '--enable-libdrm' \
@@ -385,7 +413,7 @@ WORKDIR /build
 
 COPY --from=builder /etc/ld.so.conf.d/avplumber.conf /etc/ld.so.conf.d/
 COPY --from=builder /usr/local/bin/ffmpeg /usr/local/bin/ffprobe /usr/local/bin/
-COPY --from=builder /usr/local/lib/libav*.so* /usr/local/lib/libsw*.so* /usr/local/lib/
+COPY --from=builder /usr/local/lib/libav*.so* /usr/local/lib/libsw*.so* /usr/local/lib/libx264.so.* /usr/local/lib/
 COPY --from=builder /opt/tensorrt /opt/tensorrt
 COPY --from=builder /opt/mxl /opt/mxl
 COPY --from=builder /opt/ndi/6.4/lib /opt/ndi/6.4/lib
