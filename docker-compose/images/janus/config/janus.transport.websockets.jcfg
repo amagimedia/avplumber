@@ -2,6 +2,7 @@ general: {
 	json = "compact"
 	ws = true
 	ws_port = __JANUS_WS_PORT__
+	ws_ip = "127.0.0.1"
 	wss = false
 }
 

@@ -3,7 +3,8 @@ general: {
 	base_path = "/janus"
 	http = true
 	port = __JANUS_HTTP_PORT__
-	ip = "0.0.0.0"
+	# Loopback only: the preview server, the mixer and the L4 proxy reach the API on this host.
+	ip = "127.0.0.1"
 	https = false
 }
 
