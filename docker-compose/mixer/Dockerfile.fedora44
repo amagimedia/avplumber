@@ -243,6 +243,7 @@ RUN cd /tmp/ffmpeg \
         --enable-libdrm \
         --enable-libopus \
         --enable-libx264 \
+        --enable-openssl \
         --enable-nvdec \
         --enable-nvenc \
         --disable-libnpp \
