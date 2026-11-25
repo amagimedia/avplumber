@@ -46,6 +46,8 @@ services:
       JANUS_HTTP_PORT: ${JANUS_HTTP_PORT:-8088}
       JANUS_WS_PORT: ${JANUS_WS_PORT:-8188}
       JANUS_PREVIEW_PORT: ${JANUS_PREVIEW_PORT:-8080}
+      # The player has no authentication either: this machine only unless JANUS_PREVIEW_BIND=0.0.0.0.
+      JANUS_PREVIEW_BIND: ${JANUS_PREVIEW_BIND:-127.0.0.1}
 
   wayland:
     build:
