@@ -68,7 +68,7 @@ check() {
             bad "Docker Compose v2 missing (Ubuntu: docker-compose-v2)"
         # The runtime names, not `index .Runtimes "nvidia"`: a missing key gives an empty struct, which
         # a template's `if` takes as true.
-        docker info --format '{{range $name, $runtime := .Runtimes}}{{$name}} {{end}}' 2>/dev/null | grep -qw nvidia &&
+        [[ " $(docker info --format '{{range $name, $runtime := .Runtimes}}{{$name}} {{end}}' 2>/dev/null) " == *" nvidia "* ]] &&
             ok "NVIDIA Container Toolkit runtime" ||
             bad "Docker has no nvidia runtime: install nvidia-container-toolkit and run" \
                 "'sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker'"
