@@ -327,7 +327,7 @@ when sources of another format leave more than `park_limit` behind, or for the p
 See `dec_video` in [NODES.md](NODES.md).
 
 The `nvidia_l4_cuarray` profile selects `source_fan_out: "event_loop"`,
-`decoded_frames_ahead: 1`, and 8 ms Program/AUX input polling. Fan-out then runs
+`decoded_frames_ahead: 1`, and 16 ms Program/AUX input polling. Fan-out then runs
 on the source's pacing loop instead of a dedicated thread. Its nonblocking node
 requires `drop: true`: a full destination loses that destination's frame rather
 than blocking the shared loop. Coalesced edge signals and event-loop registrations
@@ -464,7 +464,8 @@ Profiling adds load, so read its numbers for causes, not capacity.
 | `src/nodes/hwaccel/cuda_rect_draw.{hpp,cpp}`, `cuda_rect_scale.cu` | kernel module, canvas clear, per-layer draw |
 | `src/mixer/primitives/compositor_layers.hpp`, `pixel_layout.hpp`, `compositor_geometry.hpp` | layer parsing and draw-op resolution, format geometry, placement (pure; geometry and layout unit-tested) |
 
-The mixer carries video frames only. It has no audio routing, VAD, speaker
+The video graph carries video frames only; audio follows video in the audio mixer
+([mixer_audio_follow_video.md](mixer_audio_follow_video.md)). It has no VAD, speaker
 selection, face tracking, or camera policy.
 
 ## Backend boundary and lifetime
