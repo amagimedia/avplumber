@@ -3,8 +3,8 @@
 [Quick start](../../../../demos/mixer/README.md) · [Capacity](../../../../demos/mixer/docs/capacity.md#nvidia-l4-16-vcpu-nvidia_l4_cuarray) ·
 [HTML cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/)
 
-For an RTX 5080 or 5090, the [desktop launcher](../../../../demos/mixer/README.md#rtx-5080-and-5090-desktops)
-uses this stack with a 96-input first show and its own media directory.
+For a GeForce desktop, the [desktop launcher](../../../../demos/mixer/README.md#geforce-desktops)
+uses this stack with a first show sized to the GPU and its own media directory.
 
 The L4 preset requires a Linux L4 host with working NVIDIA DRM/GBM/EGL, R615+ driver,
 Docker Compose and NVIDIA Container Toolkit. The measured host has 16 vCPUs,

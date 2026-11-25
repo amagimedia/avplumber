@@ -31,8 +31,14 @@ export MIXER_RECIPE=/media/demo.json
 export MIXER_MEDIA_DIR="${MIXER_MEDIA_DIR:-$repo/media}"
 export MIXER_SEED_SETTINGS=/initial-settings.json
 if [[ "$MIXER_INSTANCE_TYPE" = geforce && -z "${MIXER_INITIAL_SETTINGS:-}" ]]; then
-    export MIXER_SEED_SETTINGS=low
+    export MIXER_SEED_SETTINGS=fit   # the largest desktop show this GPU carries
 fi
+# GPU 0 for the seed, which has no GPU of its own, and for Setup's desktop sizes.
+if [[ -z "${MIXER_GPU:-}" ]] && command -v nvidia-smi >/dev/null; then
+    MIXER_GPU=$(nvidia-smi -i 0 --query-gpu=name,compute_cap,memory.total,memory.free \
+        --format=csv,noheader,nounits 2>/dev/null || true)
+fi
+export MIXER_GPU="${MIXER_GPU:-}"
 export MIXER_INITIAL_SETTINGS="${MIXER_INITIAL_SETTINGS:-$here/settings.json}"
 export MIXER_AUTH_REALM=off
 if [[ -n "${MIXER_HTPASSWD:-}" ]]; then

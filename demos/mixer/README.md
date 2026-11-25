@@ -66,9 +66,13 @@ output before asset preparation and restarts the mixer afterward. Synthetic
 clip generation uses NVENC and must not compete with the live show for GPU
 memory. Cached clips are reused. Keep that directory writable and mount it
 whole: Setup atomically replaces the generated show. Capacity comes from the
-selected [instance profile](instance_profiles.py), not a universal source limit.
+[instance profile](instance_profiles.py), not a universal source limit. Setup picks it from the GPU:
+a T4 or L4 gets its measured profile, any other GPU the [GeForce sizes](#geforce-desktops);
+`MIXER_INSTANCE_TYPE` overrides the choice.
 
-### RTX 5080 and 5090 desktops
+### GeForce desktops
+
+RTX 20, 30, 40 and 50 series cards, and other GPUs without a measured profile.
 
 Use native x86-64 Linux, Docker Compose and the NVIDIA Container Toolkit.
 **R615 is the minimum host driver for the desktop image. R620 runs the same
@@ -96,26 +100,31 @@ cd avplumber
 ./demos/mixer/desktop.sh
 ```
 
-First start builds the remaining images and generates the Low show. The desktop
+First start builds the remaining images and generates the largest show Setup suggests for the
+GPU (below). The desktop
 build leaves the optional MXL SDK disabled (`WITH_MXL=0`). Open
 <http://127.0.0.1:7681/setup/> to follow preparation. When it says **Mixer ready**,
 open the [controls](http://127.0.0.1:7681/), [wall](http://127.0.0.1:7681/wall)
-or [live graph](http://127.0.0.1:7681/graph/). To change the load, choose
-**Low** or **High**, then **Apply setup**. Both are
-1920×1080p25 SDR shows with 256 scenes, four downstream keys, Program and
-clean Program, Program/Preview and Multiviewer. You can lower **Unique sources**
+or [live graph](http://127.0.0.1:7681/graph/). To change the load, choose a size, then
+**Apply setup**. Every size is a 1920×1080p25 SDR show with up to 256 scenes, four downstream keys,
+Program and clean Program, Program/Preview and Multiviewer. You can lower **Unique sources**
 before applying. The launcher keeps shows and the CUDA JIT cache in
 `media/desktop/` across restarts.
 
-| Preset | Total inputs | HEVC decoded | Raw NV12 | Browser scene sources | Browser keys |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Low | 96 | 60 | 16 | 16 | 4 |
-| High | 192 | 120 | 32 | 36 | 4 |
+| Size | HEVC decoded | Raw NV12 | Browser scene sources | Browser keys |
+| ---: | ---: | ---: | ---: | ---: |
+| 24 | 15 | 4 | 1 | 4 |
+| 48 | 30 | 8 | 6 | 4 |
+| 96 | 60 | 16 | 16 | 4 |
+| 192 | 120 | 32 | 36 | 4 |
 
-Setup suggests High with at least 20 GiB free on a
-single visible GPU at startup. Otherwise it suggests Low. The 192-input,
-26-output L4 reference run peaked at 19,295 MiB on a card reporting
-23,034 MiB usable. Desktop throughput and peak memory remain unmeasured.
+Setup reads GPU 0's name and free VRAM, looks up its NVDEC and NVENC engines in
+[NVIDIA's support matrix](https://developer.nvidia.com/video-encode-decode-support-matrix)
+(`gpu_engines.json`) and suggests the largest size that fits. The limits scale a measured
+reference by those engines and the free memory, never above it: the T4 for Turing and Ampere
+cards, the L4 for Ada and newer. The 192-input, 26-output L4 reference run peaked at 19,295 MiB.
+An RTX 5080 (2 NVDEC, 16 GB) gets 96, an 8 GB RTX 4060 48, an RTX 3060 24. A T4 or L4 keeps its
+own measured profile. The sizes are estimates: desktop throughput and peak memory remain unmeasured.
 The driver allows 12 concurrent GeForce encode sessions per system, shared
 with other applications. [L4 measurements](https://amagimedia.github.io/avplumber/demos/mixer/docs/capacity-l4.json) ·
 [NVIDIA session limits](https://developer.nvidia.com/video-encode-decode-support-matrix)
