@@ -710,7 +710,7 @@ through both switches. `repair_grace_ms=120` is still used so the selector does
 not skip a status-only repair slot before the repaired H.264 payload arrives.
 ```
 
-## 13. Encoder Latency, NBA Source, H.264 Intra QP8 vs NVJPEG Q99
+## 13. Encoder Latency, Sports Source, H.264 Intra QP8 vs NVJPEG Q99
 
 Historical measurement note from the redundancy spike. The standalone latency
 probe graphs are intentionally not part of this clean fabric branch.
@@ -718,7 +718,7 @@ probe graphs are intentionally not part of this clean fabric branch.
 Common source:
 
 ```text
-nba.mp4
+sports.mp4
 1920x1080
 30000/1001 fps
 NVDEC CUDA/NV12 before encode
@@ -753,7 +753,7 @@ avg_mbit: 231.688
 Interpretation:
 
 ```text
-At near-lossless settings on the NBA source, NVJPEG Q99 encoded about 5.5x
+At near-lossless settings on the sports source, NVJPEG Q99 encoded about 5.5x
 faster than H.264 intra QP8 in this probe, but used slightly more payload
 bitrate. H.264 intra remains much more container/player friendly; NVJPEG is
 lower latency and simpler for frame-granular failover.
