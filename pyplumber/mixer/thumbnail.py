@@ -1,11 +1,13 @@
-"""Three fixed source atlases for clients that crop thumbnails from WebRTC video."""
+"""Source atlases of 64 sources each for clients that crop thumbnails from WebRTC video."""
 
 from copy import deepcopy
 import re
 
+from pyplumber.composition.nodes import MAX_INPUTS
+
 PRESET = "source_thumbnails"
-BANKS = 3
 PER_BANK = 64
+BANKS = -(-MAX_INPUTS // PER_BANK)   # enough banks for every source pad
 WIDTH, HEIGHT, FPS = 1024, 576, 15
 
 

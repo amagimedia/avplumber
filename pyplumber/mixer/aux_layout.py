@@ -84,7 +84,7 @@ def parse_layout(cfg, spec):
     if preset == thumbnail.PRESET and set(spec) <= {"preset", "page", "size"}:
         page = spec.get("page", 0)
         if not (_integer(page) and 0 <= page < thumbnail.BANKS):
-            raise ConfigError("source_thumbnails page must be 0, 1 or 2")
+            raise ConfigError(f"source_thumbnails page must be 0 to {thumbnail.BANKS - 1}")
         if "size" not in spec:
             return {"preset": preset, "page": page}
         try:
