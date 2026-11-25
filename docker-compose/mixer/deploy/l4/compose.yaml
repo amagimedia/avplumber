@@ -89,6 +89,8 @@ services:
     restart: unless-stopped
     depends_on: [mixer, janus-preview, graph]
     environment:
+      # 0.0.0.0 on a server (with MIXER_HTPASSWD); desktop.sh keeps the page on this machine.
+      MIXER_PUBLIC_BIND: ${MIXER_PUBLIC_BIND:-0.0.0.0}
       MIXER_PUBLIC_PORT: ${MIXER_PUBLIC_PORT:-7681}
       MIXER_HTTP_PORT: ${MIXER_HTTP_PORT}
       MIXER_PREVIEW_PORT: ${JANUS_PREVIEW_PORT}

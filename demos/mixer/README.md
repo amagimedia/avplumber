@@ -132,6 +132,8 @@ with other applications. [L4 measurements](https://amagimedia.github.io/avplumbe
 The launcher selects GPU 0's NVIDIA render node for both Wayland and Chromium.
 It advertises the default network interface's IPv4 address for WebRTC. Set
 `JANUS_HOST_IP` to the desktop's LAN address if the default route uses a VPN.
+The page has no password, so the launcher serves it on 127.0.0.1 only; set
+`MIXER_PUBLIC_BIND=0.0.0.0` to open it to the LAN.
 Use `./demos/mixer/desktop.sh check` for the host prerequisite checks alone.
 
 The raw NV12 inputs in both presets keep their loops in page-locked host RAM.
