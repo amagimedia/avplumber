@@ -9,7 +9,7 @@ import pytest
 SCRIPT = Path(__file__).resolve().parents[1] / "docker-compose/mixer/host-setup.sh"
 
 
-def check(tmp_path, driver="615.71.09", runtime="yes"):
+def check(tmp_path, driver="615.71.09", runtime="runc nvidia "):
     stubs = tmp_path / "bin"
     stubs.mkdir()
     scripts = {
@@ -39,7 +39,7 @@ def test_an_older_driver_is_refused_with_the_fix(tmp_path, driver):
 
 
 def test_docker_without_the_nvidia_runtime_names_the_command(tmp_path):
-    out = check(tmp_path, runtime="").stdout
+    out = check(tmp_path, runtime="io.containerd.runc.v2 runc ").stdout
     assert "FIX   Docker has no nvidia runtime" in out and "nvidia-ctk runtime configure" in out
 
 
