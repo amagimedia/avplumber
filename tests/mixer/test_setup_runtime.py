@@ -1865,3 +1865,28 @@ def test_ndi_senders_report_full_names_that_the_setup_puts_in_the_show_before_th
     manager._start(config)
     manager._stop()
     assert events == ["writers start", "mixer start", "mixer stop", "writers stop"]
+
+
+def test_a_running_show_puts_back_mountpoints_a_restarted_janus_lost(runtime, monkeypatch):
+    runtime.janus_api = "http://127.0.0.1:8088/janus"
+    show, _, _ = prepare_demo.plan(recipe_for(T4, KEYED), runtime.media_dir)
+    (runtime.media_dir / "mixer.demo.json").write_text(json.dumps(show))
+    calls = []
+    monkeypatch.setattr("pyplumber.mixer.gui.setup_runtime.janus_mountpoints.sync",
+                        lambda api, specs, prune=False, replace=False: calls.append((sorted(specs), prune, replace)))
+    runtime.resync_mountpoints()
+    assert calls == []   # not running yet
+    runtime.phase = "running"
+    runtime.resync_mountpoints()
+    assert len(calls) == 1 and "sdr" in calls[0][0] and calls[0][1:] == (False, False)   # create only
+
+
+def test_mountpoint_resync_survives_janus_being_down(runtime, monkeypatch):
+    runtime.janus_api = "http://127.0.0.1:8088/janus"
+    (runtime.media_dir / "mixer.demo.json").write_text(json.dumps(prepare_demo.plan(recipe_for(T4, KEYED), runtime.media_dir)[0]))
+    runtime.phase = "running"
+    def down(*args, **kwargs):
+        raise ConnectionRefusedError(111, "Connection refused")
+    monkeypatch.setattr("pyplumber.mixer.gui.setup_runtime.janus_mountpoints.sync", down)
+    runtime.resync_mountpoints()   # logged, not raised
+    assert runtime.status()["phase"] == "running"
