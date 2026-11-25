@@ -134,7 +134,9 @@ cards, the L4 for Ada and newer. The 192-input, 26-output L4 reference run peake
 An RTX 5080 (2 NVDEC, 16 GB) gets 96, an 8 GB RTX 4060 48, an RTX 3060 24. A T4 or L4 keeps its
 own measured profile. The sizes are estimates for GeForce cards. On 2026-11-25 `desktop.sh` ran the 192-input show on an
 RTX PRO 6000 Blackwell (GCP G4, driver 620.70.10) with no missed deadline, decoders at 46% and
-17 GB of VRAM, and 48 inputs on a T4.
+17 GB of VRAM, and 48 inputs on a T4. Told it was an RTX 5080 (2 NVDEC, 2 NVENC, 16 GB), Setup
+suggested 96 inputs; on the Blackwell card that show peaked at 9.0 GB of VRAM with 4 encode sessions
+and about 45% of two decoders' worth of NVDEC, with no missed deadline.
 The driver allows 12 concurrent GeForce encode sessions per system, shared
 with other applications. [L4 measurements](https://amagimedia.github.io/avplumber/demos/mixer/docs/capacity-l4.json) ·
 [NVIDIA session limits](https://developer.nvidia.com/video-encode-decode-support-matrix)
