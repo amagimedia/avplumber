@@ -77,8 +77,8 @@ a T4 or L4 gets its measured profile, any other GPU the [GeForce sizes](#geforce
 RTX 20, 30, 40 and 50 series cards, and other GPUs without a measured profile.
 
 Use native x86-64 Linux, Docker Compose and the NVIDIA Container Toolkit.
-**R615 is the minimum host driver for the desktop image. R620 runs the same
-image.** The build uses CUDA Toolkit 13.4. At runtime the Container Toolkit
+**R615 is the minimum host driver for the desktop image.** R620 is expected to run the
+same image (not yet run). The build uses CUDA Toolkit 13.4. At runtime the Container Toolkit
 mounts the installed host driver libraries. The host needs no CUDA Toolkit.
 
 | Linux driver | CUDA version reported by the driver | Desktop mixer image |
