@@ -40,7 +40,9 @@ own mixer. The portable L4 deployment exposes it through the controls' **Graph**
 
 Use a Linux NVIDIA host with NVDEC/NVENC, Docker Compose, NVIDIA Container
 Toolkit and DRM/EGL/GBM for browser capture. Start from a recursive checkout;
-see [host setup](../README.md#nvidia-host-setup).
+`docker-compose/mixer/host-setup.sh check` lists anything missing with its fix, and
+`sudo docker-compose/mixer/host-setup.sh install` sets up Ubuntu 24.04/26.04
+([host setup](../README.md#nvidia-host-setup)).
 
 ```sh
 docker compose -f docker-compose/mixer/compose.yaml up --build

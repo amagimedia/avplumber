@@ -11,7 +11,10 @@ clips, and its UI-only preview works without a GPU.
 
 Use a Linux x86-64 host with Docker, Docker Compose, an NVIDIA driver, and the
 [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
-Follow that guide to enable Docker GPU access, then check:
+For the mixer, [`host-setup.sh`](../docker-compose/mixer/host-setup.sh) checks every piece on any
+desktop, server or cloud (`docker-compose/mixer/host-setup.sh check`, each missing item with its fix)
+and installs them on Ubuntu 24.04/26.04 (`sudo docker-compose/mixer/host-setup.sh install`, plus
+`--driver <version>` for a pinned R615+ driver on 26.04). Otherwise follow the toolkit guide, then check:
 
 ```sh
 nvidia-smi
