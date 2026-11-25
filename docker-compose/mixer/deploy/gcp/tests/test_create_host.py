@@ -91,7 +91,7 @@ class CreateHostTests(unittest.TestCase):
         self.assertEqual(args[args.index("--image-project") + 1], "ubuntu-os-cloud")
         self.assertEqual(args[args.index("--boot-disk-size") + 1], "256GB")
         metadata = args[args.index("--metadata") + 1]
-        for value in ("host-mode=install", "driver-version=615.71.09",
+        for value in ("host-mode=install", "driver-version=620.70.10",
                       "disable-mitigations=0", "disable-auto-upgrades=0"):
             self.assertIn("avplumber-" + value, metadata)
 

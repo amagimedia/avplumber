@@ -77,15 +77,19 @@ a T4 or L4 gets its measured profile, any other GPU the [GeForce sizes](#geforce
 RTX 20, 30, 40 and 50 series cards, and other GPUs without a measured profile.
 
 Use native x86-64 Linux, Docker Compose and the NVIDIA Container Toolkit.
-**R615 is the minimum host driver for the desktop image.** R620 is expected to run the
-same image (not yet run). The build uses CUDA Toolkit 13.4. At runtime the Container Toolkit
+**R615 is the minimum host driver for the desktop image;** 620.70.10 ran the desktop show on a
+T4 on 2026-11-25. The build uses CUDA Toolkit 13.4. At runtime the Container Toolkit
 mounts the installed host driver libraries. The host needs no CUDA Toolkit.
 
 | Linux driver | CUDA version reported by the driver | Desktop mixer image |
 | --- | --- | --- |
 | R595 | 13.2 | Below the minimum for Blackwell PTX and the pinned video codec API |
 | R615 | 13.4 | Meets the minimum |
-| R620 | 13.5 | Runs the CUDA 13.4 build through driver backward compatibility |
+| R620 | 13.5 | Runs the CUDA 13.4 build (620.70.10 run on a T4) |
+
+Ubuntu 26.04's 7.0.0-1014 kernels do not build the NVIDIA 615 or 620 module yet, and the boot
+loader starts the newest kernel: `docker-compose/mixer/host-setup.sh check` flags one without the
+module. Remove it and hold kernel updates until NVIDIA supports it.
 
 On the RTX 5080 and 5090 the driver compiles the image's CUDA 13.4 PTX on
 first use. FFmpeg also uses Video Codec SDK 13.1 headers, which require
