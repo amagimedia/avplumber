@@ -1537,7 +1537,7 @@ frame at that timestamp repeats its previous one. Upstream owns pacing. The
 mixer's clocked compositor is [`mixer_compositor`](#mixer_compositor), its
 downstream keyer [`mixer_keyer`](#mixer_keyer).
 
-N inputs: CUDA `av::VideoFrame` (`src`, at most 193), 1 output: CUDA `av::VideoFrame` with software format `sw_format`
+N inputs: CUDA `av::VideoFrame` (`src`, at most 256), 1 output: CUDA `av::VideoFrame` with software format `sw_format`
 
 Parameters:
 -   `hwaccel` (string, required) - CUDA device created with `hwaccel.init`

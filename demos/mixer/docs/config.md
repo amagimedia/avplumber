@@ -207,7 +207,7 @@ Each bus has an `id`, layouts, scene assignments and Janus renditions (`port`, o
 
 ## Known limitations
 
-- **193 sources per show, or 192 with an aux bus that can draw the program.** Every
+- **256 sources per show, or 255 with an aux bus that can draw the program.** Every
   source is a pad on the compositor; a bus with a `pgm` cell in its `layout` or
   `layouts` (by default, a `pgm_pvw_grid` bus) reserves one additional pad for PGM. 8-bit or 10-bit makes no difference;
   scenes and aliases are free. Sources cannot be added while running: the
@@ -222,7 +222,7 @@ Each bus has an `id`, layouts, scene assignments and Janus renditions (`port`, o
   every rendition is 4:2:0.
 - **HLG and PQ need a 10-bit canvas.** Browser pages are SDR only.
 
-More than 193 pads and runtime source addition are not supported.
+More than 256 pads and runtime source addition are not supported.
 
 ## Generating one
 
