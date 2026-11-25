@@ -424,8 +424,10 @@ WORKDIR /build
 
 COPY --from=builder /etc/ld.so.conf.d/avplumber.conf /etc/ld.so.conf.d/
 COPY --from=builder /usr/local/bin/ffmpeg /usr/local/bin/ffprobe /usr/local/bin/
-# The module links nvJPEG (from the toolkit) and nvJPEG2000 (its own versioned dir);
-# the runtime carries no toolkit, so both land beside FFmpeg in /usr/local/lib.
+# The module links nvJPEG (from the toolkit) and nvJPEG2000 (its own versioned dir), and the
+# nvJPEG nodes link the CUDA runtime; the runtime carries no toolkit, so the three libraries
+# land beside FFmpeg in /usr/local/lib. Nothing else from the toolkit may be linked.
+COPY --from=builder /usr/local/cuda-${CUDA_VERSION}/targets/x86_64-linux/lib/libcudart.so.13* /usr/local/lib/
 COPY --from=builder /usr/local/cuda-${CUDA_VERSION}/targets/x86_64-linux/lib/libnvjpeg.so.13* /usr/local/lib/
 COPY --from=builder /usr/lib64/libnvjpeg2k/13/libnvjpeg2k.so.0* /usr/local/lib/
 COPY --from=builder /usr/local/lib/libav*.so* /usr/local/lib/libsw*.so* /usr/local/lib/libx264.so.* /usr/local/lib/
@@ -439,9 +441,9 @@ COPY demos/mixer /build/demos/mixer
 COPY demos/mixer_audio /build/demos/mixer_audio
 COPY docker-compose/mixer/deploy/l4/seed.py /build/docker-compose/mixer/deploy/l4/seed.py
 
-# CUDA is loaded through the driver at run time (deps/cuda_loader, ffnvcodec),
-# so nothing here may link a CUDA toolkit library: "not found" means a build
-# flag drifted (HAVE_NVJPEG, libnpp).
+# CUDA is loaded through the driver at run time (deps/cuda_loader, ffnvcodec); the
+# exception is the CUDA runtime the nvJPEG nodes link, copied above. "not found" here
+# means a build flag drifted.
 # import _avplumber loads the native module (import pyplumber is lazy), so
 # unresolved symbols fail here rather than at the first mixer start.
 # libndi needs Avahi's client library for source discovery.
