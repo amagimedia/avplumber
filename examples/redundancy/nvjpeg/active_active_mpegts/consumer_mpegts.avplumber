@@ -12,6 +12,6 @@ node.add { "type": "fabric_source", "dst": "v_fabric_b", "group": "rx", "name": 
 node.add { "type": "redundancy_selector", "src": ["v_fabric_a", "v_fabric_b"], "dst": "v_selected_fabric", "group": "rx", "name": "JpegTimelineSelector", "mode": "active_active", "anchor_replica_id": 1, "standby_replica_id": 2, "alignment_mode": "strict_frame_identity", "alignment_window_frames": 50, "alignment_required_frames": 10, "alignment_max_wallclock_delta_ms": 120, "playout_delay_frames": 1 }
 node.add { "type": "fabric_unpack", "src": "v_selected_fabric", "dst": "v_relayed_pkt", "group": "rx", "name": "UnpackSelectedJpegPackets", "auto_restart": "panic" }
 node.add { "type": "mux", "src": ["v_relayed_pkt"], "dst": "v_muxed", "group": "rx", "name": "MuxMpegTs", "auto_restart": "panic", "ts_sort_wait": 0 }
-node.add { "type": "output", "src": "v_muxed", "format": "mpegts", "url": "/home/fedora/out_nvjpeg_active_active_2switch.ts", "group": "rx", "name": "OutMpegTsJpegSelector", "auto_restart": "panic" }
+node.add { "type": "output", "src": "v_muxed", "format": "mpegts", "url": "out_nvjpeg_active_active_2switch.ts", "group": "rx", "name": "OutMpegTsJpegSelector", "auto_restart": "panic" }
 
 group.start rx
