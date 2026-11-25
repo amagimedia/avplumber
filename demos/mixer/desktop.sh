@@ -10,6 +10,8 @@ export MIXER_STACK_ENV_FILE=/dev/null
 export MIXER_MEDIA_DIR="${MIXER_MEDIA_DIR:-$repo/media/desktop}"
 export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-avplumber-mixer-desktop}"
 export MIXER_IMAGE_PREFIX="${MIXER_IMAGE_PREFIX:-avplumber-mixer-desktop}"
+# The page has no password: only this machine reaches it unless MIXER_PUBLIC_BIND=0.0.0.0.
+export MIXER_PUBLIC_BIND="${MIXER_PUBLIC_BIND:-127.0.0.1}"
 
 fail() { echo "Desktop mixer: $*" >&2; exit 1; }
 

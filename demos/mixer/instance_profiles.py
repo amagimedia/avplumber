@@ -191,6 +191,48 @@ for limits in geforce["mode_limits"].values():
     limits.pop("nvenc_max_outputs")
 INSTANCE_PROFILES[InstanceType.GEFORCE] = geforce
 
+# Reference points for a GPU without measurements: Turing and Ampere scale from the T4, Ada and
+# newer from the L4 with CUarray decode, by their NVDEC and NVENC counts (gpu_spec, from NVIDIA's
+# support matrix) and the VRAM free at start, and never above the reference. The T4's peak memory
+# was not recorded: its 15 GiB stands in for it. Unmeasured: estimates until a card is measured.
+_REFERENCES = {
+    False: (InstanceType.TESLA_T4, {"nvdec": 2, "nvenc": 1, "peak_mib": 15360}),
+    True: (InstanceType.NVIDIA_L4_CUARRAY, {"nvdec": 4, "nvenc": 2, "peak_mib": 19295}),   # the 192-input peak
+}
+HEADROOM_MIB = 1024
+
+
+def geforce_profile(spec):
+    """The GeForce profile for the GPU *spec* describes (gpu_spec.GpuSpec), or the unscaled one
+    without a spec. The T4 and L4 profiles are never changed."""
+    if spec is None:
+        return INSTANCE_PROFILES[InstanceType.GEFORCE]
+    reference, ref = _REFERENCES[spec.ada_or_newer]
+    shares = {"decode": min(1.0, spec.nvdec / ref["nvdec"]), "encode": min(1.0, spec.nvenc / ref["nvenc"]),
+              "memory": min(1.0, max(0, spec.free_mib - HEADROOM_MIB) / ref["peak_mib"])}
+
+    def scale(table, share):
+        return {key: max(1, int(value * share)) if value else 0 for key, value in table.items()}
+
+    profile = deepcopy(INSTANCE_PROFILES[reference])
+    for limits in (profile, *profile.get("mode_limits", {}).values()):
+        for key, share in (("nvdec_decodes", "decode"), ("nvdec_hdr_decodes", "decode"),
+                           ("nvenc_budget_pct", "encode"), ("sources", "memory"),
+                           ("raw_upload_units", "memory"), ("browser_windows_by_fps", "memory")):
+            if key in limits:
+                limits[key] = scale(limits[key], shares[share])
+        limits.pop("nvenc_max_outputs", None)   # the GeForce session limit below applies
+    profile["browser_windows"] = max(1, int(profile["browser_windows"] * shares["memory"]))
+    if "decoder_pool_budget_mib" in profile.get("canvas", {}):
+        profile["canvas"]["decoder_pool_budget_mib"] = int(profile["canvas"]["decoder_pool_budget_mib"] * shares["memory"])
+    profile["nvenc"]["budget_pct"] = round(profile["nvenc"]["budget_pct"] * shares["encode"])
+    profile["nvenc"]["max_outputs"] = 12
+    profile["reference_profile"] = reference.value
+    profile["scaled_from"] = {"name": spec.name, "nvdec": spec.nvdec, "nvenc": spec.nvenc,
+                              "free_mib": spec.free_mib, "known": spec.known, "reference": reference.value,
+                              **{key: round(share, 3) for key, share in shares.items()}}
+    return profile
+
 
 def mxl_sources(compute_capability):
     """How many of the raw upload units may be MXL inputs on a GPU of this compute capability

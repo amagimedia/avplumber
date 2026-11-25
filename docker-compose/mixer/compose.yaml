@@ -74,7 +74,7 @@ services:
       - --manage-setup
       # Select geforce for the editable desktop workloads or a measured T4/L4 profile.
       - --instance-type
-      - ${MIXER_INSTANCE_TYPE:-tesla_t4}
+      - ${MIXER_INSTANCE_TYPE:-auto}
       - --recipe
       - ${MIXER_RECIPE:-/media/demo.json}
       - --port
