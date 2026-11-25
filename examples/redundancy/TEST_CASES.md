@@ -4,7 +4,7 @@ This file records the redundancy experiments run on the Fedora host against the
 jittered sync-bar SRT inputs. The current useful output path is:
 
 ```text
-rtmp://test-streamer-s3dev.aws-dev.intranet/stream_test/test
+rtmp://127.0.0.1/stream_test/test
 ```
 
 The jittered source generator sends ordered MPEG-TS bytes with roughly 1000 ms
@@ -43,7 +43,7 @@ restart A -> kill B -> A selected
 Result:
 
 ```text
-output: /home/jp/out_active_active_jitter_2switch.mp4
+output: out_active_active_jitter_2switch.mp4
 duration: 33.993s
 packets: 850
 max packet delta: 0.040s
@@ -79,7 +79,7 @@ restart A -> kill B -> A takes over
 Result:
 
 ```text
-output: /home/jp/out_active_standby_same_url_2switch.mp4
+output: out_active_standby_same_url_2switch.mp4
 duration: 33.993s
 packets: 850
 max packet delta: 0.040s
@@ -114,7 +114,7 @@ restart A -> kill B -> A takes over
 Result:
 
 ```text
-output: /home/jp/out_active_standby_two_url_normalized_2switch.mp4
+output: out_active_standby_two_url_normalized_2switch.mp4
 duration: 33.993s
 packets: 850
 max packet delta: 0.040s
@@ -152,7 +152,7 @@ kill A -> try to use B
 Result:
 
 ```text
-output: /home/jp/out_active_standby_restart_election_frag.mp4
+output: out_active_standby_restart_election_frag.mp4
 result: failed quality check
 max packet delta: 12.760s
 bad gaps >60ms: 2
@@ -217,7 +217,7 @@ Recorder note:
 The symmetric restart/election control flow passed in logs, but the local MP4
 recording only captured a short valid fragmented segment:
 
-output: /home/jp/out_active_standby_restart_election_symmetric.mp4
+output: out_active_standby_restart_election_symmetric.mp4
 duration: 5.600s
 packets: 140
 max packet delta: 0.040s
@@ -236,7 +236,7 @@ recording to avoid MP4 finalization problems.
 Output:
 
 ```text
-/home/jp/out_active_standby_restart_election.ts
+out_active_standby_restart_election.ts
 ```
 
 Recorded file:
@@ -321,7 +321,7 @@ fabric_source control PROMOTE replica_id=1 normalized_pts=414653520 raw_pts=4146
 Earlier TS recording before the final sanity-window adjustment:
 
 ```text
-/home/jp/out_active_standby_restart_clean.ts
+out_active_standby_restart_clean.ts
 packets: 169
 duration: 6.720s
 max packet delta: 0.040s
@@ -358,15 +358,15 @@ Observed files:
 
 ```text
 working short MP4:
-  /home/jp/out_active_standby_working_switch.mp4
-  source: /home/jp/out_active_standby_two_url_normalized_2switch.mp4
+  out_active_standby_working_switch.mp4
+  source: out_active_standby_two_url_normalized_2switch.mp4
   packets: 850
   duration: 33.960s
   max packet delta: 0.040s
   bad gaps >60ms: 0
 
 broken TS packet-copy capture:
-  /home/jp/out_active_standby_final_direct.ts
+  out_active_standby_final_direct.ts
 ```
 
 The broken TS had acceptable packet timing, but ffmpeg reported H.264 decode
@@ -409,7 +409,7 @@ same as proving packet-copy encoded-stream failover.
 Use the last working active-standby example as the baseline:
 
 ```text
-/home/jp/out_active_standby_working_switch.mp4
+out_active_standby_working_switch.mp4
 ```
 
 The restart/rejoin/election experiment should remain archived until the H.264
@@ -442,8 +442,8 @@ kill B -> A repairs/promotes and becomes active.
 Output:
 
 ```text
-/home/jp/out_nvjpeg_complicated_restart_rejoin.ts
-remote source: /home/fedora/out_nvjpeg_complicated_restart_rejoin.ts
+out_nvjpeg_complicated_restart_rejoin.ts
+remote source: out_nvjpeg_complicated_restart_rejoin.ts
 duration: 53.480s
 size: 40M
 bitrate: 6195774 bps
@@ -570,8 +570,8 @@ restart A -> kill B -> A selected
 Output copied locally:
 
 ```text
-/home/jp/out_nvjpeg_active_active_2switch_h264.ts
-/home/jp/out_nvjpeg_active_active_2switch_h264_trim.ts
+out_nvjpeg_active_active_2switch_h264.ts
+out_nvjpeg_active_active_2switch_h264_trim.ts
 ```
 
 Result:
@@ -626,7 +626,7 @@ consumer decodes selected JPEG with mjpeg_cuvid and writes H.264 MPEG-TS.
 Output copied locally:
 
 ```text
-/home/jp/out_nvjpeg_active_standby_restart_rejoin.ts
+out_nvjpeg_active_standby_restart_rejoin.ts
 ```
 
 Result:
@@ -674,7 +674,7 @@ consumer packet-relays selected H.264 into MPEG-TS.
 Latest strict frame-identity output copied locally:
 
 ```text
-/home/jp/out_h264_active_standby_strict_identity.ts
+out_h264_active_standby_strict_identity.ts
 ```
 
 Result:
@@ -718,7 +718,7 @@ probe graphs are intentionally not part of this clean fabric branch.
 Common source:
 
 ```text
-/home/fedora/nba.mp4
+nba.mp4
 1920x1080
 30000/1001 fps
 NVDEC CUDA/NV12 before encode
@@ -779,7 +779,7 @@ B: srt://ingest-1-qa.tellyo.com:9000?streamid=output/live/sync2e446f12e
 Output copied locally:
 
 ```text
-/home/jp/out_active_active_simul_start.ts
+out_active_active_simul_start.ts
 ```
 
 Result:
@@ -845,8 +845,8 @@ examples/redundancy/h264_intra/active_active_sync_bars_rtmp/consumer_selector_rt
 Output copied locally:
 
 ```text
-/home/jp/out_active_active_strict_identity.ts
-/home/jp/out_active_active_strict_identity_2switch.ts
+out_active_active_strict_identity.ts
+out_active_active_strict_identity_2switch.ts
 ```
 
 Single-switch result:
