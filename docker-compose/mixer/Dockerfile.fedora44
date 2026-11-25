@@ -46,6 +46,7 @@ RUN dnf -y install --setopt=install_weak_deps=False ca-certificates dnf5-plugins
         git \
         libcurl-devel \
         libdrm-devel \
+        libfabric-devel \
         libglvnd-devel \
         make \
         nasm \
@@ -63,6 +64,8 @@ RUN dnf -y install --setopt=install_weak_deps=False ca-certificates dnf5-plugins
         "cuda-culibos-devel-${cuda_pkg}" \
         "cuda-driver-devel-${cuda_pkg}" \
         "cuda-nvcc-${cuda_pkg}" \
+        "libnvjpeg-devel-${cuda_pkg}" \
+        "libnvjpeg2k0-devel-cuda-${CUDA_VERSION%%.*}" \
         "libnvptxcompiler-${cuda_pkg}" \
         "libnvvm-${cuda_pkg}" \
     && dnf clean all \
@@ -280,6 +283,7 @@ RUN ffmpeg="/usr/local/bin/ffmpeg -hide_banner" \
     && $ffmpeg -decoders | grep -q ' h264_cuvid ' \
     && $ffmpeg -hwaccels | grep -qx cuda \
     && $ffmpeg -buildconf | grep -q -- '--enable-libdrm' \
+    && $ffmpeg -protocols | grep -qw https \
     && $ffmpeg -h filter=transition_cuda \
        | awk '$1 == "mode" && $3 ~ /T/ { m = 1 } $1 == "dip" { d = 1 } $1 == "color" && $3 ~ /T/ { c = 1 } \
               END { exit !(m && d && c) }'
@@ -329,6 +333,7 @@ ARG WITH_TENSORRT
 ARG WITH_MXL
 ARG AVPLUMBER_REVISION=workspace
 ARG BUILD_JOBS=4
+ARG CUDA_VERSION=13.4
 
 WORKDIR /build
 
@@ -355,14 +360,16 @@ RUN set -e; for target in avplumber python_module; do \
         HAVE_GL=1 \
         HAVE_NVOF_FRUC=0 \
         HAVE_NVCC=1 \
-        HAVE_NVJPEG=0 \
+        HAVE_NVJPEG=1 \
+        HAVE_NVJPEG2K=1 \
+        HAVE_LIBFABRIC=1 \
         HAVE_MXL="${WITH_MXL}" \
         HAVE_TENSORRT="${WITH_TENSORRT}" \
         NEURAL_NET="${WITH_TENSORRT}" \
         TENSORRT_ROOT=/opt/tensorrt \
         PKG_CONFIG_PATH=/usr/local/lib/pkgconfig \
-        CXXFLAGS+=" ${HARDENING_FLAGS}" \
-        LFLAGS+=' -Wl,--disable-new-dtags'; \
+        CXXFLAGS+=" ${HARDENING_FLAGS} -I/usr/include/libnvjpeg2k/$(echo "${CUDA_VERSION}" | cut -d. -f1)" \
+        LFLAGS+=" -Wl,--disable-new-dtags -L/usr/lib64/libnvjpeg2k/$(echo "${CUDA_VERSION}" | cut -d. -f1)"; \
     done
 
 RUN test -f /build/_avplumber"$(python3-config --extension-suffix)" \
@@ -370,7 +377,8 @@ RUN test -f /build/_avplumber"$(python3-config --extension-suffix)" \
        | grep -q '/usr/local/lib/libavfilter' \
     && if [ "${WITH_MXL}" = 1 ]; then ldd /build/_avplumber"$(python3-config --extension-suffix)" | grep -q libmxl; fi \
     && for node in ipc_dmabuf_source drm_prime_to_egl_image drm_prime_to_cuda \
-                   egl_image_cuda_overlay; do \
+                   egl_image_cuda_overlay nvjpeg_enc nvjpeg2k_enc nvjpeg2k_dec \
+                   fabric_sink fabric_source; do \
            grep -q "\"${node}\"" /build/graph_factory.python.generated.cpp || exit 1; \
        done \
     && PYTHONPATH=/build python3 -c 'import _avplumber'
@@ -379,6 +387,7 @@ FROM fedora:44 AS runtime
 
 ARG ENABLE_NDI=0
 ARG AVPLUMBER_REVISION=workspace
+ARG CUDA_VERSION=13.4
 
 # glvnd needs an ICD naming the NVIDIA EGL library the container runtime
 # mounts; without it eglInitialize fails and the DMA-BUF browser inputs
@@ -387,6 +396,7 @@ RUN dnf -y install --setopt=install_weak_deps=False \
         boost-thread \
         libcurl \
         libdrm \
+        libfabric \
         libglvnd-egl \
         libglvnd-gles \
         libglvnd-glx \
@@ -414,6 +424,10 @@ WORKDIR /build
 
 COPY --from=builder /etc/ld.so.conf.d/avplumber.conf /etc/ld.so.conf.d/
 COPY --from=builder /usr/local/bin/ffmpeg /usr/local/bin/ffprobe /usr/local/bin/
+# The module links nvJPEG (from the toolkit) and nvJPEG2000 (its own versioned dir);
+# the runtime carries no toolkit, so both land beside FFmpeg in /usr/local/lib.
+COPY --from=builder /usr/local/cuda-${CUDA_VERSION}/targets/x86_64-linux/lib/libnvjpeg.so.13* /usr/local/lib/
+COPY --from=builder /usr/lib64/libnvjpeg2k/13/libnvjpeg2k.so.0* /usr/local/lib/
 COPY --from=builder /usr/local/lib/libav*.so* /usr/local/lib/libsw*.so* /usr/local/lib/libx264.so.* /usr/local/lib/
 COPY --from=builder /opt/tensorrt /opt/tensorrt
 COPY --from=builder /opt/mxl /opt/mxl
