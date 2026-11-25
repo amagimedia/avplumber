@@ -95,7 +95,7 @@ check() {
 }
 
 install() {
-    local driver_version=""
+    local driver_version="" driver_failed=0
     while (( $# )); do
         case "$1" in
             --driver) driver_version="${2:?--driver needs a version such as 620.70.10}"; shift 2 ;;
@@ -107,11 +107,6 @@ install() {
     [[ "$ID:$(uname -m)" == ubuntu:x86_64 && ( $VERSION_ID == 24.04 || $VERSION_ID == 26.04 ) ]] || {
         echo "install supports Ubuntu 24.04 and 26.04 on x86-64; on other systems install the pieces" \
              "'$0 check' lists by hand" >&2; exit 2; }
-    export DEBIAN_FRONTEND=noninteractive
-    apt() { apt-get -o DPkg::Lock::Timeout=600 "$@"; }
-    apt update -q
-    apt install -y -q ca-certificates curl gnupg docker.io docker-compose-v2
-
     if [[ -n $driver_version ]]; then
         [[ $driver_version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && ${driver_version%%.*} -ge $min_driver ]] || {
             echo "--driver must be R$min_driver or newer, such as 620.70.10" >&2; exit 2; }
@@ -122,18 +117,11 @@ install() {
         loaded="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader -i 0 2>/dev/null || true)"
         [[ -z $loaded || $loaded == "$driver_version" ]] || {
             echo "driver $loaded is loaded; remove it before installing $driver_version" >&2; exit 1; }
-        local state=/var/lib/avplumber-host repo=https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2604/x86_64
-        mkdir -p "$state"
-        apt install -y -q "linux-headers-$(uname -r)"
-        curl -fsSL --retry 3 "$repo/cuda-keyring_1.1-1_all.deb" -o "$state/cuda-keyring.deb"
-        echo "f7f474b5f6a4adf987aa587920df00e713285958ef6a913dda1945a544a3099e  $state/cuda-keyring.deb" | sha256sum -c -
-        apt install -y -q "$state/cuda-keyring.deb"
-        apt update -q
-        apt install -y -q "nvidia-driver-pinning-$driver_version"
-        # libnvidia-extra supplies the GBM backend; EGL support alone is insufficient.
-        apt install -y -q nvidia-driver-open nvidia-modprobe libnvidia-decode libnvidia-encode \
-            libnvidia-gl libnvidia-extra
     fi
+    export DEBIAN_FRONTEND=noninteractive
+    apt() { apt-get -o DPkg::Lock::Timeout=600 "$@"; }
+    apt update -q
+    apt install -y -q ca-certificates curl gnupg docker.io docker-compose-v2
 
     curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey |
         gpg --dearmor --yes -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
@@ -150,6 +138,31 @@ install() {
     echo nvidia-drm > /etc/modules-load.d/nvidia-drm.conf
     echo 'options nvidia-drm modeset=1' > /etc/modprobe.d/nvidia-drm-modeset.conf
     update-initramfs -u
+    # The driver last: a kernel it does not build for leaves dpkg half configured for later steps.
+    if [[ -n $driver_version ]]; then
+        local state=/var/lib/avplumber-host repo=https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2604/x86_64
+        mkdir -p "$state"
+        apt install -y -q "linux-headers-$(uname -r)"
+        curl -fsSL --retry 3 "$repo/cuda-keyring_1.1-1_all.deb" -o "$state/cuda-keyring.deb"
+        echo "f7f474b5f6a4adf987aa587920df00e713285958ef6a913dda1945a544a3099e  $state/cuda-keyring.deb" | sha256sum -c -
+        apt install -y -q "$state/cuda-keyring.deb"
+        apt update -q
+        apt install -y -q "nvidia-driver-pinning-$driver_version"
+        # libnvidia-extra supplies the GBM backend; EGL support alone is insufficient.
+        # A kernel the module does not build for leaves dpkg half done: carry on with the rest and say why.
+        apt install -y -q nvidia-driver-open nvidia-modprobe libnvidia-decode libnvidia-encode \
+            libnvidia-gl libnvidia-extra || driver_failed=1
+    fi
+
+    if (( driver_failed )); then
+        local kernel
+        kernel=$(compgen -G "$boot_dir/vmlinuz-*" | sed "s|^$boot_dir/vmlinuz-||" | sort -V | tail -1 || true)
+        echo "The NVIDIA $driver_version module did not build for kernel ${kernel:-$(uname -r)}: Ubuntu 26.04 kernels" \
+             "from 7.0.0-1014 lack dma_buf_move_notify, which drivers 615 and 620 still call (2026-11-25)." >&2
+        echo "Install an earlier kernel (7.0.0-1011-gcp ran 620.70.10), make it the GRUB default, remove the" \
+             "newer ones, run 'sudo dpkg --configure -a', reboot and run this again; or use Ubuntu 24.04." >&2
+        exit 1
+    fi
     echo "Installed. Reboot, then run '$0 check' (as your user) before starting the mixer."
 }
 

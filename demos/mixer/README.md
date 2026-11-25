@@ -87,9 +87,11 @@ mounts the installed host driver libraries. The host needs no CUDA Toolkit.
 | R615 | 13.4 | Meets the minimum |
 | R620 | 13.5 | Runs the CUDA 13.4 build (620.70.10 run on a T4) |
 
-Ubuntu 26.04's 7.0.0-1014 kernels do not build the NVIDIA 615 or 620 module yet, and the boot
-loader starts the newest kernel: `docker-compose/mixer/host-setup.sh check` flags one without the
-module. Remove it and hold kernel updates until NVIDIA supports it.
+Ubuntu 26.04 kernels from 7.0.0-1014 (the fresh GCP image ships 7.0.0-1017) do not build the
+NVIDIA 615 or 620 module (2026-11-25): they lack `dma_buf_move_notify`. Install an earlier kernel
+(7.0.0-1011 ran 620.70.10 on a T4 and an RTX PRO 6000 Blackwell), make it the GRUB default and
+remove the newer ones, or use Ubuntu 24.04. `host-setup.sh check` flags a boot kernel without the
+module and `install` says so instead of failing in dpkg.
 
 On the RTX 5080 and 5090 the driver compiles the image's CUDA 13.4 PTX on
 first use. FFmpeg also uses Video Codec SDK 13.1 headers, which require
@@ -130,7 +132,9 @@ Setup reads GPU 0's name and free VRAM, looks up its NVDEC and NVENC engines in
 reference by those engines and the free memory, never above it: the T4 for Turing and Ampere
 cards, the L4 for Ada and newer. The 192-input, 26-output L4 reference run peaked at 19,295 MiB.
 An RTX 5080 (2 NVDEC, 16 GB) gets 96, an 8 GB RTX 4060 48, an RTX 3060 24. A T4 or L4 keeps its
-own measured profile. The sizes are estimates: desktop throughput and peak memory remain unmeasured.
+own measured profile. The sizes are estimates for GeForce cards. On 2026-11-25 `desktop.sh` ran the 192-input show on an
+RTX PRO 6000 Blackwell (GCP G4, driver 620.70.10) with no missed deadline, decoders at 46% and
+17 GB of VRAM, and 48 inputs on a T4.
 The driver allows 12 concurrent GeForce encode sessions per system, shared
 with other applications. [L4 measurements](https://amagimedia.github.io/avplumber/demos/mixer/docs/capacity-l4.json) ·
 [NVIDIA session limits](https://developer.nvidia.com/video-encode-decode-support-matrix)
