@@ -70,7 +70,8 @@ Open <http://127.0.0.1:8080> after starting a player. The included video-only
 mountpoint accepts the demos' default RTP/RTCP ports, 5004/5005. Run one demo
 output at a time on those ports.
 
-For a remote host open `http://<host>:8080`. Janus offers the default route's address, and on
+The player listens on 127.0.0.1 only (it has no login); for a remote host set
+`JANUS_PREVIEW_BIND=0.0.0.0` and open `http://<host>:8080`. Janus offers the default route's address, and on
 GCE or EC2 the VM's public address; set `JANUS_HOST_IP=<host>` when the browser reaches the host on
 another interface. Allow the preview port 8080 and WebRTC UDP ports 20000–20100 through the host
 firewall; the Janus API stays on loopback behind the preview server.

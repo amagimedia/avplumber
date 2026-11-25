@@ -13,6 +13,14 @@ examples/redundancy/prores4444/
 Each codec folder keeps its own active-active, active-standby, and
 point-to-point fabric demos where available.
 
+## Build
+
+The fabric nodes are opt-in and not in the mixer image. Build avplumber with `HAVE_LIBFABRIC=1`
+and the libfabric development files installed, plus `HAVE_NVJPEG=1` for the JPEG codecs,
+`HAVE_NVJPEG2K=1` (nvJPEG2000) for JPEG 2000 and `HAVE_CUDA_VMM_IPC=1` for the CUDA IPC nodes.
+The examples use the TCP provider on 127.0.0.1; across two hosts set the sender's `remote_host` to
+the receiver. See [the transport documentation](../../doc/fabric-transport.md).
+
 ## H.264 Intra
 
 RTMP demos:
