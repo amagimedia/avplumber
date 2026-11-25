@@ -11,6 +11,7 @@ from ..node import InternalNode
 from .aux_layout import (base_composition, base_sources, check_assignments, count, draws_program, layout_cells,
                          page_count, page_grid, parse_layout, pvw_layouts, pvw_sources)
 from .config import ConfigError, rate_number, rate_pair
+from ..transform import transform_output, transform_params
 from . import thumbnail
 
 
@@ -133,12 +134,24 @@ class AuxBus:
                 "graph": self.mixer.backend.conversion("sdr", storage, source=self.cfg.out_color,
                                           source_format=self.cfg.working_format, tonemap=r.tonemap or "clip"),
             }))
+        extra_renditions = list(self.bus.renditions[1:])
+        primary_edge = converted
+        extra_edges = []
+        if extra_renditions:
+            primary_edge = f"{self.prefix}_primary"
+            extra_edges = [f"{self.prefix}_{extra.id}_feed" for extra in extra_renditions]
+            self.avp.addNode(self.api.Split({
+                "name": f"{self.prefix}_fanout", "src": converted, "dst": [primary_edge, *extra_edges],
+                "group": self.group, "on_error": "off",
+            }))
+            for edge in [primary_edge, *extra_edges]:
+                self.avp.edges.planCapacity(edge, 1)
         if r.target == "mxl":
             from .application import _build_record_output
-            _build_record_output(self.avp, self.api, converted, r, codec=r.codec, enc_format=storage, color={},
+            _build_record_output(self.avp, self.api, primary_edge, r, codec=r.codec, enc_format=storage, color={},
                                  prefix=self.prefix, group=self.group, failure_mode="off")
         self.listener = None if r.target == "mxl" else build_janus_output(
-            self.avp, self.api, converted,
+            self.avp, self.api, primary_edge,
             JanusVideoConfig(host=options.janus_host, video_port=r.port,
                              bitrate_kbps=r.bitrate_kbps, ssrc=options.janus_video_ssrc + r.port,
                              rtcp_bind=options.janus_rtcp_bind, rtcp_port=0,
@@ -147,6 +160,21 @@ class AuxBus:
             codec=r.codec, preset=r.preset, profile=r.profile or ("main" if "hevc" in r.codec else "high"), enc_format="nv12",
             prefix=self.prefix, failure_mode="off", dpb_size=r.dpb_size, edge_capacity=1,
             hold=True)   # MixerApplication releases every output together once the show has settled
+        if extra_renditions:
+            from .application import _build_record_output
+            for extra, feed_edge in zip(extra_renditions, extra_edges):
+                edge = feed_edge
+                if (extra.width, extra.height) != (r.width, r.height):
+                    edge = f"{self.prefix}_{extra.id}_sized"
+                    self.avp.edges.planCapacity(edge, 1)
+                    self.avp.addNode(self.api.CudaTransform(transform_params(
+                        feed_edge,
+                        [transform_output(edge, extra.width, extra.height, sw_format="nv12", drop=True)],
+                        hwaccel=self.hwaccel, name=f"{self.prefix}_{extra.id}_scale",
+                        group=self.group, auto_restart="off", on_error="off")))
+                _build_record_output(self.avp, self.api, edge, extra, codec=extra.codec,
+                                     enc_format="nv12", color={}, output_format=getattr(options, "output_format", None) or "mpegts",
+                                     prefix=f"{self.prefix}_{extra.id}", group=self.group, failure_mode="off")
         # Prefer the mixer's copy: build_application clears it when no has_audio sources
         # remain, while a stale options.audio_router_node would still wire an unfed edge.
         router = getattr(self.mixer, "audio_router_node", None)

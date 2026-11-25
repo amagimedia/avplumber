@@ -750,3 +750,22 @@ def test_exact_rates_parse_and_print():
     for wrong in (29.97, "29.97", "30000/1002", "30/0", 0, 241, True, None):
         with pytest.raises(ConfigError):
             parse_rate(wrong)
+
+
+def test_aux_accepts_streaming_renditions(cfg):
+    """One WebRTC picture plus one encoder per configured streaming rendition, at most canvas size."""
+    spec = bus_json(renditions=[
+        {"id": "monitor", "port": 5010},
+        {"id": "stream0", "target": "udp://224.0.0.1:30400", "width": 640, "height": 360,
+         "fps": "30/1", "bitrate_kbps": 3000},
+    ])
+    bus = parse_aux_buses([spec], cfg)[0]
+    assert [r.id for r in bus.renditions] == ["monitor", "stream0"]
+    assert bus.renditions[1].target == "udp://224.0.0.1:30400"
+    assert (bus.renditions[1].width, bus.renditions[1].height) == (640, 360)
+    with pytest.raises(ConfigError, match="cannot exceed"):
+        parse_aux_buses([bus_json(renditions=[
+            {"id": "monitor", "port": 5010},
+            {"id": "stream0", "target": "udp://224.0.0.1:30400", "width": 1920, "height": 1080,
+             "fps": "30/1", "bitrate_kbps": 3000},
+        ])], cfg)

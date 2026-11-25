@@ -1091,8 +1091,8 @@ def parse_aux_buses(values, cfg):
         timing = _parse_bus_timing(obj, cfg.fps)
         fps = aux_fps(cfg.fps, timing["full_rate"])
         renditions = obj.get("renditions", [])
-        if len(renditions) != 1:
-            raise ConfigError("aux requires one SDR rendition: H.264 or HEVC to Janus, or v210 to MXL")
+        if not isinstance(renditions, list) or not 1 <= len(renditions) <= 9:
+            raise ConfigError("aux requires one SDR WebRTC rendition and up to eight streaming renditions")
         # A monitor needs no more than one reference frame (no B-frames): dpb_size 1 unless set.
         r = _parse_rendition({"codec": "h264_nvenc", "color": "sdr", "dpb_size": 1, **renditions[0]},
                              f"aux {bid}", cfg.canvas_w, cfg.canvas_h, fps)
@@ -1104,9 +1104,30 @@ def parse_aux_buses(values, cfg):
             raise ConfigError("aux rendition must be SDR H.264 or HEVC to Janus, or v210 to MXL, at canvas size and the aux frame rate")
         if not r.port and r.target == "janus":
             raise ConfigError("aux needs a distinct explicit Janus RTP/RTCP port pair")
+        # Streaming renditions are additional encoders fed from the same bus picture. They write
+        # to their own URL (MPEG-TS over UDP for streaming destinations) and may be smaller/lower
+        # rate than the bus canvas. The primary stays the WebRTC picture.
+        extra = []
+        if len(renditions) > 1:
+            if thumbnails:
+                raise ConfigError("thumbnail banks have exactly one rendition")
+            if r.target != "janus":
+                raise ConfigError("aux streaming renditions need a Janus primary rendition")
+            for index, spec in enumerate(renditions[1:], 1):
+                if not isinstance(spec, dict):
+                    raise ConfigError(f"aux {bid} rendition {index} must be an object")
+                sr = _parse_rendition({"codec": "h264_nvenc", "color": "sdr", "preset": "p4", **spec},
+                                      f"aux {bid} rendition {index}", cfg.canvas_w, cfg.canvas_h, fps)
+                if sr.target in ("janus", "mxl"):
+                    raise ConfigError(f"aux {bid} rendition {index}: streaming renditions need a URL target")
+                if sr.codec not in ("h264_nvenc", "hevc_nvenc") or sr.color != "sdr":
+                    raise ConfigError(f"aux {bid} rendition {index}: streaming renditions must be SDR H.264 or HEVC")
+                if sr.width > cfg.canvas_w or sr.height > cfg.canvas_h:
+                    raise ConfigError(f"aux {bid} rendition {index}: a streaming rendition cannot exceed the canvas")
+                extra.append(sr)
         if not isinstance(obj.get("label", ""), str):
             raise ConfigError(f"aux {bid}: label must be a string")
-        result.append(AuxBusConfig(bid, tuple(scenes), (r,), layouts[0], tuple(layouts), max_layers,
+        result.append(AuxBusConfig(bid, tuple(scenes), (r, *extra), layouts[0], tuple(layouts), max_layers,
                                    label=obj.get("label", ""), **timing))
     # The legacy audio leg's default ports are only claimed where a source actually has audio;
     # audio_rendition is None exactly then, and is what decides whether that leg is built.
