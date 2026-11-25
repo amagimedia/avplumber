@@ -18,7 +18,7 @@ from pydantic import BaseModel
 
 from .client import ControlClient
 from .engine import engine_router
-from .errors import ERROR_RESPONSES, ApiError, install_error_handlers
+from .errors import ERROR_RESPONSES, ApiError, Starting, install_error_handlers
 from .origin import cross_origin
 
 API_PREFIX = "/api/v1"
@@ -52,7 +52,7 @@ def _operations(router: APIRouter) -> Iterable[tuple[str, str]]:
 
 
 def create_app(client: ControlClient, routers: Iterable[APIRouter] = (), *, token: str | None = None,
-               title: str = "avplumber REST API") -> FastAPI:
+               title: str = "avplumber REST API", starting: Starting | None = None) -> FastAPI:
     """The gateway for the engine behind `client`: `/api/v1/health`, the read-only `/api/v1/engine`
     and each of `routers` under `/api/v1`, in one OpenAPI document (`/api/v1/openapi.json`, browsable
     at `/api/v1/docs`).
@@ -64,6 +64,11 @@ def create_app(client: ControlClient, routers: Iterable[APIRouter] = (), *, toke
 
     `token`: when set, every route but health and the documentation needs `Authorization: Bearer
     <token>`. Without one, restrict who reaches the port.
+
+    `starting`: for an application that starts the engine itself. While it returns a reason,
+    health reports it and `/engine` answers 503 `engine_not_ready`, both without asking the
+    engine. A router of `routers` that needs the engine takes the same (`mixer_router(...,
+    starting=...)`, or `pyplumber.rest.errors.refused_while`); one that does not stays served.
     """
     app = FastAPI(title=title, version="1.0.0", openapi_url=f"{API_PREFIX}/openapi.json",
                   docs_url=f"{API_PREFIX}/docs", redoc_url=None, generate_unique_id_function=_operation_id)
@@ -83,6 +88,9 @@ def create_app(client: ControlClient, routers: Iterable[APIRouter] = (), *, toke
     @app.get(f"{API_PREFIX}/health", response_model=Health, tags=["meta"])
     def health():
         """Whether the gateway reaches the engine. Always 200: the gateway itself is up."""
+        reason = starting() if starting else None
+        if reason:
+            return {"status": "degraded", "engine": {"reachable": False, "error": reason}}
         try:
             version = (client.command("version", 2.0) or "").strip()
         except Exception as exc:
@@ -90,7 +98,7 @@ def create_app(client: ControlClient, routers: Iterable[APIRouter] = (), *, toke
         return {"status": "ok", "engine": {"reachable": True, "version": version}}
 
     served = {("GET", f"{API_PREFIX}/{path}"): "the core" for path in ("health", "openapi.json", "docs")}
-    for router in (engine_router(client), *routers):
+    for router in (engine_router(client, starting), *routers):
         name = f"router {router.prefix or router.tags or router!r}"
         for operation in _operations(router):
             if operation in served:

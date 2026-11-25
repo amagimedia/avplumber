@@ -84,12 +84,17 @@ def run(api: Api, read_only: bool) -> None:
         api.wait_status(f"Preview {other!r}", lambda status: status["pvw_scene"] == other)
         if api.call("POST", "/mixer/takes", {"type": "cut", "scene": other})["superseded"]:
             raise Failure("the cut was superseded: something else is taking on this mixer")
-        api.wait_status(f"Program {other!r}", lambda status: status["pgm_scene"] == other)
+        api.wait_status(f"Program {other!r}", lambda status: on_program(status, other))
     finally:
         api.call("POST", "/mixer/takes", {"type": "cut", "scene": before["pgm_scene"]})
+        # The mixer refuses a preview while the cut is on its way to Program.
+        api.wait_status(f"Program {before['pgm_scene']!r} again", lambda status: on_program(status, before["pgm_scene"]))
         if before["pvw_scene"]:
             api.call("PUT", "/mixer/preview", {"scene": before["pvw_scene"]})
-    api.wait_status(f"Program {before['pgm_scene']!r} again", lambda status: status["pgm_scene"] == before["pgm_scene"])
+
+
+def on_program(status: dict, scene: str) -> bool:
+    return status["pgm_scene"] == scene and status["transition"] == "idle"
 
 
 def main(argv=None) -> int:

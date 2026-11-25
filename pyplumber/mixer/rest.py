@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from pyplumber.composition.motion import FADE_CURVES, MOVE_UNMATCHED
 from pyplumber.rest.client import ControlClient
-from pyplumber.rest.errors import ApiError
+from pyplumber.rest.errors import ApiError, Starting, refused_while
 
 from .audio_gain import DB_MAX, DB_MIN
 from .audio_processors import DUCKER_RANGES
@@ -313,14 +313,18 @@ class ProcessorChange(Request):
         return self
 
 
-def mixer_router(bridge: MixerBridge, *, on_aux_change: Callable[[str, dict], None] | None = None) -> APIRouter:
+def mixer_router(bridge: MixerBridge, *, on_aux_change: Callable[[str, dict], None] | None = None,
+                 starting: Starting | None = None) -> APIRouter:
     """`/mixer` for the mixer `bridge` controls.
 
     `on_aux_change(bus, result)` is called after an accepted AUX change, for an application that
     persists them (`SetupController.remember_aux`). An exception from it is logged: the change is
     on the bus already, and the request answers with it.
+
+    `starting`: as `create_app`'s, for an application that restarts the mixer: the routes answer
+    503 `engine_not_ready` while it gives a reason.
     """
-    router = APIRouter(prefix="/mixer", tags=["mixer"])
+    router = APIRouter(prefix="/mixer", tags=["mixer"], dependencies=refused_while(starting))
 
     def send(command: str, request: Request | None = None, **fields):
         """`bridge.take` is looked up on each call: an application may have wrapped it."""

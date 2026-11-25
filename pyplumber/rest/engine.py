@@ -13,6 +13,7 @@ from fastapi import APIRouter, Path
 from pydantic import BaseModel, ConfigDict
 
 from .client import ControlClient
+from .errors import Starting, refused_while
 
 # Node and object names go into a control-protocol line as they are, where a space or a newline
 # would start another argument or another command. The engine's own names fit this.
@@ -53,8 +54,8 @@ class Queues(BaseModel):
     queues: list[Queue]
 
 
-def engine_router(client: ControlClient) -> APIRouter:
-    router = APIRouter(prefix="/engine", tags=["engine"])
+def engine_router(client: ControlClient, starting: Starting | None = None) -> APIRouter:
+    router = APIRouter(prefix="/engine", tags=["engine"], dependencies=refused_while(starting))
 
     def ask(line: str, empty: str):
         return json.loads(client.command(line) or empty)

@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any
+from typing import Any, Callable
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError, ResponseValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -38,6 +38,25 @@ class ApiError(Exception):
     def __init__(self, status: int, code: str, message: str, headers: dict[str, str] | None = None):
         super().__init__(message)
         self.status, self.code, self.message, self.headers = status, code, message, headers
+
+
+# What an application that starts the engine itself knows and the control port does not say: a
+# reason while the engine is starting, else None.
+Starting = Callable[[], str | None]
+
+
+def refused_while(starting: Starting | None) -> list:
+    """Router dependencies that answer 503 `engine_not_ready` with the reason while the engine is
+    `starting`. An engine building its graph accepts the control connection and answers nothing,
+    so without them each request waits for its timeout, behind those that arrived before it."""
+    if starting is None:
+        return []
+
+    def check() -> None:
+        reason = starting()
+        if reason:
+            raise ApiError(503, "engine_not_ready", reason)
+    return [Depends(check)]
 
 
 # Every operation documents these; FastAPI's own 422 schema is replaced by this one.

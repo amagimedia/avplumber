@@ -285,6 +285,26 @@ def test_gateway_process_path_over_a_control_port(engine):
     assert response.status_code == 503 and response.json()["error"]["code"] == "engine_unreachable"
 
 
+def test_engine_an_application_is_starting_is_not_asked(engine, bridge):
+    """It would not answer before its graph is built: each request would wait for its timeout."""
+    reason = ["Restarting mixer…"]
+    starting = lambda: reason[0]
+    app = create_app(engine, [mixer_router(bridge, starting=starting), application_router()], token="s3cret", starting=starting)
+    api = TestClient(app, base_url="http://testserver/api/v1", headers={"Authorization": "Bearer s3cret"})
+    for method, path, body in (("GET", "/engine/nodes", None), ("GET", "/mixer/status", None),
+                               ("POST", "/mixer/takes", {"type": "cut", "scene": "cam2"})):
+        response = api.request(method, path, json=body)
+        assert response.status_code == 503
+        assert response.json() == {"error": {"code": "engine_not_ready", "message": "Restarting mixer…"}}
+    assert api.get("/health").json() == {"status": "degraded", "engine": {"reachable": False, "version": None, "error": "Restarting mixer…"}}
+    assert engine.sent == []
+    assert api.get("/mixer/status", headers={"Authorization": "Bearer wrong"}).status_code == 401   # who asks comes first
+    assert api.get("/director").json() == {"enabled": True}   # the application's own state needs no engine
+    reason[0] = None
+    assert api.get("/mixer/status").status_code == 200 and api.get("/engine/nodes").status_code == 200
+    assert api.get("/health").json()["status"] == "ok"
+
+
 # --- who may call ---
 
 def test_token_is_required_on_routes_but_not_on_health_and_the_document(engine, bridge):

@@ -86,6 +86,14 @@ mixer router finds the same routes in every application. Application routers
 get the token check, the cross-origin check and the error handlers; they raise
 `pyplumber.rest.ApiError(status, code, message)` for answers of their own.
 
+An application that starts the engine itself passes `starting`, a function that
+returns a reason while it does and `None` otherwise, to `create_app` and to
+`mixer_router`. An engine building its graph accepts the control connection and
+answers nothing, so each request would wait for its timeout behind the ones
+before it. With `starting`, `/engine` and `/mixer` answer 503
+`engine_not_ready` with the reason and health reports it, at once; routers that
+do not need the engine (the application's setup) stay served.
+
 ## Errors
 
 Every error has one shape. Branch on the HTTP status and `code`; `message` is
@@ -107,11 +115,12 @@ for people.
 | 500 | `internal_error` | The gateway failed; the cause is in its log, not in the answer. |
 | 502 | `bad_engine_reply` | The engine's reply is not JSON, or lacks a field the route's schema promises (an engine of another version). |
 | 503 | `engine_unreachable` | No control connection. The gateway reconnects on the next request, so it survives an engine restart. |
-| 503 | `engine_not_ready` | The engine is starting and does not take this command yet. |
+| 503 | `engine_not_ready` | The engine is starting and does not take this command yet; `message` says what it is doing. Try again. |
 | 504 | `engine_timeout` | The engine did not answer in time. The command may still have run: read the state before repeating a take. |
 
 `GET /api/v1/health` is always 200 while the gateway runs; its `status` is
-`degraded` and `engine.reachable` false when the engine does not answer.
+`degraded` and `engine.reachable` false when the engine does not answer or is
+starting (`engine.error` says which).
 
 Request bodies are strict: an unknown field, a number as a string, or `1` for a
 boolean is a 422. Replies carry the fields the schema names plus whatever else the
@@ -164,6 +173,10 @@ the OpenAPI document; [mixer.md](mixer.md) describes what the commands do.
 `mixer.status`, `mixer.scenes` and the takes are the engine's; the key, fade to
 black, AUX, audio and settings commands are registered by `pyplumber.mixer`, so
 a mixer built without it answers those routes with 404 `not_available`.
+
+While a take is on its way to Program (`transition` in the status is not
+`idle`, some frames even for a cut), `PUT /mixer/preview` is refused with 409
+`engine_rejected`, "transition already in progress": wait for `idle`.
 
 Takes reach the mixer one at a time, in arrival order. A take that is still
 waiting when a newer one arrives is not sent; its answer is
