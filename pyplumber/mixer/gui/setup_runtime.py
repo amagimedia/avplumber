@@ -49,6 +49,8 @@ RETRY_DELAYS_SEC = (2, 5, 15, 60)
 # At a host boot every container starts at once, and the mixer's show waits on Janus.
 JANUS_START_TIMEOUT_SEC = 60
 JANUS_RETRY_SEC = 2
+# How often a running show checks that Janus still has its mountpoints (resync_mountpoints).
+JANUS_RESYNC_SEC = 15
 HEALTHY_RUN_SEC = 300
 
 
@@ -134,6 +136,8 @@ class SetupRuntime:
         # Extra aux outputs need a Janus mountpoint each, made through its HTTP API; none without it.
         self.janus_api = janus_api
         self.janus_error = ""
+        # One mountpoint change at a time: an apply's codec replacement and the periodic resync.
+        self.janus_lock = threading.Lock()
         # The show's own buses, for setup.html's NVENC budget, and the RTP ports of its extra ones,
         # whose mountpoints a smaller setup prunes: from _previous_show, then each synced setup.
         self.aux_buses, self.extra_ports = [], {}
@@ -155,6 +159,8 @@ class SetupRuntime:
         self.message = "Choose settings and apply to start the mixer."
         # A restarted setup server must also invalidate existing control/player tabs.
         self.revision = time.time_ns() // 1_000_000
+        if self.janus_api:
+            threading.Thread(target=self._keep_mountpoints, daemon=True).start()
 
     clean_port = 5010
 
@@ -563,8 +569,9 @@ class SetupRuntime:
             deadline = time.monotonic() + JANUS_START_TIMEOUT_SEC
             while True:
                 try:
-                    janus_mountpoints.sync(self.janus_api, janus_mountpoints.outputs(show, extra_aux),
-                                          prune=prune, replace=replace)
+                    with self.janus_lock:
+                        janus_mountpoints.sync(self.janus_api, janus_mountpoints.outputs(show, extra_aux),
+                                              prune=prune, replace=replace)
                     break
                 except OSError:
                     if not replace or time.monotonic() >= deadline or self.closing.wait(JANUS_RETRY_SEC):
@@ -577,6 +584,25 @@ class SetupRuntime:
                 raise
             self.janus_error = f"Janus mountpoints failed: {exc}."
             log.warning("Janus mountpoints: %s", exc)
+
+    def _keep_mountpoints(self):
+        while not self.closing.wait(JANUS_RESYNC_SEC):
+            self.resync_mountpoints()
+
+    def resync_mountpoints(self):
+        """Janus forgets the mountpoints made over its API when it restarts (a crash, an image
+        update), which leaves every preview without video until the next apply. While the mixer
+        runs, put back any that are missing: create only, never replace a codec or prune."""
+        with self.lock:
+            busy = self.phase != "running" or bool(self.worker and self.worker.is_alive())
+        if busy or not self.janus_api or not self.config_path.exists():
+            return
+        try:
+            show = json.loads(self.config_path.read_bytes())
+            with self.janus_lock:
+                janus_mountpoints.sync(self.janus_api, janus_mountpoints.outputs(show, len(self.extra_ports)))
+        except Exception as exc:   # Janus down or restarting: the next pass tries again
+            log.debug("Janus mountpoint resync: %s", exc)
 
     def _apply(self, recipe, settings):
         config = self.config_path
