@@ -55,12 +55,27 @@ export async function alignFramePhase(
 ): Promise<boolean> {
   const period = frameIntervalNs(fps);
   if (period !== DEFAULT_INTERVAL_NS) return true; // already on its own timebase
+  return alignFrameGrid(target, fps, phase, 0n, clock);
+}
+
+/** Align any supported rate to an epoch expressed in the supplied clock's domain. */
+export async function alignFrameGrid(
+  target: FramePhaseTarget,
+  fps: number,
+  phase: number,
+  epochNs: bigint,
+  clock: FramePhaseClock,
+  cancelled: () => boolean = () => false,
+): Promise<boolean> {
+  const period = frameIntervalNs(fps);
   const offset = BigInt(Math.round(Number(period) * phase)) % period;
-  const next = (now: bigint): bigint => now + ((offset - (now % period) + period) % period);
+  const next = (now: bigint): bigint =>
+    now + (((offset - ((now - epochNs) % period)) % period + period) % period);
 
   let due = next(clock.nowNs());
   let sleeps = 0;
   for (;;) {
+    if (cancelled()) return false;
     const wait = due - clock.nowNs();
     if (wait < 0n) {
       due = next(clock.nowNs());
@@ -73,9 +88,10 @@ export async function alignFramePhase(
     }
   }
   while (clock.nowNs() < due);
+  if (cancelled()) return false;
 
   // Another interval first: it makes Chromium keep the timebase for displays it creates later.
-  target.setFrameRate(fps - 1);
+  target.setFrameRate(fps === 1 ? 2 : fps - 1);
   target.setFrameRate(fps);
   return true;
 }

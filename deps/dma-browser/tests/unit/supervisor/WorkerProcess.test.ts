@@ -19,7 +19,7 @@ class FakeChild extends EventEmitter {
 
 /** The Electron worker's REST API, where every page load takes `loadMs`. */
 function fakeWorkerApi(loadMs: number) {
-  const pages = { inFlight: 0, peak: 0, opened: [] as string[] };
+  const pages = { inFlight: 0, peak: 0, opened: [] as string[], configs: [] as WindowConfig[] };
   const server = http.createServer((req, res) => {
     let body = '';
     req.on('data', (chunk: Buffer) => (body += chunk.toString()));
@@ -38,6 +38,7 @@ function fakeWorkerApi(loadMs: number) {
       setTimeout(() => {
         pages.inFlight -= 1;
         pages.opened.push(config.id);
+        pages.configs.push(config);
         reply(config);
       }, loadMs);
     });
@@ -53,6 +54,7 @@ function config(index: number): WindowConfig {
     height: 1080,
     fps: 60,
     audio: false,
+    sync: { epochMs: 1234567890000, phase: index / 8, loopAnimations: true },
   };
 }
 
@@ -84,11 +86,15 @@ describe('ElectronWorkerProcess restart', () => {
       expect(pages.peak).toBe(1); // operator opens stay ordered per worker
       pages.peak = 0;
       pages.opened.length = 0;
+      pages.configs.length = 0;
 
       await worker.restart();
       expect(children).toHaveLength(2);
       expect(pages.peak).toBe(4);
       expect(pages.opened.sort()).toEqual(ids);
+      expect(pages.configs.sort((a, b) => a.id.localeCompare(b.id))).toEqual(
+        Array.from({ length: 8 }, (_, index) => config(index)),
+      );
     } finally {
       await worker.stop();
       server.closeAllConnections();

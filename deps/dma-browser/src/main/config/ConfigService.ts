@@ -1,5 +1,6 @@
 import { ValidationError } from '../rest/errors';
 import type { ShowPayload, UpdateUrlPayload, WindowConfig } from './WindowConfig';
+import type { BrowserSyncConfig } from '../../shared/browser-sync';
 
 const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const MIN_DIMENSION = 16;
@@ -60,6 +61,18 @@ function requireUrl(obj: Record<string, unknown>, field: string): string {
   return raw;
 }
 
+function validateSync(input: unknown): BrowserSyncConfig {
+  if (!isRecord(input) || Array.isArray(input)) {
+    throw new ValidationError('Field "sync" must be an object');
+  }
+  const epochMs = requireFiniteInt(input, 'epochMs', 0, Number.MAX_SAFE_INTEGER);
+  const phase = input.phase === undefined ? 0 : input.phase;
+  if (typeof phase !== 'number' || !Number.isFinite(phase) || phase < 0 || phase >= 1) {
+    throw new ValidationError('Field "sync.phase" must be a number in [0, 1)');
+  }
+  return { epochMs, phase, loopAnimations: requireBoolean(input, 'loopAnimations', false) };
+}
+
 export class ConfigService {
   public validateWindowConfig(input: unknown): WindowConfig {
     if (!isRecord(input)) {
@@ -78,7 +91,8 @@ export class ConfigService {
     const audio = requireBoolean(input, 'audio', false);
     const ring = input.ringSize === undefined ? {} : { ringSize: requireFiniteInt(input, 'ringSize', 1, 64) };
     const holdLastFrame = requireBoolean(input, 'holdLastFrame', true);
-    return { id, url, width, height, fps, audio, ...ring, holdLastFrame };
+    const sync = input.sync === undefined ? {} : { sync: validateSync(input.sync) };
+    return { id, url, width, height, fps, audio, ...ring, holdLastFrame, ...sync };
   }
 
   public validateId(input: unknown): { id: string } {

@@ -80,6 +80,15 @@ describe('POST /window/paint', () => {
 });
 
 describe('POST /window/open', () => {
+  it('passes normalized browser sync settings through to the window manager', async () => {
+    const mgr = buildManager({ open: vi.fn().mockResolvedValue(snapshotFor(validBody)) });
+    const res = await request(buildServer(mgr).app).post('/window/open')
+      .send({ ...validBody, sync: { epochMs: 0, loopAnimations: true } });
+    expect(res.status).toBe(200);
+    expect(mgr.open).toHaveBeenCalledWith(expect.objectContaining({
+      sync: { epochMs: 0, phase: 0, loopAnimations: true },
+    }));
+  });
   it('200 with snapshot on success', async () => {
     const mgr = buildManager({ open: vi.fn().mockResolvedValue(snapshotFor(validBody)) });
     const res = await request(buildServer(mgr).app).post('/window/open').send(validBody);

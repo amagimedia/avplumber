@@ -14,6 +14,20 @@ const validBody = {
 };
 
 describe('ConfigService.validateWindowConfig', () => {
+  it('validates opt-in browser sync and defaults animation changes off', () => {
+    expect(svc.validateWindowConfig(validBody).sync).toBeUndefined();
+    expect(svc.validateWindowConfig({ ...validBody, sync: { epochMs: 1234 } }).sync)
+      .toEqual({ epochMs: 1234, phase: 0, loopAnimations: false });
+    expect(svc.validateWindowConfig({ ...validBody,
+      sync: { epochMs: 1234, phase: 0.5, loopAnimations: true } }).sync)
+      .toEqual({ epochMs: 1234, phase: 0.5, loopAnimations: true });
+    for (const sync of [null, true, [], {}, { epochMs: -1 }, { epochMs: 1.2 },
+      { epochMs: Number.MAX_SAFE_INTEGER + 1 }, { epochMs: '1234' },
+      { epochMs: 0, phase: 1 }, { epochMs: 0, phase: -0.1 },
+      { epochMs: 0, phase: NaN }, { epochMs: 0, phase: null }, { epochMs: 0, loopAnimations: 'yes' }]) {
+      expect(() => svc.validateWindowConfig({ ...validBody, sync })).toThrow(ValidationError);
+    }
+  });
   it('accepts an optional per-window ring limit', () => {
     expect(svc.validateWindowConfig({ ...validBody, ringSize: 6 }).ringSize).toBe(6);
     for (const ringSize of [0, 65, 6.5, true, '6']) {

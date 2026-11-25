@@ -1,0 +1,37 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>Unmodified page clocks and independent animation timelines</title>
+<style>
+  @keyframes move {
+    from {
+      transform: translateX(0);
+    }
+    to {
+      transform: translateX(300px);
+    }
+  }
+  #loop {
+    animation: move 5s linear -0.5s infinite alternate;
+  }
+  #finite {
+    animation: move 60s linear;
+  }
+  div {
+    width: 30px;
+    height: 30px;
+    background: orange;
+  }
+</style>
+<div id="loop"></div>
+<div id="finite"></div>
+<div id="waapi"></div>
+<iframe id="child"></iframe>
+<script>
+  document.getElementById('child').srcdoc = `
+    <style>@keyframes fade { from { opacity: 0; } to { opacity: 1; } }
+    div { animation: fade 2s linear infinite; }</style><div>iframe loop</div>`;
+  document.getElementById('waapi').animate([{ opacity: 0 }, { opacity: 1 }], {
+    duration: 2000,
+    iterations: Infinity,
+  });
+</script>

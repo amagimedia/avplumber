@@ -96,7 +96,7 @@ the worker's point of the period.
 
 | Method | Path                | Body                                                              |
 | ------ | ------------------- | ----------------------------------------------------------------- |
-| POST   | `/window/open`      | `{ id, url, width, height, fps, audio, ringSize, holdLastFrame }` |
+| POST   | `/window/open`      | `{ id, url, width, height, fps, audio, ringSize, holdLastFrame, sync }` |
 | POST   | `/window/close`     | `{ id }`                                                          |
 | GET    | `/window/close/all` |                                                                   |
 | POST   | `/window/refresh`   | `{ id }`                                                          |
@@ -136,6 +136,114 @@ renderer crash reloads the page after 1 s, doubling up to 30 s while reloads kee
 sockets stay open, so consumers keep their connection and held frames.
 With `holdLastFrame` (default `true`), the window sends no frames until a reload loads cleanly, so
 consumers repeat the last one they received; `false` sends Chromium's error page instead.
+
+### Browser synchronization between hosts (experimental)
+
+For two browsers rendering the same graphics, `/window/open` accepts an optional
+`sync` object. Send identical settings and `fps` to both hosts:
+
+```json
+"sync": { "epochMs": 0, "phase": 0, "loopAnimations": false }
+```
+
+`epochMs` is a shared Unix wall-clock epoch in integer milliseconds; zero means
+the Unix epoch. `phase` defaults to zero and is a fraction of one browser frame
+period in `[0, 1)`. Matching sources on A and B need the same phase, regardless
+of which worker owns them. Different source pairs can use different phases to
+spread rendering work. `sync` takes precedence over worker frame staggering.
+Omitting it preserves the normal browser behavior.
+
+Both hosts must already have synchronized system clocks. The service maps the
+wall-clock grid to each host's monotonic clock and requests that rendering phase
+at every supported integer browser rate. It reapplies after page load and checks
+the clock mapping every five seconds. It corrects a change larger than a quarter
+frame (at least 2 ms), avoiding continuous rate toggles. This uses Electron's
+microsecond-rounded frame interval, not the mixer's exact rational tick grid;
+it does not provide NTSC genlock or set the engine's TAI clock mapping.
+
+Set `loopAnimations: true` separately to rephase infinite CSS and Web Animations
+API animations to that epoch without editing the HTML. Discovery runs every
+500 ms, including after reload, and follows accessible iframe documents. Effects
+retain their durations, delays and alternating directions. This intentionally
+replaces their page-local start phase, so enable it only where that behavior is
+wanted. Finite, paused, pending, non-unit-speed and non-document-timeline
+animations are left alone. Browser clocks and network messages are unchanged.
+
+This is best-effort alignment, not deterministic replication of arbitrary pages.
+Canvas/WebGL/rAF animation code, media playback, inaccessible iframes and
+independently arriving provider commands are not synchronized. A restarted page
+still relies on its provider to restore content and finite animation state. Clock
+steps can cause visible corrections; selecting the same output tick does not
+establish that A and B rendered the same content.
+
+`/status` includes the accepted `sync` configuration and `syncStatus` with phase
+application/failure counts, last application time, and measured wall-clock drift
+against monotonic. These report requested timing, not measured paint alignment
+or peer health. No millisecond or frame-accuracy guarantee has been qualified.
+
+Local validation (no native addon or GPU build required):
+
+```bash
+npm run build
+npm test
+node_modules/.bin/electron tests/browser/sync.cjs
+```
+
+The Electron smoke test checks CSS/WAAPI and same-origin iframe loops across
+different document start times and reload, plus finite-animation and opt-out
+behavior. Two-host Linux/DMA-BUF qualification remains required: compare actual
+paint/output delivery and content during load, reload, clock drift and failover,
+including the intended Singular/Flowics templates.
+
+#### Isolated Linux A/B probe
+
+`tests/browser/sync-probe.cjs` starts a separate single-window browser service
+on loopback port 19099 with a fresh temporary socket/profile directory. Run it
+in a disposable container on each test host, using the browser image's normal
+NVIDIA/Wayland devices, libraries and environment. Do not run it inside a live
+browser worker. It needs the built service and native `fdpass` addon.
+
+Choose one future Unix timestamp in milliseconds for both hosts (allow enough
+time for both processes to load), then run on each host with its own label:
+
+```bash
+BROWSER_SYNC_START_MS='<same future Unix timestamp in milliseconds>' \
+BROWSER_SYNC_LABEL=A \
+node_modules/.bin/electron --no-sandbox --ozone-platform=wayland \
+  tests/browser/sync-probe.cjs > /tmp/browser-sync-a.json
+```
+
+Use label `B` and a separate output file on the other host. Both runs must use
+the same `BROWSER_SYNC_FPS` (default 30), `BROWSER_SYNC_EPOCH_MS` (default zero)
+and `BROWSER_SYNC_DURATION_MS` (default 15000). `BROWSER_SYNC_PORT` changes the
+probe's private port. A bind conflict fails rather than connecting to an existing
+service. Each process exits and removes its test sockets/profile on completion.
+
+The probe exercises REST configuration, `ManagedWindow`, the preload, and the
+shared-texture capture path. It records paint callback arrival times and sampled
+DOM animation times. With no media consumer connected, `no_consumer` drops are
+expected and confirm that valid textures reached FD broadcast. This does not
+test FD reception, GPU composition, pixel identity, or encoded output continuity.
+
+Copy both JSON results to one machine and compare them:
+
+```bash
+node tests/browser/compare-sync.cjs /tmp/browser-sync-a.json /tmp/browser-sync-b.json
+node --test tests/browser/compare-sync.test.cjs
+```
+
+The comparator fails on capture errors, differing run settings, missing animation
+samples, backwards clocks, paint counts outside 90–110% of the configured rate,
+delivery gaps over 2.5 frames, or a 95th-percentile nearest-paint difference above
+10 ms. Animation-time residuals must stay within one frame at the 95th percentile.
+These are initial test thresholds, not established runtime guarantees. Record the
+hosts' clock-sync health alongside the results; this probe does not verify NTP/PTP.
+
+For a separate rejoin investigation, set `BROWSER_SYNC_RELOAD_MS=8000` on B to
+reload it eight seconds into the run. The trace retains the reload time and any
+evaluation errors during navigation. Delivery gaps remain in the comparison and
+can make that run fail: a reload must not be hidden by reporting only post-rejoin
+timestamps. Verify downstream hold/failover behavior in a subsequent consumer test.
 
 ### Frame lifetime and transport counters
 

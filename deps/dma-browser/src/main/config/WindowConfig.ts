@@ -1,3 +1,5 @@
+import type { BrowserSyncConfig, BrowserSyncStatus } from '../../shared/browser-sync';
+
 export interface WindowConfig {
   readonly id: string;
   readonly url: string;
@@ -9,6 +11,7 @@ export interface WindowConfig {
   /** While a failed or crashed page reloads, send nothing so the consumer repeats the
    *  last frame (default), instead of Chromium's empty error page. */
   readonly holdLastFrame?: boolean;
+  readonly sync?: BrowserSyncConfig;
 }
 
 export interface UpdateUrlPayload {
@@ -32,6 +35,8 @@ export interface WindowSnapshot {
   readonly holdLastFrame: boolean;
   readonly visible: boolean;
   readonly stats: WindowStats;
+  readonly sync?: BrowserSyncConfig;
+  readonly syncStatus?: BrowserSyncStatus;
 }
 
 export interface WindowStats {

@@ -3,6 +3,7 @@ import { BrowserWindow } from 'electron';
 import { AudioCaptureChannel } from './capture/AudioCaptureChannel';
 import { FrameCaptureChannel } from './capture/FrameCaptureChannel';
 import { alignFramePhase, MONOTONIC_CLOCK } from './capture/FramePhase';
+import { BrowserFrameSync } from './capture/BrowserFrameSync';
 import type { AllowedDims } from './capture/AllowedDims';
 import { LoadWatchdog } from './LoadWatchdog';
 import { isPageLoadFailure, PageReloader } from './PageReloader';
@@ -108,6 +109,7 @@ export class ManagedWindow implements IManagedWindow {
   private reloader: PageReloader | null = null;
   private visible = false;
   private destroyed = false;
+  private frameSync: BrowserFrameSync | null = null;
 
   constructor(opts: ManagedWindowOptions) {
     this.opts = opts;
@@ -154,6 +156,9 @@ export class ManagedWindow implements IManagedWindow {
         additionalArguments: [
           `--window-id=${this.id}`,
           `--audio-enabled=${this.config.audio ? '1' : '0'}`,
+          ...(this.config.sync?.loopAnimations
+            ? [`--loop-sync-epoch-ms=${String(this.config.sync.epochMs)}`]
+            : []),
         ],
       },
     });
@@ -163,15 +168,24 @@ export class ManagedWindow implements IManagedWindow {
     wc.setFrameRate(this.config.fps);
 
     const framePhase = this.opts.framePhase;
-    if (framePhase !== null) {
-      const target = {
-        setFrameRate: (fps: number): void => {
-          if (!wc.isDestroyed()) wc.setFrameRate(fps);
-        },
-      };
+    const phaseTarget = {
+      setFrameRate: (fps: number): void => {
+        if (!wc.isDestroyed()) wc.setFrameRate(fps);
+      },
+    };
+    if (this.config.sync) {
+      this.frameSync = new BrowserFrameSync(
+        phaseTarget,
+        this.config.fps,
+        this.config.sync,
+        (message) => log.write(message),
+      );
+      this.frameSync.start();
+      wc.on('did-finish-load', () => this.frameSync?.realign());
+    } else if (framePhase !== null) {
       // Every navigation: it can give the page a new compositor, back on Chromium's own timing.
       wc.on('did-navigate', () => {
-        alignFramePhase(target, this.config.fps, framePhase, MONOTONIC_CLOCK)
+        alignFramePhase(phaseTarget, this.config.fps, framePhase, MONOTONIC_CLOCK)
           .then((aligned) => {
             if (!aligned) log.write('frame phase not set: timers woke too late');
           })
@@ -291,6 +305,8 @@ export class ManagedWindow implements IManagedWindow {
   public async destroy(): Promise<void> {
     if (this.destroyed) return;
     this.destroyed = true;
+    this.frameSync?.stop();
+    this.frameSync = null;
     this.opts.logger.forWindow(this.id).write('destroy');
     this.watchdog?.clear();
     this.watchdog = null;
@@ -351,6 +367,8 @@ export class ManagedWindow implements IManagedWindow {
       holdLastFrame: this.config.holdLastFrame ?? true,
       visible: this.visible,
       stats,
+      ...(this.config.sync ? { sync: this.config.sync } : {}),
+      ...(this.frameSync ? { syncStatus: this.frameSync.snapshot() } : {}),
     };
   }
 
