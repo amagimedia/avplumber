@@ -322,7 +322,11 @@ public:
                     all_good = false;
                     logstream << "Command " << cmd << " " << arg << " failed: " << e.what();
                     if (!is_terminal) {
-                        out << "500 ERROR: " << e.what() << "\n";
+                        // The reply is one line. A text of more (a Python command's exception
+                        // carries its traceback) would be read as the replies to the client's
+                        // next commands; the log line above has all of it.
+                        const std::string what = e.what();
+                        out << "500 ERROR: " << what.substr(0, what.find_first_of("\r\n")) << "\n";
                     }
                 }
             }

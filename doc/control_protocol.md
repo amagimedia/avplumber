@@ -9,7 +9,7 @@ Server (avplumber) responds with line with status code and information:
 * `200 OK` - command accepted, empty response
 * `201 OK` - command accepted, response will follow and an empty line marks the end of response
 * `400 Unknown command: ...`
-* `500 ERROR: ...`
+* `500 ERROR: ...` - the first line of the error; the log has the rest (e.g. the traceback of a command registered in Python)
 * `BYE` and connection close - special response for `bye` command
 
 The control port listens on `127.0.0.1` unless started with `--control-bind` (see
