@@ -33,7 +33,8 @@ PROJECT=<project> ZONES='<zone>' IMAGE_NAME=<prepared-image> \
 
 Default `HOST_SETUP_MODE=verify` installs nothing. The image must already have
 an R615 or newer driver, DRM/GBM/video libraries, Docker/Compose and the NVIDIA
-runtime. R615 (CUDA 13.4) and R620 (CUDA 13.5) both run the CUDA 13.4 mixer image.
+runtime. R615 (CUDA 13.4) and R620 (CUDA 13.5) both run the CUDA 13.4 mixer image; install mode
+defaults to 620.70.10.
 Set `NVIDIA_DRIVER_VERSION` to require an exact installed driver in verify mode
 or select the package version to install on a fresh VM.
 The default image family is operator-provided, not distributed by this repository.

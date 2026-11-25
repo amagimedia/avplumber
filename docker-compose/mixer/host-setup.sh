@@ -13,6 +13,7 @@
 set -euo pipefail
 
 readonly min_driver=615   # the image's CUDA 13.4 and the Video Codec SDK 13.1 headers
+readonly boot_dir="${HOST_SETUP_BOOT:-/boot}"
 
 failures=0
 ok() { printf '  ok    %s\n' "$*"; }
@@ -62,6 +63,16 @@ check() {
     compgen -G '/dev/dri/renderD*' >/dev/null && ok "DRM render node" ||
         bad "no /dev/dri/renderD* node: load nvidia-drm with modeset=1"
 
+    # The boot loader starts the newest kernel. One that the NVIDIA module did not build for (Ubuntu's
+    # 7.0.0-1014 with drivers 615 and 620, 2026-11-25) comes up without a GPU after the next reboot.
+    local newest
+    newest=$(compgen -G "$boot_dir/vmlinuz-*" | sed "s|^$boot_dir/vmlinuz-||" | sort -V | tail -1 || true)
+    if [[ -n $newest ]]; then
+        modinfo -k "$newest" nvidia >/dev/null 2>&1 && ok "NVIDIA module for the boot kernel $newest" ||
+            bad "kernel $newest has no NVIDIA module, so a reboot loses the GPU: remove it" \
+                "(sudo apt-get remove linux-image-$newest) and hold kernel updates until NVIDIA supports it"
+    fi
+
     if command -v docker >/dev/null && docker info >/dev/null 2>&1; then
         ok "Docker"
         docker compose version >/dev/null 2>&1 && ok "Docker Compose v2" ||
@@ -87,7 +98,7 @@ install() {
     local driver_version=""
     while (( $# )); do
         case "$1" in
-            --driver) driver_version="${2:?--driver needs a version such as 615.71.09}"; shift 2 ;;
+            --driver) driver_version="${2:?--driver needs a version such as 620.70.10}"; shift 2 ;;
             *) echo "unknown option $1" >&2; exit 2 ;;
         esac
     done
@@ -103,7 +114,7 @@ install() {
 
     if [[ -n $driver_version ]]; then
         [[ $driver_version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && ${driver_version%%.*} -ge $min_driver ]] || {
-            echo "--driver must be R$min_driver or newer, such as 615.71.09" >&2; exit 2; }
+            echo "--driver must be R$min_driver or newer, such as 620.70.10" >&2; exit 2; }
         [[ $VERSION_ID == 26.04 ]] || {
             echo "--driver is supported on Ubuntu 26.04; on $VERSION_ID install R$min_driver+ from NVIDIA's" \
                  "CUDA repository (https://developer.nvidia.com/cuda-downloads) and rerun without --driver" >&2; exit 2; }
