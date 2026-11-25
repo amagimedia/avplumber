@@ -769,3 +769,38 @@ def test_aux_accepts_streaming_renditions(cfg):
             {"id": "stream0", "target": "udp://224.0.0.1:30400", "width": 1920, "height": 1080,
              "fps": "30/1", "bitrate_kbps": 3000},
         ])], cfg)
+
+
+def test_bus_builds_one_record_output_per_streaming_rendition(cfg, monkeypatch):
+    import pyplumber.mixer.janus as janus
+    monkeypatch.setattr(janus, "build_janus_output", lambda *a, **kw: "listener")
+    nodes = []
+    kinds = ("FilterVideo", "ForceFPS", "AssumeVideoFormat", "EncVideo", "Mux", "Output", "Split")
+    def make(kind):
+        def factory(params):
+            nodes.append((kind, params))
+            return SimpleNamespace(parameters={"type": kind, **params})
+        return factory
+    api = SimpleNamespace(**{kind: make(kind) for kind in kinds})
+    mixer = SimpleNamespace(add_aux_destination=lambda *a: None, latency_ms=50, name="mixer",
+                            canvas_compositor=lambda params, api: SimpleNamespace(parameters=params),
+                            backend=SimpleNamespace(graph_threads=1, conversion=lambda *a, **kw: "graph"))
+    options = SimpleNamespace(janus_host="127.0.0.1", janus_video_ssrc=1, janus_rtcp_bind="",
+                              output_format="mpegts")
+    spec = bus_json(scenes=["repeat"], renditions=[
+        {"id": "monitor", "port": 5010},
+        {"id": "stream0", "target": "udp://224.0.0.1:30400", "width": 1080, "height": 1920,
+         "fps": "30/1", "bitrate_kbps": 3000},
+    ])
+    def add_node(node, **kw):
+        params = getattr(node, "parameters", {})
+        nodes.append((getattr(node, "type", params.get("type")), params))
+    bus = AuxBus(SimpleNamespace(addNode=add_node, edges=SimpleNamespace(planCapacity=lambda *a: None)),
+                 api, mixer, cfg, parse_aux_buses([spec], cfg)[0])
+    bus.build(options)
+    names = [params.get("name") for _, params in nodes]
+    assert "aux_multiview_fanout" in names
+    assert "aux_multiview_stream0_encoder" in names
+    outputs = [params for kind, params in nodes if kind == "Output"]
+    assert outputs and outputs[-1]["url"] == "udp://224.0.0.1:30400"
+    assert outputs[-1]["format"] == "mpegts"
