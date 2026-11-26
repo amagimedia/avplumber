@@ -224,8 +224,16 @@ public:
                 // input PTS may be in any timebase (1/1000 from an MP4/MKV), so rescale it; taking
                 // its samples and multiplying by the output rate makes async compensation chase a
                 // phantom drift and can drop seconds of audio.
+                //
+                // The returned value is libswresample's compensated output PTS. Use it: the manual
+                // path advances next_out_ts_ by the sample count, which ignores the compensation
+                // and lets the output drift away from the input instead of converging.
                 av::Rational tb = {1, src_params_.sample_rate * dst_params_.sample_rate};
                 av::Timestamp nextpts(swr_next_pts(resampler_->raw(), in_samples.pts().timestamp(tb)), tb);
+                av::Timestamp compensated = rescaleTS(nextpts, dst_params_.timebase());
+                if (compensated.isValid()) {
+                    next_out_ts_ = compensated;
+                }
                 if (debug_) {
                     logstream << "swr_next_pts returned " << nextpts.seconds() << "s, next_out_ts_ = " << next_out_ts_.seconds() << "s";
                 }
