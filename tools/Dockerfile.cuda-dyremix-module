@@ -1,0 +1,49 @@
+# syntax=docker/dockerfile:1.7
+#
+# Build avplumber's Python module for the studio engine with every feature the
+# runtime needs. The plain avplumber-builder image is not enough: it has no
+# HAVE_NVCC, no CUDA VMM nodes and no amagi dyremix_mixer node.
+#
+# Build context must contain:
+#   resample_audio.cpp              patched avplumber src/nodes/resample_audio.cpp
+#   build-python-module-cuda.sh    this repo's tools/build-python-module-cuda.sh
+#   dyremix/                       github.com/tellyo/dyremix checkout
+#   dyremix-node/                  amagi_avplumber_nodes/dyremix from avplumber-nodes
+#
+# tools/build-adaptive-module.sh assembles that context and runs this file.
+#
+# Required build features encoded here:
+#   HAVE_NVCC=1          cuda_rect_overlay (compositing) is real, not a stub
+#   HAVE_CUDA_VMM_IPC=1  cuda_ipc_source for CUDA VMM replay slots
+#   dyremix_mixer        amagi avplumber-nodes, linked to static dyremix
+#
+FROM avplumber-builder:cuda-vmm-x264
+
+# dyremix's static build needs these; pkg-config must resolve the
+# Requires/Requires.private chain even when only the static archive is linked.
+RUN dnf -y install --setopt=install_weak_deps=False \
+        cmake \
+        gcc \
+        gcc-c++ \
+        make \
+        pkgconf-pkg-config \
+        lilv-devel \
+        liblo-devel \
+        libsndfile-devel \
+    && dnf clean all
+
+COPY dyremix /build/dyremix
+RUN cmake -S /build/dyremix -B /build/dyremix/build-static \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_SHARED=OFF \
+        -DBUILD_STATIC=ON \
+        -DCMAKE_INSTALL_PREFIX=/dyremix-install \
+    && cmake --build /build/dyremix/build-static -j"$(nproc)" \
+    && cmake --install /build/dyremix/build-static
+
+COPY dyremix-node /build/dyremix-node
+COPY resample_audio.cpp /build/src/nodes/resample_audio.cpp
+COPY build-python-module-cuda.sh /tmp/build-python-module-cuda.sh
+RUN bash /tmp/build-python-module-cuda.sh
+
+RUN test -f "/build/_avplumber$(python3-config --extension-suffix)"
