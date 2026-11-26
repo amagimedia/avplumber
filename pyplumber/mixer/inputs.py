@@ -133,7 +133,7 @@ def build_input(avp, api, tag: str, url: str, *, group: str, fps: int, fps_den: 
         avp.addNode(api.ResampleAudioForwardChannels({
             "name": f"resample_audio_{tag}", "src": edge("audio_decoded"), "dst": edge("audio_resampled"),
             "dst_sample_rate": audio_sample_rate,
-            "dst_sample_format": "fltp", "compensation": 0, "group": group, **restart,
+            "dst_sample_format": "fltp", "compensation": -1, "group": group, **restart,  # adaptive: libswresample async compensation
         }))
         audio_edge = _pace_audio(
             avp, api, tag, edge("audio_resampled"), group=group, sync_team=sync_team,

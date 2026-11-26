@@ -220,10 +220,14 @@ public:
                 inside_resampler_ = addTS(inside_resampler_, {samp_count, {1, src_params_.sample_rate} });
             }
             if (comp_samp_!=0) {
-                uint64_t tb = uint64_t(src_params_.sample_rate) * uint64_t(dst_params_.sample_rate);
-                int64_t nextpts = swr_next_pts(resampler_->raw(), int64_t(in_samples.pts().timestamp()) * int64_t(dst_params_.sample_rate));
+                // swr_next_pts timestamps are in 1/(in_sample_rate * out_sample_rate) units. The
+                // input PTS may be in any timebase (1/1000 from an MP4/MKV), so rescale it; taking
+                // its samples and multiplying by the output rate makes async compensation chase a
+                // phantom drift and can drop seconds of audio.
+                av::Rational tb = {1, src_params_.sample_rate * dst_params_.sample_rate};
+                av::Timestamp nextpts(swr_next_pts(resampler_->raw(), in_samples.pts().timestamp(tb)), tb);
                 if (debug_) {
-                    logstream << "swr_next_pts returned " << nextpts << " = " << double(nextpts) / double(tb) << "s, next_out_ts_ = " << next_out_ts_.seconds() << "s";
+                    logstream << "swr_next_pts returned " << nextpts.seconds() << "s, next_out_ts_ = " << next_out_ts_.seconds() << "s";
                 }
             }
             
