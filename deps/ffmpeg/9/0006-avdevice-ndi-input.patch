@@ -5,11 +5,11 @@ Subject: [PATCH] avdevice: receive audio and video with the NDI 6.4 SDK
 
 ---
  configure                       |   5 +
- doc/indevs.texi                 |  52 ++++++++
+ doc/indevs.texi                 |  58 +++++++++
  libavdevice/Makefile            |   1 +
  libavdevice/alldevices.c        |   1 +
- libavdevice/libndi_newtek_dec.c | 206 ++++++++++++++++++++++++++++++++
- 5 files changed, 265 insertions(+)
+ libavdevice/libndi_newtek_dec.c | 213 +++++++++++++++++++++++++++++++++
+ 5 files changed, 278 insertions(+)
  create mode 100644 libavdevice/libndi_newtek_dec.c
 
 diff --git a/configure b/configure
@@ -50,10 +50,10 @@ index c06480dce0..b2d8ee89a5 100755
  enabled gmp               && require gmp gmp.h mpz_export -lgmp
  enabled gnutls            && require_pkg_config gnutls gnutls gnutls/gnutls.h gnutls_global_init
 diff --git a/doc/indevs.texi b/doc/indevs.texi
-index dc4b92a0a0..87c199a3bb 100644
+index dc4b92a0a0..fae3940876 100644
 --- a/doc/indevs.texi
 +++ b/doc/indevs.texi
-@@ -1136,6 +1136,58 @@ Set the video size given as a string such as @code{640x480} or @code{hd720}.
+@@ -1136,6 +1136,64 @@ Set the video size given as a string such as @code{640x480} or @code{hd720}.
  Default is @code{qvga}.
  @end table
  
@@ -72,6 +72,12 @@ index dc4b92a0a0..87c199a3bb 100644
 +@subsection Options
 +
 +@table @option
++
++@item color_format
++Set to @option{bgra} for a graphics source whose frames may alternate between
++opaque and transparent. The output remains BGRA with straight alpha across
++these changes. Opaque frames have alpha 255. The default, @option{auto},
++receives UYVY for frames without alpha and BGRA for frames with alpha.
 +
 +@item find_sources
 +If set to @option{true}, print a list of found/available NDI sources and exit.
@@ -138,10 +144,10 @@ index 573595f416..3fc15e933e 100644
  extern const FFOutputFormat ff_fbdev_muxer;
 diff --git a/libavdevice/libndi_newtek_dec.c b/libavdevice/libndi_newtek_dec.c
 new file mode 100644
-index 0000000000..b9fbf781ba
+index 0000000000..62a1f3b1e6
 --- /dev/null
 +++ b/libavdevice/libndi_newtek_dec.c
-@@ -0,0 +1,206 @@
+@@ -0,0 +1,213 @@
 +/* SPDX-License-Identifier: LGPL-2.1-or-later */
 +#include <Processing.NDI.Lib.h>
 +#include "libavcodec/avcodec.h"
@@ -154,7 +160,7 @@ index 0000000000..b9fbf781ba
 +typedef struct {
 +    const AVClass *class;
 +    char *extra_ips;
-+    int list, fields;
++    int list, fields, bgra;
 +    int64_t wait;
 +    NDIlib_recv_instance_t receiver;
 +    AVStream *video, *audio;
@@ -192,7 +198,8 @@ index 0000000000..b9fbf781ba
 +            } else if (!strcmp(sources[i].p_ndi_name, s->url)) {
 +                NDIlib_recv_create_v3_t cfg = {
 +                    .source_to_connect_to = sources[i],
-+                    .color_format = NDIlib_recv_color_format_UYVY_BGRA,
++                    .color_format = n->bgra ? NDIlib_recv_color_format_BGRX_BGRA
++                                            : NDIlib_recv_color_format_UYVY_BGRA,
 +                    .bandwidth = NDIlib_recv_bandwidth_highest,
 +                    .allow_video_fields = n->fields,
 +                };
@@ -235,7 +242,10 @@ index 0000000000..b9fbf781ba
 +    switch (v->FourCC) {
 +    case NDIlib_FourCC_video_type_UYVY: fmt = AV_PIX_FMT_UYVY422; break;
 +    case NDIlib_FourCC_video_type_BGRA: fmt = AV_PIX_FMT_BGRA; break;
-+    case NDIlib_FourCC_video_type_BGRX: fmt = AV_PIX_FMT_BGR0; break;
++    case NDIlib_FourCC_video_type_BGRX:
++        /* The NDI SDK guarantees BGRX carries 255 in every alpha byte. */
++        fmt = n->bgra ? AV_PIX_FMT_BGRA : AV_PIX_FMT_BGR0;
++        break;
 +    default: return AVERROR_INVALIDDATA;
 +    }
 +    bytes = av_image_get_buffer_size(fmt, v->xres, v->yres, 1);
@@ -332,6 +342,9 @@ index 0000000000..b9fbf781ba
 +#define OFFSET(x) offsetof(NDIInput, x)
 +#define DEC AV_OPT_FLAG_DECODING_PARAM
 +static const AVOption options[] = {
++    { "color_format", "Video output format", OFFSET(bgra), AV_OPT_TYPE_INT, {.i64=0}, 0, 1, DEC, .unit="color_format" },
++    { "auto", "UYVY or BGRA according to the source", 0, AV_OPT_TYPE_CONST, {.i64=0}, 0, 0, DEC, .unit="color_format" },
++    { "bgra", "Always output BGRA", 0, AV_OPT_TYPE_CONST, {.i64=1}, 0, 0, DEC, .unit="color_format" },
 +    { "find_sources", "List discovered NDI sources", OFFSET(list), AV_OPT_TYPE_BOOL, {.i64=0}, 0, 1, DEC },
 +    { "wait_sources", "Source discovery timeout", OFFSET(wait), AV_OPT_TYPE_DURATION, {.i64=500000}, 0, INT_MAX, DEC },
 +    { "extra_ips", "Additional discovery addresses", OFFSET(extra_ips), AV_OPT_TYPE_STRING, {.str=NULL}, 0, 0, DEC },
