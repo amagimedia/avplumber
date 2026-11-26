@@ -599,6 +599,10 @@ class MixerGraphBuilder:
             # Resolve chroma from the actual frames. The compositor samples
             # 4:2:0 directly into the 4:2:2 canvas in its existing scale pass.
             pixel_format = None
+        elif pixel_format == "nv16" and source.pixel_format in (None, "nv12", "p010le"):
+            # The same for the 8-bit 4:2:2 canvas: no scale_cuda per decoded source, which also
+            # cannot read the CUDA arrays the CUarray profiles decode into.
+            pixel_format = None
         return self.backend.conversion(self.color, pixel_format,
                                        source=source.color, source_format=source.pixel_format)
 

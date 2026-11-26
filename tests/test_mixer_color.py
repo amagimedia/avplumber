@@ -252,6 +252,24 @@ def test_422_hdr_canvas_retains_native_source_chroma(builder, transfer):
     assert not any("scale_cuda" in n.get("graph", "") for n in nodes.values())
 
 
+def test_422_sdr_canvas_draws_decoded_420_without_a_scale_per_source(builder):
+    """scale_cuda cannot read CUarray frames; the compositor resamples 4:2:0 onto NV16 itself."""
+    builder.working_format, builder.color = "nv16", Color()
+    builder.add_source("decoded", "nvdec", "input", color="sdr", pixel_format="nv12", color_tagged=True)
+    builder.add_source("untagged", "nvdec2", "input2", color="sdr", pixel_format="nv12")
+    builder.add_source("hlg", "nvdec3", "input3", color="hlg", pixel_format="p010le")
+    builder.add_source("raw422", "v210", "input4", color="sdr", pixel_format="nv16", color_tagged=True)
+    builder.add_scene("mixed", {"decoded": {}, "untagged": {}, "hlg": {}, "raw422": {}})
+    builder.set_initial_scene("mixed")
+    builder.build()
+    nodes = {n["name"]: n for n in builder.avp.nodes}
+    assert "mixer_color_decoded" not in nodes and "mixer_color_raw422" not in nodes
+    assert "mixer_color_untagged" not in nodes and nodes["mixer_otm_untagged"]["frame_color"] == Color().tags
+    assert nodes["mixer_color_hlg"]["graph"] == conversion_graph("sdr", None, source="hlg", source_format="p010le")
+    assert nodes["mixer_comp_a"]["sw_format"] == "nv16"
+    assert not any("scale_cuda" in n.get("graph", "") for n in nodes.values())
+
+
 @pytest.mark.parametrize("wipe_color", (None, "sdr"))
 def test_media_wipe_blends_onto_an_hdr_canvas(monkeypatch, wipe_color):
     """Auto wipes retain tags for compositor validation; an explicit SDR override
