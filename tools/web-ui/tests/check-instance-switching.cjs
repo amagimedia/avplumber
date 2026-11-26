@@ -184,6 +184,7 @@ backend.on('connection', (client, req) => {
     const manyQueues = manyNodes.map((n, i) => ({name: n.params.dst, capacity: 4, occupied: 1, pps: i ? 30 : 0,
       enqueued_total: 100, dequeued_total: 99, dropped_total: 0, subscription_active: i !== 1}));
     reply(findRequest(from, 'a', 'nodes.json'), manyNodes);
+    await until(() => findRequest(from, 'a', 'queues.json'));
     reply(findRequest(from, 'a', 'queues.json'), manyQueues);
     await until(async () => await count() === 450);
     const clickPage = name => evaluate(`[...document.querySelectorAll('nav.tabs button')].find(b => b.textContent.trim() === '${name}').click()`);
