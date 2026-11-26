@@ -10,7 +10,7 @@ examples/redundancy/nvjpeg/active_standby_mpegts/
 Known good dump:
 
 ```text
-/home/jp/out_nvjpeg_complicated_restart_rejoin.ts
+out_nvjpeg_complicated_restart_rejoin.ts
 duration: 53.480s
 max packet delta: 0.040s
 bad gaps >60ms: 0

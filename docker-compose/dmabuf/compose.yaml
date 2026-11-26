@@ -14,9 +14,11 @@ services:
     security_opt:
       - seccomp:unconfined
     environment:
-      JANUS_HOST_IP: ${JANUS_HOST_IP:-127.0.0.1}
-      # The public IP of a host behind 1:1 NAT (a cloud VM), for Janus's ICE candidates.
-      JANUS_NAT_1_1: ${JANUS_NAT_1_1:-}
+      # auto: the default route's IPv4 address (loopback gives WebRTC viewers no media).
+      JANUS_HOST_IP: ${JANUS_HOST_IP:-auto}
+      # The public IP of a host behind 1:1 NAT (a cloud VM), for Janus's ICE candidates. auto reads
+      # it from the GCE or EC2 instance metadata, and is skipped on other machines.
+      JANUS_NAT_1_1: ${JANUS_NAT_1_1:-auto}
       JANUS_HTTP_PORT: ${JANUS_HTTP_PORT:-8088}
       JANUS_WS_PORT: ${JANUS_WS_PORT:-8188}
       JANUS_AUDIO_ENABLED: "false"
@@ -44,6 +46,8 @@ services:
       JANUS_HTTP_PORT: ${JANUS_HTTP_PORT:-8088}
       JANUS_WS_PORT: ${JANUS_WS_PORT:-8188}
       JANUS_PREVIEW_PORT: ${JANUS_PREVIEW_PORT:-8080}
+      # The player has no authentication either: this machine only unless JANUS_PREVIEW_BIND=0.0.0.0.
+      JANUS_PREVIEW_BIND: ${JANUS_PREVIEW_BIND:-127.0.0.1}
 
   wayland:
     build:
@@ -118,7 +122,8 @@ services:
       - wayland-runtime:/run/avp-wayland
       - dma-browser-sockets:/tmp/dma-page
     ports:
-      - "${DMA_BROWSER_REST_PORT:-9009}:9009"
+      # Loopback only: the REST API opens any URL in the browser and has no authentication.
+      - "127.0.0.1:${DMA_BROWSER_REST_PORT:-9009}:9009"
 
   cuda-consumer:
     image: ${AVPLUMBER_IMAGE:-avplumber:local}

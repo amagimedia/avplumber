@@ -28,7 +28,7 @@ NumPy and FFmpeg with NVENC. `--runtime-media-dir /media` writes container paths
 
 Largest-remainder rounding makes the weighted allocations sum to the total;
 ties follow recipe order. Weights summing to `source_count` give exact counts.
-The graph accepts 193 sources, or 192 with an AUX program pad. Setup also
+The graph accepts 256 sources, or 255 with an AUX program pad. Setup also
 applies the selected [instance profile](../instance_profiles.py).
 
 ## Example presets

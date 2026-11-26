@@ -82,8 +82,7 @@ summary { cursor: pointer; }
 <div class="stack">
 <section class="card"><div class="card-title"><h2>Mixer</h2></div>
 <div id="desktop-presets" hidden>
-<button type="button" id="low">Low · 96 inputs</button>
-<button type="button" id="high">High · 192 inputs</button>
+<span id="preset-buttons" style="display:contents"></span>
 <p id="preset-memory" class="hint"></p>
 </div>
 <div class="fields">
@@ -153,7 +152,7 @@ const types = [
  {id:'sdr420_raw',name:'SDR · 4:2:0 · HW upload',detail:'8-bit NV12 · CPU → GPU · 1 upload unit',color:'#78aa62'},
  {id:'hlg420_raw',name:'HDR · 4:2:0 · HW upload',detail:'10-bit HLG P010 · CPU → GPU · 2 upload units',color:'#818bcf'},
  {id:'sdr_mxl',name:'MXL',detail:'Uncompressed 10-bit 4:2:2 video from another process on this machine, through shared memory<span id="mxl-max"></span>',color:'#c9b458'},
- {id:'sdr_ndi',name:'NDI',detail:'Compressed video over the network from senders on this machine · encoded and decoded on the CPUs<span id="ndi-max"></span>',color:'#5fb3c9'}
+ {id:'sdr_ndi',name:'NDI®',detail:'Compressed video over the network from senders on this machine · encoded and decoded on the CPUs<span id="ndi-max"></span> · NDI® is a registered trademark of Vizrt NDI AB (<a href="https://ndi.video/">ndi.video</a>)',color:'#5fb3c9'}
 ];
 // Presentation order is independent of the saved recipe's weight indices.
 const sourceGroups=[['NVDEC',[0,1]],['Browser',[4]],['HW upload',[2,3,6,5]],['MXL',[7]],['NDI',[8]]];
@@ -424,7 +423,6 @@ function loadSettings(s){
   if(saved.some((n,i)=>n!==balanced[i]))manualCounts=[...saved];
  }
 }
-for(const size of ['low','high'])$(size).onclick=()=>{loadSettings(desktop.presets[size]);update();};
 async function refresh(){
  const requestedSubmission=submission;
  try{
@@ -438,11 +436,16 @@ async function refresh(){
    desktop=status.desktop;
    if(desktop){
     $('desktop-presets').hidden=false;
-    const free=desktop.free_mib_at_start;
-    $('preset-memory').textContent=(free==null?'Startup VRAM unavailable.':`${(free/1024).toFixed(1)} GiB VRAM free before mixer startup.`)+
-     ` Suggested preset for available memory: ${desktop.suggested==='high'?'High':'Low'}. Both counts include four keys. Reduce Unique sources to try a smaller show.`;
+    $('preset-buttons').replaceChildren(...Object.entries(desktop.presets).map(([n,preset])=>{
+     const button=document.createElement('button');button.type='button';
+     button.textContent=`${n} inputs`+(n===desktop.suggested?' · suggested':'');
+     button.onclick=()=>{loadSettings(preset);update();};return button;}));
+    const gpu=desktop.gpu;
+    $('preset-memory').textContent=(gpu?`${gpu.name} · ${gpu.nvdec} NVDEC · ${gpu.nvenc} NVENC · ${(gpu.free_mib/1024).toFixed(1)} GiB free`+
+     (gpu.known?'':' (not in NVIDIA\'s engine table)')+`. Sizes scale the measured ${gpu.reference==='tesla_t4'?'T4':'L4'} to this GPU: estimates.`
+     :'GPU not detected: sizes use the L4 limits.')+(desktop.fits[desktop.suggested]?'':' The smallest show may not fit.')+' Counts include four keys.';
    }
-   const settings=status.settings??desktop?.presets.low;
+   const settings=status.settings??desktop?.presets[desktop.suggested];
    if(settings)loadSettings(settings);
    loaded=true;update();
   }

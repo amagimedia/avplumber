@@ -8,7 +8,7 @@ int main() {
     MixerState state;
     SceneDefinition scene;
     SourceMask expected;
-    for (int index : {0, 31, 32, 44, 63, 64, 95, 127, 128, 150, 191}) {
+    for (int index : {0, 31, 32, 44, 63, 64, 95, 127, 128, 150, 191, 192, 224, 255}) {
         auto name = std::to_string(index);
         state.sources[name].input_index = index;
         scene.sources[name] = {};
@@ -17,8 +17,8 @@ int main() {
     assert(state.computeActiveInputsMask(scene) == expected);
 
     // Prewarm forces both slot bits on, for the highest pad as well.
-    state.prewarm_source_mask = SourceMask().set(191);
-    assert(state.sourceOutputMask(state.sources.at("191"), 0) == 3);
+    state.prewarm_source_mask = SourceMask().set(191).set(255);
+    assert(state.sourceOutputMask(state.sources.at("255"), 0) == 3);
     assert(state.sourceOutputMask(state.sources.at("63"), 0) == 0);
     assert(state.sourceOutputMask(state.sources.at("32"), 1) == 1);
 

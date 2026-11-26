@@ -74,7 +74,7 @@ def test_a_bank_can_be_bigger_and_its_cells_grow_with_it():
 
 def test_reserved_banks_take_the_recipe_size_bitrate_and_preset():
     cfg = config(130)
-    show = {"aux_buses": [], "renditions": [{"port": 5004}]}
+    show = {"sources": [{"id": f"s{i}"} for i in range(130)], "aux_buses": [], "renditions": [{"port": 5004}]}
     opts = thumbnail.encode_options({"size": [1920, 1080], "bitrate_kbps": 3500, "preset": "p5"})
     banks = thumbnail.reserve_buses(show, 0, opts)
     assert [b["id"] for b in banks] == ["thumbnails1", "thumbnails2", "thumbnails3"]
@@ -107,9 +107,9 @@ def test_only_bank_cells_are_filtered_monitoring_pages_stay_bilinear():
     assert page and all("filter" not in l and "samples" not in l for l in page)
 
 
-@pytest.mark.parametrize("sources, banks", [(0, 1), (64, 1), (65, 2), (85, 2), (128, 2), (129, 3), (192, 3), (300, 3)])
+@pytest.mark.parametrize("sources, banks", [(0, 1), (64, 1), (65, 2), (85, 2), (128, 2), (129, 3), (192, 3), (193, 4), (256, 4), (300, 4)])
 def test_only_banks_with_sources_are_reserved(sources, banks):
-    """A show that lists its sources gets one bank per 64; one that does not keeps all three."""
+    """A show that lists its sources gets one bank per 64; one that does not gets them all."""
     show = {"sources": [{"id": f"s{i}"} for i in range(sources)], "aux_buses": []}
     reserved = [b for b in thumbnail.reserve_buses(show) if thumbnail.is_thumbnail(b)]
     assert [b["id"] for b in reserved] == [f"thumbnails{p + 1}" for p in range(banks)]

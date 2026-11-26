@@ -8,10 +8,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
 
 from demos.mixer.demo_recipe import write_atomic
 from pyplumber.mixer.tools.extra_aux import extra_buses
-from demos.mixer.instance_profiles import INSTANCE_PROFILES, InstanceType
+from demos.mixer import gpu_spec
+from demos.mixer.instance_profiles import INSTANCE_PROFILES, InstanceType, geforce_profile
 from demos.mixer.prepare_demo import CLEAN_PORT, plan
 from pyplumber.mixer.config import parse
-from demos.mixer.setup_runtime import desktop_preset, extra_aux_limit, recipe_for
+from demos.mixer.setup_runtime import desktop_preset, desktop_suggested, extra_aux_limit, recipe_for
 
 
 def seed(settings_path, media_dir, instance_type=InstanceType.NVIDIA_L4_CUARRAY):
@@ -21,9 +22,15 @@ def seed(settings_path, media_dir, instance_type=InstanceType.NVIDIA_L4_CUARRAY)
     if recipe_path.exists() or show_path.exists():
         print("Keeping the saved mixer setup.")
         return
-    profile = INSTANCE_PROFILES[InstanceType(instance_type)]
-    initial = (desktop_preset("low") if settings_path == "low" and instance_type == InstanceType.GEFORCE
-               else json.loads(Path(settings_path).read_text()))
+    # GeForce and auto read the GPU from MIXER_GPU (stack.sh): this container has none.
+    card = gpu_spec.probe() if instance_type in ("auto", InstanceType.GEFORCE) else None
+    instance_type = InstanceType(gpu_spec.instance_type(card) if instance_type == "auto" else instance_type)
+    profile = geforce_profile(card) if instance_type == InstanceType.GEFORCE else INSTANCE_PROFILES[instance_type]
+    if instance_type == InstanceType.GEFORCE and settings_path in ("fit", "low"):
+        # fit: the largest desktop size this GPU carries; low: the 96-input one.
+        initial = desktop_preset(desktop_suggested(profile) if settings_path == "fit" else "low", profile)
+    else:
+        initial = json.loads(Path(settings_path).read_text())
     recipe = recipe_for(profile, initial)
     settings = recipe["setup"]
     encodes = settings["encodes"]

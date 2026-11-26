@@ -12,9 +12,9 @@ import sys
 import threading
 import time
 
-from . import ndi_senders, prepare_demo
+from . import gpu_spec, ndi_senders, prepare_demo
 from .demo_recipe import DSK_PAGES, allocate, validate_dsk
-from .instance_profiles import INSTANCE_PROFILES, InstanceType, mxl_sources
+from .instance_profiles import INSTANCE_PROFILES, InstanceType, geforce_profile, mxl_sources
 from pyplumber.mixer.color import TRANSFER_TAGS
 from pyplumber.mixer.config import CANVAS_RATES, parse, parse_rate, rate_number, rate_weight
 from pyplumber.mixer.gui.storage import write_atomic
@@ -41,24 +41,38 @@ DECODE_MIXES = {"profile": {}, "h264": {"codec": "h264"},
 
 
 
-def desktop_preset(size):
-    """Low halves the decoded streams, raw uploads and total browser windows of High."""
-    factor = {"low": 1, "high": 2}[size]
+# Desktop show sizes, total inputs with the four keys: 96 and 192 are the former Low and High.
+DESKTOP_SIZES = (24, 48, 96, 192)
+
+
+def desktop_preset(total, profile=None):
+    """A 1080p25 SDR desktop show of *total* inputs ("low" is 96, "high" 192), split as the 192-input
+    one: 120 decoded, 32 raw NV12 and 36 browser pages beside the four keys, scaled down."""
+    total = {"low": 96, "high": 192}.get(total, total)
+    decoded, raw = round(total * 120 / 192), round(total * 32 / 192)
+    pages = total - decoded - raw - len(DSK_PAGES)
     return {**DEFAULT_SETTINGS, "orientation": "landscape", "fps": 25, "bit_depth": 8, "chroma": "420",
-            "scene_count": 256, "source_count": 96 * factor - len(DSK_PAGES),
-            "weights": [60 * factor, 0, 0, 0, 20 * factor - len(DSK_PAGES), 16 * factor, 0, 0, 0],
+            "scene_count": min(256, (profile or {"max_scenes": 256}).get("max_scenes", 192)),
+            "source_count": total - len(DSK_PAGES), "weights": [decoded, 0, 0, 0, pages, raw, 0, 0, 0],
             "dsk": list(DSK_PAGES), "clean_feed": True}
 
 
-def desktop_startup_memory():
-    """Probe before starting the mixer. Multiple visible GPUs make the target ambiguous."""
-    try:
-        free = subprocess.check_output(
-            ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
-            text=True, stderr=subprocess.DEVNULL, timeout=2).strip()
-    except (OSError, subprocess.SubprocessError):
-        return None
-    return int(free) if free.isascii() and free.isdigit() else None
+def desktop_fits(profile, preset):
+    """Every input of *preset* within the profile's 25 fps decode, browser, upload and source limits:
+    recipe_for would otherwise scale the show down rather than refuse it."""
+    decoded, pages, raw = preset["weights"][0], preset["weights"][4], preset["weights"][5]
+    keys = len(preset["dsk"])
+    return (decoded <= profile["nvdec_decodes"][25] and pages + keys <= browser_limit(profile, 25)
+            and raw <= profile["raw_upload_units"][25]
+            and preset["source_count"] + keys <= source_limit(profile, 25)
+            and preset["scene_count"] <= profile.get("max_scenes", 192))
+
+
+def desktop_suggested(profile):
+    """The largest desktop size that fits a profile scaled to its GPU; the smallest when none fits
+    or the GPU was not found (an unscaled profile)."""
+    fitting = [n for n in DESKTOP_SIZES if desktop_fits(profile, desktop_preset(n, profile))]
+    return fitting[-1] if fitting and "scaled_from" in profile else DESKTOP_SIZES[0]
 
 
 def _in_range(profile, kbps):
@@ -321,8 +335,10 @@ class SetupRuntime(BaseSetupRuntime):
     prepare_while_running = False
 
     def __init__(self, media_dir, recipe_path, bridge, instance_type, *args, **kwargs):
-        instance_type = InstanceType(instance_type)
-        profile = INSTANCE_PROFILES[instance_type]
+        # auto: a T4 or L4 keeps its measured profile, any other GPU gets the GeForce one scaled to it.
+        card = gpu_spec.probe() if instance_type in ("auto", InstanceType.GEFORCE) else None
+        instance_type = InstanceType(gpu_spec.instance_type(card) if instance_type == "auto" else instance_type)
+        profile = geforce_profile(card) if instance_type == InstanceType.GEFORCE else INSTANCE_PROFILES[instance_type]
         if mxl_available():   # the page offers MXL from this table, and the limits refuse it without
             gpu = next(iter(_static_facts().values()), {})
             profile = {**profile, "mxl_sources": mxl_sources(gpu.get("compute_capability"))}
@@ -336,12 +352,11 @@ class SetupRuntime(BaseSetupRuntime):
 
         self.desktop = None
         if instance_type == InstanceType.GEFORCE:
-            free = desktop_startup_memory()
-            # The 192-input / 26-output SDR reference peaked at 19,295 MiB on L4.
-            # Round up to 20 GiB for a first-run suggestion, never a capacity guarantee.
-            self.desktop = {"presets": {size: desktop_preset(size) for size in ("low", "high")},
-                            "free_mib_at_start": free,
-                            "suggested": "high" if free is not None and free >= 20 * 1024 else "low"}
+            presets = {str(n): desktop_preset(n, self.profile) for n in DESKTOP_SIZES}
+            self.desktop = {"presets": presets, "suggested": str(desktop_suggested(self.profile)),
+                            "fits": {n: desktop_fits(self.profile, preset) for n, preset in presets.items()},
+                            "gpu": self.profile.get("scaled_from"),
+                            "free_mib_at_start": card.free_mib if card else None}
 
     def status(self):
         status = super().status()

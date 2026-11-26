@@ -1,6 +1,6 @@
 """Native composition construction with explicit source or shared-clock timing."""
 
-MAX_INPUTS = 193  # src/mixer/primitives/source_mask.hpp
+MAX_INPUTS = 256  # src/mixer/primitives/source_mask.hpp
 
 
 def source_mask_param(mask: int):

@@ -57,6 +57,7 @@ RUN dnf -y install --setopt=install_weak_deps=False \
         ca-certificates \
         curl \
         glib2 \
+        iproute \
         jansson \
         libconfig \
         libcurl \

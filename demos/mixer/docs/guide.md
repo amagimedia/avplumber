@@ -244,7 +244,7 @@ The compositor and FFmpeg CUDA filters include native kernels for `sm_75`,
 5090 (`sm_120`), the host driver compiles the PTX on first use. The desktop
 launcher persists the cache in the media volume. The full mixer also needs
 NVDEC, NVENC and an NVIDIA DRM render node for browser capture.
-[Desktop quick start](../README.md#rtx-5080-and-5090-desktops) ·
+[Desktop quick start](../README.md#geforce-desktops) ·
 [NVIDIA Blackwell compatibility](https://docs.nvidia.com/cuda/blackwell-compatibility-guide/index.html)
 
 ## Behind a reverse proxy

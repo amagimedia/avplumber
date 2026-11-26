@@ -74,16 +74,16 @@ services:
       - --manage-setup
       # Select geforce for the editable desktop workloads or a measured T4/L4 profile.
       - --instance-type
-      - ${MIXER_INSTANCE_TYPE:-tesla_t4}
+      - ${MIXER_INSTANCE_TYPE:-auto}
       - --recipe
       - ${MIXER_RECIPE:-/media/demo.json}
       - --port
       - "${MIXER_CONTROL_PORT:-7777}"
       - --http-port
       - "${MIXER_HTTP_PORT:-7681}"
-      # The page has no authentication. The L4 stack binds 127.0.0.1 behind its proxy.
+      # The page has no authentication: this machine only, unless MIXER_BIND=0.0.0.0 opens it.
       - --bind
-      - ${MIXER_BIND:-0.0.0.0}
+      - ${MIXER_BIND:-127.0.0.1}
       - --dmabuf-rest
       - http://127.0.0.1:${DMA_BROWSER_REST_PORT:-9009}
       # The setup's extra aux outputs create their Janus mountpoints here.

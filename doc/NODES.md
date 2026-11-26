@@ -447,11 +447,11 @@ For video only:
 
 -   `freeze` (float) - default 5, seconds to duplicate last good frame
     before outputting backup frame
--   `backup_frame` (string of URL) - backup frame (slate) image
+-   `backup_image` (string of URL) - backup frame (slate) image
 -   `backup_picture_buffer` (string, name of instance-shared object) - read backup frame (slate) from this buffer. Use `picture_buffer_sink` to write frame to the buffer. Sentinel will reload the slate from the picture buffer every 64 frames and on every input signal break triggering slate insertion.
--   `initial_picture_buffer` (string, name of instance-shared object) - initialize last frame buffer with this buffer, so that at the beginning of stream it will be used for at most `freeze` duration. Useful to insert black frame instead of slate at the beginning when `forward_start_shift` is set to false. If unspecified, regular `backup_frame` or `backup_picture_buffer` will be used.
+-   `initial_picture_buffer` (string, name of instance-shared object) - initialize last frame buffer with this buffer, so that at the beginning of stream it will be used for at most `freeze` duration. Useful to insert black frame instead of slate at the beginning when `forward_start_shift` is set to false. If unspecified, regular `backup_image` or `backup_picture_buffer` will be used.
 
-For `sentinel_video`, either `backup_frame` or `backup_picture_buffer` must be provided.
+For `sentinel_video`, either `backup_image` or `backup_picture_buffer` must be provided.
 
 ### `rescale_video`
 
@@ -1537,7 +1537,7 @@ frame at that timestamp repeats its previous one. Upstream owns pacing. The
 mixer's clocked compositor is [`mixer_compositor`](#mixer_compositor), its
 downstream keyer [`mixer_keyer`](#mixer_keyer).
 
-N inputs: CUDA `av::VideoFrame` (`src`, at most 193), 1 output: CUDA `av::VideoFrame` with software format `sw_format`
+N inputs: CUDA `av::VideoFrame` (`src`, at most 256), 1 output: CUDA `av::VideoFrame` with software format `sw_format`
 
 Parameters:
 -   `hwaccel` (string, required) - CUDA device created with `hwaccel.init`

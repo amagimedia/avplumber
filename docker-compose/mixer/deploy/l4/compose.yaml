@@ -10,6 +10,8 @@ services:
       CUDA_DEVICE_MAX_CONNECTIONS: ${CUDA_DEVICE_MAX_CONNECTIONS:-32}
       CUDA_DEVICE_MAX_COPY_CONNECTIONS: ${CUDA_DEVICE_MAX_COPY_CONNECTIONS:-8}
       MIXER_GRAPH_URL: /graph/
+      # GPU 0 as stack.sh read it on the host: Setup's desktop sizes on a GeForce GPU.
+      MIXER_GPU: ${MIXER_GPU:-}
     build:
       dockerfile: docker-compose/mixer/Dockerfile.fedora44
       args:
@@ -30,6 +32,8 @@ services:
     image: *mixer-image
     entrypoint: [python3, docker-compose/mixer/deploy/l4/seed.py]
     command: ["${MIXER_SEED_SETTINGS:-/initial-settings.json}", /media, "${MIXER_INSTANCE_TYPE:-nvidia_l4_cuarray}"]
+    environment:
+      MIXER_GPU: ${MIXER_GPU:-}   # the seed has no GPU: stack.sh passes GPU 0's nvidia-smi line
     volumes:
       - ${MIXER_MEDIA_DIR}:/media:rw,z
       - ${MIXER_INITIAL_SETTINGS}:/initial-settings.json:ro,z
@@ -85,6 +89,8 @@ services:
     restart: unless-stopped
     depends_on: [mixer, janus-preview, graph]
     environment:
+      # 0.0.0.0 on a server (with MIXER_HTPASSWD); desktop.sh keeps the page on this machine.
+      MIXER_PUBLIC_BIND: ${MIXER_PUBLIC_BIND:-0.0.0.0}
       MIXER_PUBLIC_PORT: ${MIXER_PUBLIC_PORT:-7681}
       MIXER_HTTP_PORT: ${MIXER_HTTP_PORT}
       MIXER_PREVIEW_PORT: ${JANUS_PREVIEW_PORT}

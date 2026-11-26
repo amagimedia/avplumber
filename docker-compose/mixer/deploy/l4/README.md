@@ -3,8 +3,8 @@
 [Quick start](../../../../demos/mixer/README.md) · [Capacity](../../../../demos/mixer/docs/capacity.md#nvidia-l4-16-vcpu-nvidia_l4_cuarray) ·
 [HTML cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/)
 
-For an RTX 5080 or 5090, the [desktop launcher](../../../../demos/mixer/README.md#rtx-5080-and-5090-desktops)
-uses this stack with a 96-input first show and its own media directory.
+For a GeForce desktop, the [desktop launcher](../../../../demos/mixer/README.md#geforce-desktops)
+uses this stack with a first show sized to the GPU and its own media directory.
 
 The L4 preset requires a Linux L4 host with working NVIDIA DRM/GBM/EGL, R615+ driver,
 Docker Compose and NVIDIA Container Toolkit. The measured host has 16 vCPUs,
@@ -50,6 +50,10 @@ offers MXL sources among the HW uploads, up to the profile's `mxl_sources`. The 
 runs their writers beside the mixer and holds their flows in its own `/dev/shm` (`shm_size`).
 
 ## Optional NDI input
+
+NDI® is a registered trademark of Vizrt NDI AB ([ndi.video](https://ndi.video/)). The NDI SDK and its runtime are proprietary and licensed by Vizrt under the SDK's own terms, which
+`setup-ndi.sh` accepts for you: an image built with `ENABLE_NDI=1` contains the NDI runtime and must not
+be pushed to a public registry or redistributed.
 
 Set `ENABLE_NDI=1` in the L4 stack's `.env`. On the Ubuntu L4 host run:
 

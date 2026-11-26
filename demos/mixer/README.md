@@ -40,7 +40,9 @@ own mixer. The portable L4 deployment exposes it through the controls' **Graph**
 
 Use a Linux NVIDIA host with NVDEC/NVENC, Docker Compose, NVIDIA Container
 Toolkit and DRM/EGL/GBM for browser capture. Start from a recursive checkout;
-see [host setup](../README.md#nvidia-host-setup).
+`docker-compose/mixer/host-setup.sh check` lists anything missing with its fix, and
+`sudo docker-compose/mixer/host-setup.sh install` sets up Ubuntu 24.04/26.04
+([host setup](../README.md#nvidia-host-setup)).
 
 ```sh
 docker compose -f docker-compose/mixer/compose.yaml up --build
@@ -53,31 +55,43 @@ Open <http://127.0.0.1:7681/setup/>, choose sources, canvas and outputs, then
 **Apply setup**. Controls are at `/`, all outputs at `/wall`, and the standalone
 player at <http://127.0.0.1:8080>. Select SDR if HEVC playback is unavailable.
 
-For a remote host set `JANUS_HOST_IP=<host>`; allow TCP 7681/8080 and UDP
-20000–20100. Stop with `docker compose -f docker-compose/mixer/compose.yaml down`.
-The page has no authentication: allow it only from trusted networks, or use the
-L4 preset's proxy with `MIXER_HTPASSWD`. The mixer's control port 7777 stays on loopback.
-`MIXER_BIND=127.0.0.1` keeps the page local.
+Janus offers the address of the default route's interface to WebRTC viewers, and on GCE or EC2
+also the VM's public address from the instance metadata. Set `JANUS_HOST_IP` when viewers reach
+this host on another interface (a VPN, a second NIC), or `JANUS_NAT_1_1` for other 1:1 NAT.
+The page and the player have no authentication, so they listen on 127.0.0.1 only. For a remote
+host set `MIXER_BIND=0.0.0.0 JANUS_PREVIEW_BIND=0.0.0.0`, allow TCP 7681/8080 and UDP 20000–20100
+from trusted networks only, or use the L4 preset's proxy with `MIXER_HTPASSWD`. The mixer's control
+port 7777 stays on loopback. Stop with `docker compose -f docker-compose/mixer/compose.yaml down`.
 
 Setup saves settings and generated assets in `media/`; applying changes pauses
 output before asset preparation and restarts the mixer afterward. Synthetic
 clip generation uses NVENC and must not compete with the live show for GPU
 memory. Cached clips are reused. Keep that directory writable and mount it
 whole: Setup atomically replaces the generated show. Capacity comes from the
-selected [instance profile](instance_profiles.py), not a universal source limit.
+[instance profile](instance_profiles.py), not a universal source limit. Setup picks it from the GPU:
+a T4 or L4 gets its measured profile, any other GPU the [GeForce sizes](#geforce-desktops);
+`MIXER_INSTANCE_TYPE` overrides the choice.
 
-### RTX 5080 and 5090 desktops
+### GeForce desktops
+
+RTX 20, 30, 40 and 50 series cards, and other GPUs without a measured profile.
 
 Use native x86-64 Linux, Docker Compose and the NVIDIA Container Toolkit.
-**R615 is the minimum host driver for the desktop image. R620 runs the same
-image.** The build uses CUDA Toolkit 13.4. At runtime the Container Toolkit
+**R615 is the minimum host driver for the desktop image;** 620.70.10 ran the desktop show on a
+T4 on 2026-11-25. The build uses CUDA Toolkit 13.4. At runtime the Container Toolkit
 mounts the installed host driver libraries. The host needs no CUDA Toolkit.
 
 | Linux driver | CUDA version reported by the driver | Desktop mixer image |
 | --- | --- | --- |
 | R595 | 13.2 | Below the minimum for Blackwell PTX and the pinned video codec API |
 | R615 | 13.4 | Meets the minimum |
-| R620 | 13.5 | Runs the CUDA 13.4 build through driver backward compatibility |
+| R620 | 13.5 | Runs the CUDA 13.4 build (620.70.10 run on a T4) |
+
+Ubuntu 26.04 kernels from 7.0.0-1014 (the fresh GCP image ships 7.0.0-1017) do not build the
+NVIDIA 615 or 620 module (2026-11-25): they lack `dma_buf_move_notify`. Install an earlier kernel
+(7.0.0-1011 ran 620.70.10 on a T4 and an RTX PRO 6000 Blackwell), make it the GRUB default and
+remove the newer ones, or use Ubuntu 24.04. `host-setup.sh check` flags a boot kernel without the
+module and `install` says so instead of failing in dpkg.
 
 On the RTX 5080 and 5090 the driver compiles the image's CUDA 13.4 PTX on
 first use. FFmpeg also uses Video Codec SDK 13.1 headers, which require
@@ -94,26 +108,35 @@ cd avplumber
 ./demos/mixer/desktop.sh
 ```
 
-First start builds the remaining images and generates the Low show. The desktop
+First start builds the remaining images and generates the largest show Setup suggests for the
+GPU (below). The desktop
 build leaves the optional MXL SDK disabled (`WITH_MXL=0`). Open
 <http://127.0.0.1:7681/setup/> to follow preparation. When it says **Mixer ready**,
 open the [controls](http://127.0.0.1:7681/), [wall](http://127.0.0.1:7681/wall)
-or [live graph](http://127.0.0.1:7681/graph/). To change the load, choose
-**Low** or **High**, then **Apply setup**. Both are
-1920×1080p25 SDR shows with 256 scenes, four downstream keys, Program and
-clean Program, Program/Preview and Multiviewer. You can lower **Unique sources**
+or [live graph](http://127.0.0.1:7681/graph/). To change the load, choose a size, then
+**Apply setup**. Every size is a 1920×1080p25 SDR show with up to 256 scenes, four downstream keys,
+Program and clean Program, Program/Preview and Multiviewer. You can lower **Unique sources**
 before applying. The launcher keeps shows and the CUDA JIT cache in
 `media/desktop/` across restarts.
 
-| Preset | Total inputs | HEVC decoded | Raw NV12 | Browser scene sources | Browser keys |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Low | 96 | 60 | 16 | 16 | 4 |
-| High | 192 | 120 | 32 | 36 | 4 |
+| Size | HEVC decoded | Raw NV12 | Browser scene sources | Browser keys |
+| ---: | ---: | ---: | ---: | ---: |
+| 24 | 15 | 4 | 1 | 4 |
+| 48 | 30 | 8 | 6 | 4 |
+| 96 | 60 | 16 | 16 | 4 |
+| 192 | 120 | 32 | 36 | 4 |
 
-Setup suggests High with at least 20 GiB free on a
-single visible GPU at startup. Otherwise it suggests Low. The 192-input,
-26-output L4 reference run peaked at 19,295 MiB on a card reporting
-23,034 MiB usable. Desktop throughput and peak memory remain unmeasured.
+Setup reads GPU 0's name and free VRAM, looks up its NVDEC and NVENC engines in
+[NVIDIA's support matrix](https://developer.nvidia.com/video-encode-decode-support-matrix)
+(`gpu_engines.json`) and suggests the largest size that fits. The limits scale a measured
+reference by those engines and the free memory, never above it: the T4 for Turing and Ampere
+cards, the L4 for Ada and newer. The 192-input, 26-output L4 reference run peaked at 19,295 MiB.
+An RTX 5080 (2 NVDEC, 16 GB) gets 96, an 8 GB RTX 4060 48, an RTX 3060 24. A T4 or L4 keeps its
+own measured profile. The sizes are estimates for GeForce cards. On 2026-11-25 `desktop.sh` ran the 192-input show on an
+RTX PRO 6000 Blackwell (GCP G4, driver 620.70.10) with no missed deadline, decoders at 46% and
+17 GB of VRAM, and 48 inputs on a T4. Told it was an RTX 5080 (2 NVDEC, 2 NVENC, 16 GB), Setup
+suggested 96 inputs; on the Blackwell card that show peaked at 9.0 GB of VRAM with 4 encode sessions
+and about 45% of two decoders' worth of NVDEC, with no missed deadline.
 The driver allows 12 concurrent GeForce encode sessions per system, shared
 with other applications. [L4 measurements](https://amagimedia.github.io/avplumber/demos/mixer/docs/capacity-l4.json) ·
 [NVIDIA session limits](https://developer.nvidia.com/video-encode-decode-support-matrix)
@@ -121,6 +144,8 @@ with other applications. [L4 measurements](https://amagimedia.github.io/avplumbe
 The launcher selects GPU 0's NVIDIA render node for both Wayland and Chromium.
 It advertises the default network interface's IPv4 address for WebRTC. Set
 `JANUS_HOST_IP` to the desktop's LAN address if the default route uses a VPN.
+The page has no password, so the launcher serves it on 127.0.0.1 only; set
+`MIXER_PUBLIC_BIND=0.0.0.0` to open it to the LAN.
 Use `./demos/mixer/desktop.sh check` for the host prerequisite checks alone.
 
 The raw NV12 inputs in both presets keep their loops in page-locked host RAM.

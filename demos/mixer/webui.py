@@ -8,10 +8,10 @@ import argparse
 
 def configure(parser):
     parser.add_argument("--manage-setup", action="store_true", help="Own and restart the demo mixer process")
-    instance_types = [t.value for t in InstanceType]
+    instance_types = [t.value for t in InstanceType] + ["auto"]
     parser.add_argument("--instance-type", choices=instance_types,
-                        help="Setup capacity profile. GeForce offers experimental desktop workloads. "
-                             "Required with --manage-setup.")
+                        help="Setup capacity profile. auto: the measured T4 or L4 profile on those GPUs, "
+                             "otherwise GeForce, scaled to the GPU (estimates). Required with --manage-setup.")
     parser.add_argument("--media-dir", type=Path, default=Path("/media"))
     parser.add_argument("--recipe", type=Path, default=Path("/media/demo.json"))
     parser.add_argument("--dmabuf-rest", default="http://127.0.0.1:9009")

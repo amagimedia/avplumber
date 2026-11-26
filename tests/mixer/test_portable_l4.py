@@ -1,5 +1,6 @@
 """Portable L4 settings preserve the measured input contract on every Setup change."""
 
+import copy
 import importlib.util
 import json
 from pathlib import Path
@@ -70,15 +71,51 @@ def test_desktop_presets_plan_exact_inputs_and_fit_session_limit(tmp_path, size,
     assert extra_aux_limit(profile, parse(show), recipe["setup"]["encodes"]) == 8
 
 
-@pytest.mark.parametrize(("sample", "suggested"), [("16384", "low"), ("20480", "high"),
-                                                 ("32768\n8192", "low"), ("[N/A]", "low")])
-def test_desktop_suggests_a_preset_from_free_memory_at_start(tmp_path, monkeypatch, sample, suggested):
-    monkeypatch.setattr("demos.mixer.setup_runtime.subprocess.check_output", lambda *a, **kw: sample)
-    runtime = SetupRuntime(tmp_path, tmp_path / "demo.json", SimpleNamespace(port=7777), "geforce")
-    status = runtime.status()
-    assert status["desktop"]["suggested"] == suggested
-    assert status["desktop"]["free_mib_at_start"] == (int(sample) if sample.isdigit() else None)
-    assert status["phase"] == "idle"
+@pytest.mark.parametrize(("line", "suggested", "reference"), [
+    ("NVIDIA GeForce RTX 5080, 12.0, 16303, 15800", "96", "nvidia_l4_cuarray"),   # 2 NVDEC, 16 GB
+    ("NVIDIA L4, 8.9, 23034, 22500", "192", "nvidia_l4_cuarray"),                 # the reference itself
+    ("NVIDIA GeForce RTX 4060, 8.9, 8188, 7600", "48", "nvidia_l4_cuarray"),       # 1 NVDEC, 8 GB
+    ("NVIDIA GeForce RTX 3060, 8.6, 12288, 11500", "24", "tesla_t4"),              # Ampere: from the T4
+    ("", "24", None),                                                               # no GPU found
+])
+def test_desktop_suggests_the_largest_show_the_gpu_carries(tmp_path, monkeypatch, line, suggested, reference):
+    monkeypatch.setenv("MIXER_GPU", line)
+    monkeypatch.setattr("demos.mixer.gpu_spec.subprocess.check_output", lambda *a, **kw: "")
+    status = SetupRuntime(tmp_path, tmp_path / "demo.json", SimpleNamespace(port=7777), "geforce").status()
+    assert status["desktop"]["suggested"] == suggested and status["phase"] == "idle"
+    assert list(status["desktop"]["presets"]) == ["24", "48", "96", "192"]
+    assert (status["desktop"]["gpu"] or {}).get("reference") == reference
+    assert status["desktop"]["fits"][suggested]
+
+
+def test_scaling_leaves_the_measured_t4_and_l4_profiles_alone(tmp_path, monkeypatch):
+    before = copy.deepcopy(INSTANCE_PROFILES)
+    for line in ("NVIDIA GeForce RTX 3060, 8.6, 12288, 11500", "NVIDIA GeForce RTX 5090, 12.0, 32607, 32000"):
+        monkeypatch.setenv("MIXER_GPU", line)
+        SetupRuntime(tmp_path, tmp_path / "demo.json", SimpleNamespace(port=7777), "geforce")
+    assert INSTANCE_PROFILES == before
+
+
+@pytest.mark.parametrize(("line", "expected"), [
+    ("Tesla T4, 7.5, 15360, 15000", "tesla_t4"), ("NVIDIA L4, 8.9, 23034, 22500", "nvidia_l4_cuarray"),
+    ("NVIDIA GeForce RTX 5080, 12.0, 16303, 15800", "geforce"),
+])
+def test_auto_keeps_the_t4_and_l4_profiles(tmp_path, monkeypatch, line, expected):
+    monkeypatch.setenv("MIXER_GPU", line)
+    runtime = SetupRuntime(tmp_path, tmp_path / "demo.json", SimpleNamespace(port=7777), "auto")
+    assert runtime.status()["instance_type"] == expected
+    if expected != "geforce":
+        assert runtime.profile["nvdec_decodes"] == INSTANCE_PROFILES[InstanceType(expected)]["nvdec_decodes"]
+        assert "desktop" not in runtime.status()
+
+
+@pytest.mark.parametrize(("line", "total"), [("NVIDIA GeForce RTX 5080, 12.0, 16303, 15800", 96),
+                                             ("NVIDIA GeForce RTX 4060, 8.9, 8188, 7600", 48)])
+def test_seed_fit_starts_the_suggested_show(tmp_path, monkeypatch, line, total):
+    monkeypatch.setenv("MIXER_GPU", line)
+    l4_seed.seed("fit", tmp_path, "geforce")
+    recipe = json.loads((tmp_path / "demo.json").read_text())
+    assert len(plan(recipe, tmp_path)[0]["sources"]) == total
 
 
 def test_seed_accepts_low_bandwidth_hevc_monitors_and_scales_extra_count(tmp_path):

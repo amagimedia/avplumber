@@ -11,7 +11,10 @@ clips, and its UI-only preview works without a GPU.
 
 Use a Linux x86-64 host with Docker, Docker Compose, an NVIDIA driver, and the
 [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
-Follow that guide to enable Docker GPU access, then check:
+For the mixer, [`host-setup.sh`](../docker-compose/mixer/host-setup.sh) checks every piece on any
+desktop, server or cloud (`docker-compose/mixer/host-setup.sh check`, each missing item with its fix)
+and installs them on Ubuntu 24.04/26.04 (`sudo docker-compose/mixer/host-setup.sh install`, plus
+`--driver <version>` for a pinned R615+ driver on 26.04). Otherwise follow the toolkit guide, then check:
 
 ```sh
 nvidia-smi
@@ -67,10 +70,11 @@ Open <http://127.0.0.1:8080> after starting a player. The included video-only
 mountpoint accepts the demos' default RTP/RTCP ports, 5004/5005. Run one demo
 output at a time on those ports.
 
-For a remote host, prefix the Compose command with `JANUS_HOST_IP=<host>` using
-the host address reachable by your browser, then open `http://<host>:8080`.
-Allow the preview and Janus HTTP ports (8080, 8088) and WebRTC UDP ports
-20000–20100 through the host firewall.
+The player listens on 127.0.0.1 only (it has no login); for a remote host set
+`JANUS_PREVIEW_BIND=0.0.0.0` and open `http://<host>:8080`. Janus offers the default route's address, and on
+GCE or EC2 the VM's public address; set `JANUS_HOST_IP=<host>` when the browser reaches the host on
+another interface. Allow the preview port 8080 and WebRTC UDP ports 20000–20100 through the host
+firewall; the Janus API stays on loopback behind the preview server.
 
 Stop the preview services with:
 
