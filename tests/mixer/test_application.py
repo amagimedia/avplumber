@@ -73,6 +73,16 @@ def test_local_aux_previews_replace_the_bus_encoder_with_its_monitor(native_boun
     assert set(plain) == {name for name in encoded if not name.startswith("monitor_")}
 
 
+@pytest.mark.parametrize("value, local", [("1", True), ("0", False), ("", False)])
+def test_the_mixer_process_reads_local_aux_previews_from_its_environment(monkeypatch, value, local):
+    """Setup starts `python -m pyplumber.mixer` with its own environment, where desktop.sh puts the flag."""
+    from pyplumber.mixer.cli import parse_args
+    monkeypatch.setenv("MIXER_LOCAL_PREVIEWS", value)
+    monkeypatch.setenv("MIXER_DMABUF_MONITOR_DIR", "/media/.desktop-monitors")
+    options = parse_args(["--input", "a.mp4", "--output", "p.ts"])
+    assert options.local_aux_previews is local and options.dmabuf_monitor_dir == "/media/.desktop-monitors"
+
+
 def test_processed_cuda_ipc_input_uses_final_edge_for_optional_startup(native_boundary):
     options = MixerOptions(cuda_ipc_inputs=(("cam", "/tmp/playout.sock"),))
     app = build_application(show(), options, api=fake_api(),

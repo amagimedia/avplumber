@@ -205,6 +205,7 @@ const sourceLimit = () => {
 // The encodes in setup_runtime.extra_aux_limit's order, which it sums alike: the SDR program, the
 // HEVC HLG one on a 10-bit canvas, the SDR clean feed (counted even while off), the instance's own
 // aux buses (config.aux_fps), then one extra aux output. Every canvas here has 1080p's pixels.
+// The thumbnail banks have fixed encodes and no row: only the server counts them.
 // Each output's fps is its capacity weight (setup_runtime.extra_aux_limit), label its exact rate.
 function encodeOutputs(canvasRate,tenBit){
  const output=(id,name,r)=>({id,name,codec:(encodes[id]?.codec??defaultEncode(id).codec)==='hevc_nvenc'?'hevc':'h264',
