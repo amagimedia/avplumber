@@ -191,3 +191,27 @@ npm test         # unit tests (Vitest)
 npm run lint     # eslint
 npm run build    # tsc -b
 ```
+
+### Opt-in restricted scene mode
+
+`DMA_BROWSER_ISOLATED_SCENE_URL=http://127.0.0.1:<port>/` selects the restricted
+renderer path. It requires the same `DMA_BROWSER_AUTO_OPEN_URL`, one window, one
+process, and audio disabled. The shell rejects extra launch arguments. The app
+enables Chromium sandboxing, rejects inherited unsafe/debugging switches, and
+does not open its REST control listener. Each window uses a distinct nonpersistent
+session, context isolation, web security, no Node integration, and no preload.
+Requests are limited to the exact scene document, its runtime/package routes,
+its `/state` WebSocket, and inline image/font data. Other navigation, subframes,
+popups, permissions, downloads and webviews are denied. Legacy mode is unchanged.
+
+This is a renderer policy, **not a qualified hostile-code sandbox**. Dedicated
+Linux process/network isolation, private profile/device access, deadline-enforced
+process cleanup, adversarial Electron checks and GPU DMA-BUF qualification remain
+required before claiming production isolation. Reframer now selects only its own
+published packages; re-evaluate this isolation requirement against that trust model.
+WebRequest filtering and
+WebRTC policy alone do not prove OS-level network isolation. The reframer's
+production graphics admission gate remains closed.
+
+Policy reference: [Electron security guidance](https://www.electronjs.org/docs/latest/tutorial/security)
+and [WebRequest interception](https://www.electronjs.org/docs/latest/api/web-request).

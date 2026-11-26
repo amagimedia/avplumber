@@ -1,4 +1,5 @@
 import * as path from 'node:path';
+import type { IsolatedScenePolicy } from './IsolatedScenePolicy';
 import { BrowserWindow } from 'electron';
 import { AudioCaptureChannel } from './capture/AudioCaptureChannel';
 import { FrameCaptureChannel } from './capture/FrameCaptureChannel';
@@ -71,6 +72,7 @@ const AUTOPLAY_JS = [
 
 export interface ManagedWindowOptions {
   readonly config: WindowConfig;
+  readonly isolation?: IsolatedScenePolicy;
   readonly socketDir: string;
   readonly preloadPath: string;
   readonly logger: Logger;
@@ -113,6 +115,9 @@ export class ManagedWindow implements IManagedWindow {
     this.opts = opts;
     this.config = opts.config;
     this.id = opts.config.id;
+    if (opts.isolation && (this.config.url !== opts.isolation.url || this.config.audio)) {
+      throw new Error('Invalid isolated scene window');
+    }
   }
 
   public async create(): Promise<void> {
@@ -150,15 +155,17 @@ export class ManagedWindow implements IManagedWindow {
         backgroundThrottling: false,
         sandbox: false,
         autoplayPolicy: 'no-user-gesture-required',
-        preload: this.opts.preloadPath,
+        ...(this.opts.isolation ? {} : { preload: this.opts.preloadPath }),
         additionalArguments: [
           `--window-id=${this.id}`,
           `--audio-enabled=${this.config.audio ? '1' : '0'}`,
         ],
+        ...this.opts.isolation?.preferences(),
       },
     });
 
     const wc = this.win.webContents;
+    this.opts.isolation?.attach(wc);
     this.frameChannel.attach(wc);
     wc.setFrameRate(this.config.fps);
 
@@ -271,6 +278,9 @@ export class ManagedWindow implements IManagedWindow {
   }
 
   public update(url: string): void {
+    if (this.opts.isolation && url !== this.opts.isolation.url) {
+      throw new Error('Isolated scene URL is immutable');
+    }
     if (!this.win || this.win.isDestroyed()) return;
     this.config = { ...this.config, url };
     this.opts.logger.forWindow(this.id).write(`update url=${url}`);
@@ -365,7 +375,7 @@ export class ManagedWindow implements IManagedWindow {
   private async loadUrl(url: string): Promise<void> {
     if (!this.win) return;
     const target = new URL(url);
-    if (target.protocol === 'http:' || target.protocol === 'https:') {
+    if (!this.opts.isolation && (target.protocol === 'http:' || target.protocol === 'https:')) {
       target.searchParams.set('_cb', Date.now().toString());
     }
     const urlToLoad = target.href;

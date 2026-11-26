@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { app } from 'electron';
+import { IsolatedScenePolicy } from './IsolatedScenePolicy';
 import { HwAccelConfigurator } from './HwAccelConfigurator';
 import { Logger } from './support/Logger';
 import { ManagedWindow, type IManagedWindowFactory } from './ManagedWindow';
@@ -30,6 +31,7 @@ export interface ApplicationConfig {
 export class Application {
   private readonly env: Env;
   private readonly cfg: ApplicationConfig;
+  private readonly isolation: IsolatedScenePolicy | undefined;
   private readonly autoOpenConfig: WindowConfig | null;
   private logger: Logger | null = null;
   private restServer: RestServer | null = null;
@@ -37,12 +39,39 @@ export class Application {
 
   constructor(env: Env = process.env) {
     this.env = env;
+    this.isolation = env.DMA_BROWSER_ISOLATED_SCENE_URL
+      ? new IsolatedScenePolicy(env.DMA_BROWSER_ISOLATED_SCENE_URL)
+      : undefined;
     this.cfg = this.readConfig();
     this.autoOpenConfig = this.readAutoOpenConfig();
+    if (
+      this.isolation &&
+      (!this.autoOpenConfig ||
+        this.autoOpenConfig.url !== this.isolation.url ||
+        this.autoOpenConfig.audio ||
+        this.cfg.maxWindows !== 1 ||
+        envString(env, 'DMA_BROWSER_PROCESS_COUNT', '1') !== '1')
+    ) {
+      throw new Error('Isolated scenes require one fixed silent auto-open window');
+    }
   }
 
   /** Apply Chromium switches. Must run BEFORE `app.whenReady()`. */
   public applyHwAccelSwitches(): void {
+    if (this.isolation) {
+      for (const name of [
+        'no-sandbox',
+        'disable-setuid-sandbox',
+        'disable-gpu-sandbox',
+        'disable-web-security',
+        'remote-debugging-port',
+        'remote-debugging-pipe',
+      ]) {
+        if (app.commandLine.hasSwitch(name))
+          throw new Error('Unsafe isolated browser launch switch');
+      }
+      app.enableSandbox();
+    }
     new HwAccelConfigurator(this.env, app.commandLine).apply();
   }
 
@@ -68,6 +97,7 @@ export class Application {
       create: (windowCfg: WindowConfig) =>
         new ManagedWindow({
           config: windowCfg,
+          ...(this.isolation ? { isolation: this.isolation } : {}),
           socketDir: this.cfg.socketDir,
           preloadPath: this.preloadPath(),
           logger,
@@ -79,12 +109,16 @@ export class Application {
     };
 
     this.windowManager = new WindowManager(factory, { maxWindows: this.cfg.maxWindows });
-    this.restServer = new RestServer(this.windowManager, {
-      host: this.cfg.host,
-      port: this.cfg.port,
-    });
-    await this.restServer.listen();
-    this.logger.global(`REST server listening on http://${this.cfg.host}:${String(this.cfg.port)}`);
+    if (!this.isolation) {
+      this.restServer = new RestServer(this.windowManager, {
+        host: this.cfg.host,
+        port: this.cfg.port,
+      });
+      await this.restServer.listen();
+      this.logger.global(
+        `REST server listening on http://${this.cfg.host}:${String(this.cfg.port)}`,
+      );
+    }
 
     if (this.autoOpenConfig) {
       this.logger.global(
