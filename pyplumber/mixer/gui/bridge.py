@@ -12,7 +12,7 @@ from pyplumber.mixer.control import AvpConnection, AvpProtocolError, mixer_comma
 
 TAKE_COMMANDS = ("cut", "fade", "wipe", "move", "preview", "interrupt")
 PROGRAM_TAKES = ("cut", "fade", "wipe", "move")
-AUX_COMMANDS = ("aux", "aux_layout", "aux_page")
+AUX_COMMANDS = ("aux", "aux_layout", "aux_page", "aux_composition")
 STATE_TTL_S = 0.2
 # What a show fixes when it is built (its settings, its scenes, the layouts its AUX buses offer) is
 # asked for this often, not on every poll: a new show is seen within that time of its start.

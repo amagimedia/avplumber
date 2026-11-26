@@ -826,19 +826,33 @@ CUDA device. This is separate from the GPU-native program video path.
 
 ## AUX bus follower
 
-Every AUX bus (`demos/mixer/docs/config.md`, `aux_buses`) has a
-`mixer_pvw_follow` node, `aux_<id>_pvw`, the only writer of its compositor's
-`composition`. The control side (`pyplumber/mixer/aux.py`) turns the bus's
-layout, a list of cells by role (`pyplumber/mixer/aux_layout.py`), into the
-node's `layout` object: every scene's layers in the `pvw` cells (empty when
-there are none) and the base, everything else, with a revision. The node sets
-pvw[shown] followed by the base with that revision; the compositor reports the
-revision it draws (`composition_revision`), and the bus is
+Every AUX bus (`demos/mixer/docs/config.md`, `aux_buses`) with the default
+`mode: "follow"` has a `mixer_pvw_follow` node, `aux_<id>_pvw`, the only writer
+of its compositor's `composition`. The control side (`pyplumber/mixer/aux.py`)
+turns the bus's layout, a list of cells by role (`pyplumber/mixer/aux_layout.py`),
+into the node's `layout` object: every scene's layers in the `pvw` cells (empty
+when there are none) and the base, everything else, with a revision. The node
+sets pvw[shown] followed by the base with that revision; the compositor reports
+the revision it draws (`composition_revision`), and the bus is
 `composition_pending` until it is the bus's own. A slot assignment, a layout
 switch and a page turn are each a new layout object; one Python thread for all
 buses resends the layout to a follower that restarted with the one it was built
 with. The timing of the PVW cells is
 `src/mixer/primitives/PreviewFollow.hpp`.
+
+### External AUX mode (`mode: "external"`)
+
+An external bus builds the same clocked compositor and Janus/MXL outputs, but
+omits the follower and does **not** register the compositor with the mixer
+(registering freezes `mixer.scene`). The client writes the picture:
+
+```text
+mixer.aux_composition {"bus":"<id>","composition":{"layers":[…],"active_inputs":…}}
+```
+
+REST: `PUT /mixer/aux/{bus}/composition` with `{"composition":…}`. Slot / layout
+/ page commands refuse on an external bus. Studio monitor buses use this mode
+instead of monkeypatching `AuxBus`.
 
 Every preview change is one `MixerState::PreviewChange` (revision, the pts of
 the first program frame of the new program, the take command's receipt and

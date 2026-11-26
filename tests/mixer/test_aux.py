@@ -1,6 +1,7 @@
 from dataclasses import replace
 from fractions import Fraction
 import json
+import time
 from types import SimpleNamespace
 import threading
 
@@ -439,7 +440,8 @@ def test_commands_route_any_number_of_buses_by_id(cfg):
     for bus in buses:
         reachable(avp, bus)
     buses.register_commands()
-    assert set(avp.handlers) == {"mixer.aux", "mixer.aux_layout", "mixer.aux_page", "mixer.aux_status", "mixer.aux_layouts"}
+    assert set(avp.handlers) == {"mixer.aux", "mixer.aux_layout", "mixer.aux_page", "mixer.aux_composition",
+                                 "mixer.aux_status", "mixer.aux_layouts"}
     assert avp.command("mixer.aux_layout", bus="bus2", layout={"preset": "source_pages"})["page"] == 0
     assert avp.command("mixer.aux_page", bus="bus2", page=3)["layout"]["page"] == 3
     with pytest.raises(ConfigError, match="no source pages"):
@@ -513,6 +515,61 @@ def test_scheduler_survives_an_unreachable_follower(cfg, monkeypatch):
     clock[0] += 1
     buses.tick()
     assert avp.layouts[-1]["revision"] == bus.revision
+
+
+def test_external_mode_is_parsed_and_refuses_follow_commands(cfg):
+    bus = parse_aux_buses([bus_json(mode="external")], cfg)[0]
+    assert bus.mode == "external"
+    assert parse_aux_buses([bus_json()], cfg)[0].mode == "follow"
+    with pytest.raises(ConfigError, match="follow' or 'external"):
+        parse_aux_buses([bus_json(mode="monitor")], cfg)
+    live = make_bus(cfg, bus_json(mode="external"))
+    assert live.external
+    with pytest.raises(ConfigError, match="aux_composition"):
+        live.assign({"scenes": ["full"] * 8, "expected_revision": live.revision})
+
+
+def test_external_bus_builds_without_mixer_registration_or_follower(cfg, monkeypatch):
+    """Studio monitor buses: clocked compositor + Janus, no mixer.scene freeze, no pvw_follow."""
+    import pyplumber.mixer.janus as janus
+    nodes = []
+    monkeypatch.setattr(janus, "build_janus_output", lambda *a, **kw: "listener")
+    avp = SimpleNamespace(addNode=lambda node, **kw: nodes.append(node), edges=SimpleNamespace(planCapacity=lambda *a: None),
+                          commands=[])
+    avp.executeCommandsFromString = lambda text: avp.commands.append(text)
+    api = SimpleNamespace(FilterVideo=lambda params: SimpleNamespace(parameters=params))
+    mixer = SimpleNamespace(add_aux_destination=lambda *a: None, latency_ms=50, name="mixer",
+                            canvas_compositor=lambda params, api: SimpleNamespace(parameters=params),
+                            backend=SimpleNamespace(graph_threads=1, conversion=lambda *a, **kw: "graph"))
+    options = SimpleNamespace(janus_host="127.0.0.1", janus_video_ssrc=1, janus_rtcp_bind="")
+    bus = AuxBus(avp, api, mixer, cfg, parse_aux_buses([bus_json(mode="external", scenes=["repeat"])], cfg)[0])
+    bus.build(options)
+    assert len(nodes) == 1   # compositor only; no follower
+    params = nodes[0].parameters
+    assert "mixer" not in params and params["aux_mode"] is True
+    assert params["name"] == "aux_multiview_comp"
+    composition = {"layers": [{"input": 0, "dst_x": 0, "dst_y": 0, "dst_w": 100, "dst_h": 100}],
+                   "active_inputs": 1}
+    assert bus.set_composition({"composition": composition}) == {
+        "bus": "multiview", "node": "aux_multiview_comp"}
+    assert avp.commands == [
+        f"node.object.set aux_multiview_comp composition {json.dumps(composition)}"]
+    with pytest.raises(ConfigError, match="mode follow"):
+        bus.set_layout({"layout": {"preset": "pgm_pvw_grid"}})
+    assert bus.tick(time.monotonic()) == 1.0
+
+
+def test_aux_composition_command_is_registered(cfg):
+    avp = FakeAvp()
+    bus = make_bus(cfg, bus_json(mode="external"), avp=avp)
+    bus.node_name = "aux_multiview_comp"
+    avp.commands = []
+    avp.executeCommandsFromString = lambda text: avp.commands.append(text)
+    AuxBuses(avp, [bus]).register_commands()
+    reply = avp.command("mixer.aux_composition", bus="multiview",
+                        composition={"layers": [], "active_inputs": 0})
+    assert reply == {"bus": "multiview", "node": "aux_multiview_comp"}
+    assert "composition" in avp.commands[0]
 
 
 @pytest.mark.parametrize("codec,profile", [("h264_nvenc", "high"), ("hevc_nvenc", "main")])

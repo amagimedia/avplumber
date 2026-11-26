@@ -30,7 +30,8 @@ class FakeEngine:
         self.keys = {key: {"id": key, "source": f"{key}_page", "on": False, "rate": None} for key in keys}
         self.all_rate, self.prepared, self.ftb_on = 0.4, [], False
         layouts = [{"preset": "pgm_pvw_grid"}, {"preset": "source_pages", "page": 0}]
-        self.aux = {"id": "mv", "revision": uuid.uuid4().hex, "layout": layouts[0], "scenes": self.scenes[:2], "layouts": layouts}
+        self.aux = {"id": "mv", "revision": uuid.uuid4().hex, "layout": layouts[0], "scenes": self.scenes[:2],
+                    "layouts": layouts, "mode": "follow", "composition": None}
         self.gains = {source: 0.0 for source in audio_sources}
         # Show source pads a client may repoint: scenes double as source ids in this fake.
         self.sources = {scene: {"id": scene, "url": f"fake://{scene}", "loop": False, "kind": "video"}
@@ -58,6 +59,7 @@ class FakeEngine:
             "mixer.aux": lambda arg: self._aux_scenes(self._bus(json.loads(arg))),
             "mixer.aux_layout": lambda arg: self._aux_layout(self._bus(json.loads(arg))),
             "mixer.aux_page": lambda arg: self._aux_page(self._bus(json.loads(arg))),
+            "mixer.aux_composition": lambda arg: self._aux_composition(self._bus(json.loads(arg))),
             "mixer.aux_status": lambda _arg: [{key: value for key, value in self.aux.items() if key != "layouts"}],
             "mixer.aux_layouts": lambda _arg: {self.aux["id"]: self.aux["layouts"]},
             "mixer.audio_gain": lambda arg: self._audio_gain(json.loads(arg)),
@@ -186,6 +188,14 @@ class FakeEngine:
         if not 0 <= page < pages:
             raise _Refused(f"aux_page needs a page from 0 to {pages - 1} or a step")
         return self._aux_changed(layout={**self.aux["layout"], "page": page})
+
+    def _aux_composition(self, request):
+        composition = request.get("composition")
+        if not isinstance(composition, dict) or "layers" not in composition:
+            raise _Refused("aux composition needs a layers list")
+        # The fake treats every bus as writable so REST clients can exercise the route.
+        self.aux["composition"] = composition
+        return {"bus": self.aux["id"], "node": f"aux_{self.aux['id']}_comp"}
 
     # --- audio ---
 

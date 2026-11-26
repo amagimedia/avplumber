@@ -103,6 +103,23 @@
         "title": "AuxChanged",
         "type": "object"
       },
+      "AuxComposition": {
+        "additionalProperties": false,
+        "description": "Direct compositor composition for an AUX bus with `mode: external`.",
+        "properties": {
+          "composition": {
+            "additionalProperties": true,
+            "description": "`{\"layers\":[\u2026],\"active_inputs\":\u2026}` as `node.object.set \u2026 composition` expects",
+            "title": "Composition",
+            "type": "object"
+          }
+        },
+        "required": [
+          "composition"
+        ],
+        "title": "AuxComposition",
+        "type": "object"
+      },
       "AuxLayout": {
         "additionalProperties": false,
         "properties": {
@@ -2947,6 +2964,146 @@
           }
         ],
         "summary": "Aux Buses",
+        "tags": [
+          "mixer"
+        ]
+      }
+    },
+    "/api/v1/mixer/aux/{bus}/composition": {
+      "put": {
+        "description": "Set the picture of an external-mode AUX bus (no follower; does not freeze mixer.scene).",
+        "operationId": "mixer_set_aux_composition",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "bus",
+            "required": true,
+            "schema": {
+              "title": "Bus",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AuxComposition"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Mixer Set Aux Composition",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unauthorized`: the gateway requires a bearer token and the request has none, or another one"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`cross_origin`: a browser sent the request for another site's page"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`not_available`: this show or engine has no such command (e.g. keys in a show without a keyer)"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`engine_rejected`: the engine refused the command, `message` is its reason; `conflict`: the resource changed since the revision the request names"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`invalid_request`: the request does not match the schema, `details` lists the fields"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`internal_error`: the gateway failed; its log has the cause"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`bad_engine_reply`: the engine's reply is not JSON, or lacks a field this route's schema promises"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`engine_unreachable`: no control connection to the engine; `engine_not_ready`: the engine is starting and does not take this command yet"
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`engine_timeout`: the engine did not answer in time; the command may still have run"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Set Aux Composition",
         "tags": [
           "mixer"
         ]

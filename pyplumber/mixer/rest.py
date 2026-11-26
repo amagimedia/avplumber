@@ -264,6 +264,12 @@ class AuxPage(Request):
         return self
 
 
+class AuxComposition(Request):
+    """Direct compositor composition for an AUX bus with `mode: external`."""
+    composition: dict[str, Any] = Field(
+        description='`{"layers":[…],"active_inputs":…}` as `node.object.set … composition` expects')
+
+
 # --- Sources ---
 
 class SourceSet(Request):
@@ -498,6 +504,11 @@ def mixer_router(bridge: MixerBridge, *, on_aux_change: Callable[[str, dict], No
     def turn_aux_page(bus: str, request: AuxPage):
         """Show a page of a bus whose layout pages through the sources."""
         return aux("aux_page", bus, request)
+
+    @router.put("/aux/{bus}/composition", response_model=dict[str, Any])
+    def set_aux_composition(bus: str, request: AuxComposition):
+        """Set the picture of an external-mode AUX bus (no follower; does not freeze mixer.scene)."""
+        return send("aux_composition", request, bus=bus)
 
     # --- Sources ---
 

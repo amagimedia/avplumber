@@ -166,6 +166,7 @@ the OpenAPI document; [mixer.md](mixer.md) describes what the commands do.
 | `PUT /mixer/aux/{bus}/scenes` | `mixer.aux` |
 | `PUT /mixer/aux/{bus}/layout` | `mixer.aux_layout` |
 | `PUT /mixer/aux/{bus}/page` | `mixer.aux_page` |
+| `PUT /mixer/aux/{bus}/composition` | `mixer.aux_composition` (external-mode buses) |
 | `PUT /mixer/sources/{id}` | `mixer.source.set` |
 | `POST /mixer/sources/{id}/prepare` | `mixer.source.prepare` |
 | `POST /mixer/sources/{id}/media` | `mixer.source.media` |
