@@ -65,19 +65,23 @@ def stop_group(avp, group: str, timeout: float = 5.0) -> None:
         avp.getEdge(edge).clear()
 
 
-def source_pads(sources, *, external: Optional[set[str]] = None) -> dict[str, SourcePad]:
+def source_pads(sources, *, external: Optional[set[str]] = None,
+                playback_control: bool = False) -> dict[str, SourcePad]:
     """Pads for every show source, named the way ``build_application`` wires them."""
     external = external or set()
     pads = {}
     for index, source in enumerate(sources):
         group = f"input_{index}"
-        # Stock builds wire a sync team for audio and NDI; pause teams arrive with Stage 2 options.
+        # Sync team: audio / NDI always; every build_input chain when playback_control is on.
         sync = (f"input_{index}_av_sync"
-                if source.kind == "ndi" or getattr(source, "has_audio", False) else None)
+                if playback_control or source.kind == "ndi" or getattr(source, "has_audio", False)
+                else None)
         pads[source.id] = SourcePad(
             id=source.id, index=index, kind=source.kind if source.id not in external else "vmm",
             group=group, input_node=f"input_{index}",
-            sync_team=sync, pause_team=None, continuous_loop=True)
+            sync_team=sync,
+            pause_team=(f"input_{index}_pause" if playback_control else None),
+            continuous_loop=True)
     return pads
 
 

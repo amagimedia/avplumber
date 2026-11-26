@@ -437,6 +437,15 @@ built by `build_input`). Browser, raw (`v210` / `nv12` / `p010`), MXL and VMM
 pads answer with a clear error. REST: `PUT /mixer/sources/{id}` with
 `{"url","loop"}`.
 
+### Playback control (`MixerOptions.playback_control`)
+
+Opt in so each `build_input` chain gets a `pause` node (`input_<tag>_pause`), a
+realtime sync team (`input_<tag>_av_sync` even without audio), `pass_on_seek:
+false` on the pause node, and `wallclock` / `frame_ts` on decoded frames. That is
+what pause / seek / `resume … at` need; ordinary demos leave the option off.
+Studio and other playout callers set `MixerOptions(playback_control=True)`
+instead of monkeypatching `build_input`.
+
 ## Profiling
 
 The engine marks its timeline with NVTX ([timeline.hpp](../src/timeline.hpp)). Without a

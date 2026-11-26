@@ -169,7 +169,8 @@ def fake_api():
         "ResampleAudioForwardChannels": "resample_audio_forward_channels",
         "ForceFPS": "force_fps", "ForceKeyFrame": "force_key_frame", "Input": "input", "InputRec": "input_rec",
         "IpcDmabufSource": "ipc_dmabuf_source", "MixerCompositor": "mixer_compositor", "MixerKeyer": "mixer_keyer", "MixerDelivery": "mixer_delivery",
-        "Mux": "mux", "MuxNb": "mux_nb", "OutputNb": "output_nb", "OneToMany": "one_to_many", "Output": "output", "PreheatVideoRouter": "preheat_video_router",
+        "Mux": "mux", "MuxNb": "mux_nb", "OutputNb": "output_nb", "OneToMany": "one_to_many", "Output": "output",
+        "Pause": "pause", "PreheatVideoRouter": "preheat_video_router",
         "RawVideoFileCuda": "raw_video_file_cuda", "Realtime": "realtime", "RepeatLastFrame": "repeat_last_frame",
         "ResampleAudio": "resample_audio",
         "SmoothTimestamps": "smooth_timestamps", "Split": "split", "PackedToCuda": "packed_to_cuda",
@@ -1027,6 +1028,25 @@ def test_canvas_decoded_frames_ahead_rejects_what_is_not_a_count(bad):
 def test_config_sources_stamp_no_frame_metadata():
     nodes, _ = _video_source_nodes()
     assert nodes["input_0"]["frame_metadata"] == []
+
+
+def test_playback_control_wires_pause_seek_and_frame_metadata_teams():
+    """MixerOptions.playback_control replaces studio's install_playback_control monkeypatch."""
+    doc = {"canvas": CONFIG["canvas"], "sources": [CONFIG["sources"][0]],
+           "scenes": [{"id": "full", "items": [{"source": "cam", "dst": {"x": 0, "y": 0, "w": 1920, "h": 1080}}]}]}
+    from pyplumber.mixer.application import build_application as build_mixer, MixerOptions
+    app = build_mixer(mc.parse(doc), MixerOptions(output="p.mp4", playback_control=True), api=fake_api())
+    nodes = {node.parameters["name"]: node.parameters for node in app.avp.nodes}
+    assert nodes["pause_0"]["team"] == "input_0_pause"
+    assert nodes["pause_0"]["pass_on_seek"] is False
+    assert nodes["pause_0"]["src"] == "input_0_decoded"
+    assert nodes["realtime_0"]["src"] == "input_0_paused"
+    assert nodes["realtime_0"]["team"] == "input_0_av_sync"
+    assert nodes["input_0"]["pause_team"] == "input_0_pause"
+    assert set(nodes["input_0"]["frame_metadata"]) == {"wallclock", "frame_ts"}
+    # Default demos still omit the pause chain.
+    plain, chain = _video_source_nodes()
+    assert "pause_0" not in plain and "realtime_0" in chain
 
 
 def test_config_sources_route_the_video_stream_inside_the_reading_node():

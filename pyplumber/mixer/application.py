@@ -28,6 +28,9 @@ from .dmabuf_inputs import (BrowserStartupUnsettled, dmabuf_cuda_input_nodes, op
 from .dsk import DownstreamKeyer, register_dsk_commands
 from .inputs import build_input, build_v210_input, build_raw420_input
 from .source_control import SourceController, register_source_commands, source_pads
+
+# Frame keys pause/seek need on each decoded frame (wallclock for resume-at; frame_ts for seek).
+PLAYBACK_FRAME_METADATA = ("wallclock", "frame_ts")
 from .janus import (DEFAULT_KEYFRAME_MIN_INTERVAL_MS, JANUS_KEYFRAME_NODE, JanusVideoConfig,
                     RtcpFeedbackGroup, add_nodes, build_janus_output, dpb_options, release_commands)
 from ..transform import transform_output, transform_params
@@ -139,6 +142,9 @@ class MixerOptions:
     # leaves this name alone and skips the audio_mixer-specific gain controller.
     audio_router_node: str = ""
     build_audio_mixer: bool = True
+    # Pause node + named realtime team on every build_input chain, so pause / seek / resume
+    # (and resume … at) work without an application monkeypatching build_input. Off for demos.
+    playback_control: bool = False
     cuda_ipc_inputs: tuple[tuple[str, str], ...] = ()
     cuda_ipc_output: str = ""
     cuda_ipc_slots: int = 12
@@ -682,6 +688,7 @@ def load_avp_api():
         OneToMany,
         Output,
         OutputNb,
+        Pause,
         PreheatVideoRouter,
         RawVideoFileCuda,
         Realtime,
@@ -723,6 +730,7 @@ def load_avp_api():
         OneToMany=OneToMany,
         Output=Output,
         OutputNb=OutputNb,
+        Pause=Pause,
         PreheatVideoRouter=PreheatVideoRouter,
         RawVideoFileCuda=RawVideoFileCuda,
         Realtime=Realtime,
@@ -734,6 +742,18 @@ def load_avp_api():
         Split=Split,
         PackedToCuda=PackedToCuda,
     )
+
+
+def _playback_input_kwargs(tag: str, *, frame_metadata, input_params: dict | None = None) -> dict:
+    """Args that give ``build_input`` a pause node and a seekable realtime team (studio playout)."""
+    pause_team = f"input_{tag}_pause"
+    return {
+        "pause_team": pause_team,
+        "sync_team": f"input_{tag}_av_sync",
+        "input_params": {**(input_params or {}), "pause_team": pause_team},
+        "pause_params": {"pass_on_seek": False},
+        "frame_metadata": sorted(set(frame_metadata or ()) | set(PLAYBACK_FRAME_METADATA)),
+    }
 
 
 def infer_output_format(output: str, explicit_format: str | None = None) -> str:
@@ -1099,18 +1119,31 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
                 ndi = source.kind == "ndi"
                 if ndi:
                     live_inputs.append(f"input_{index}")
+                input_params = ({"format": "libndi_newtek", "options": {
+                    **NDI_INPUT_OPTIONS, **({"extra_ips": source.extra_ips} if source.extra_ips else {})}}
+                    if ndi else None)
+                # Playback: pause + sync team for seek/resume-at. Otherwise a sync team only when
+                # audio or NDI already share one (lip-sync / live backlog).
+                sync_team = (f"input_{index}_av_sync"
+                             if options.playback_control or source.has_audio or ndi else None)
+                playback = (_playback_input_kwargs(str(index), frame_metadata=file_params["frame_metadata"],
+                                                   input_params=input_params)
+                            if options.playback_control else {
+                                **({} if input_params is None else {"input_params": input_params}),
+                                **({} if sync_team is None else {"sync_team": sync_team}),
+                            })
+                if options.playback_control and not hasattr(api, "Pause"):
+                    from pyplumber.node import Pause
+                    api.Pause = Pause
                 edge, audio_edge = build_input(
                     avp, api, str(index), source.location, continuous_loop=True,
-                    **({"input_params": {"format": "libndi_newtek", "options": {
-                        **NDI_INPUT_OPTIONS, **({"extra_ips": source.extra_ips} if source.extra_ips else {})}},
-                        "live_timeout": NDI_READ_TIMEOUT_S} if ndi else {}),
+                    **({"live_timeout": NDI_READ_TIMEOUT_S} if ndi else {}),
                     # NVDEC drops alpha: an alpha source decodes in software, in its codec's own
                     # format (argb, yuva444p12...), and is uploaded as RGBA after its chain. NDI's
                     # packed 4:2:2 (UYVY) is no codec NVDEC has: its frames go the same way, as NV12.
                     decoder_params={**_decoder_params(source, cfg), **({"hwaccel_only_for_codecs": []} if source.alpha or ndi else {})},
                     decoded_ahead=cfg.decoded_frames_ahead,
-                    # realtime measures and drops a backlog as a member of a team, also one of its own.
-                    has_audio=source.has_audio, sync_team=(f"input_{index}_av_sync" if source.has_audio or ndi else None),
+                    has_audio=source.has_audio,
                     # Not with audio: its realtime node gets the same parameters and shares the team,
                     # and audio queued in its own chain would flush the pictures with it (untested).
                     **({"realtime_params": {"jitter_margin": fps_den / fps_num, "initial_jitter_margin": fps_den / fps_num,
@@ -1120,7 +1153,7 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
                                                 "intermediate_queues": [f"input_{index}_video_packets"],
                                                 "max_buffered": NDI_BACKLOG_MAX * fps_den / fps_num,
                                                 "min_buffered": NDI_BACKLOG_KEEP * fps_den / fps_num})}} if ndi else {}),
-                    **file_params)
+                    **{**file_params, **playback})
                 if audio_edge:
                     audio_edges.append((source.id, audio_edge))
                 if source.alpha or ndi:
@@ -1300,7 +1333,8 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
 
     avp.registerControlCommand("mixer.debug_overlay", debug_overlay, True)
     register_source_commands(avp, SourceController(
-        avp, source_pads(cfg.sources, external=set(external)), mixer=MIXER_NAME))
+        avp, source_pads(cfg.sources, external=set(external),
+                         playback_control=options.playback_control), mixer=MIXER_NAME))
     held = []
     # Purge idle imports left by the capture pool's start-up churn.
     importers = tuple(f"input_{index}_to_cuda" for index in browsers)
