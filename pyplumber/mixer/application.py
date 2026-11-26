@@ -28,9 +28,6 @@ from .dmabuf_inputs import (BrowserStartupUnsettled, dmabuf_cuda_input_nodes, op
 from .dsk import DownstreamKeyer, register_dsk_commands
 from .inputs import build_input, build_v210_input, build_raw420_input
 from .source_control import SourceController, register_source_commands, source_pads
-
-# Frame keys pause/seek need on each decoded frame (wallclock for resume-at; frame_ts for seek).
-PLAYBACK_FRAME_METADATA = ("wallclock", "frame_ts")
 from .janus import (DEFAULT_KEYFRAME_MIN_INTERVAL_MS, JANUS_KEYFRAME_NODE, JanusVideoConfig,
                     RtcpFeedbackGroup, add_nodes, build_janus_output, dpb_options, release_commands)
 from ..transform import transform_output, transform_params
@@ -41,6 +38,8 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("mixer")
 DEFAULT_FPS = 30
+# Frame keys pause/seek need on each decoded frame (wallclock for resume-at; frame_ts for seek).
+PLAYBACK_FRAME_METADATA = ("wallclock", "frame_ts")
 # Instance-owned: a global (@) device survives shutdown until CUDA static teardown.
 HWACCEL = "mixer_gpu"
 # An alpha source's frames to the GPU as RGBA. Not pinned: pinned staging needs
@@ -1132,9 +1131,6 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
                                 **({} if input_params is None else {"input_params": input_params}),
                                 **({} if sync_team is None else {"sync_team": sync_team}),
                             })
-                if options.playback_control and not hasattr(api, "Pause"):
-                    from pyplumber.node import Pause
-                    api.Pause = Pause
                 edge, audio_edge = build_input(
                     avp, api, str(index), source.location, continuous_loop=True,
                     **({"live_timeout": NDI_READ_TIMEOUT_S} if ndi else {}),
