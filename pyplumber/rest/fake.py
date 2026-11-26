@@ -13,8 +13,11 @@ import json
 import threading
 import time
 import uuid
+from types import SimpleNamespace
 
+from pyplumber.mixer.config import ConfigError
 from pyplumber.mixer.control import AvpProtocolError
+from pyplumber.mixer.source_control import SourceController, source_pads
 
 
 class _Refused(Exception):
@@ -38,9 +41,14 @@ class FakeEngine:
         self.external = {"id": "monitor", "revision": uuid.uuid4().hex, "layout": layouts[0], "scenes": self.scenes[:2],
                          "layouts": layouts[:1], "mode": "external", "composition": None}
         self.gains = {source: 0.0 for source in audio_sources}
-        # Show source pads a client may repoint: scenes double as source ids in this fake.
+        # Show source pads a client may repoint: scenes double as source ids in this fake. The
+        # mixer's own controller checks and answers the source commands, over a graph of no nodes.
         self.sources = {scene: {"id": scene, "url": f"fake://{scene}", "loop": False, "kind": "video"}
                         for scene in self.scenes}
+        self._source_control = SourceController(
+            _NoGraph(), source_pads([SimpleNamespace(id=scene, kind="video", has_audio=False) for scene in self.scenes],
+                                    playback_control=True),
+            mixer=mixer, run_command=lambda _line: None, probe=lambda _url: 60_000)
         self.processor = {"output": "program", "id": "duck", "type": "ducker", "enabled": True, "threshold_db": -40.0,
                           "depth_db": -20.0, "attack_ms": 10.0, "hold_ms": 300.0, "release_ms": 800.0, "gain_db": 0.0}
         self._lock = threading.Lock()
@@ -72,10 +80,10 @@ class FakeEngine:
             "mixer.audio_gain_status": lambda _arg: self._gains(),
             "mixer.audio_processor": lambda arg: self._audio_processor(json.loads(arg)),
             "mixer.audio_processor_status": lambda _arg: [self.processor],
-            "mixer.source.set": lambda arg: self._source_set(json.loads(arg)),
+            "mixer.source.set": lambda arg: self._source("set", json.loads(arg)),
             "mixer.source.prepare": lambda arg: self._source_prepare(json.loads(arg)),
             "mixer.source.media": lambda arg: self._source_media(json.loads(arg)),
-            "mixer.source.resume_at": lambda arg: self._source_resume_at(json.loads(arg)),
+            "mixer.source.resume_at": lambda arg: self._source("resume_at", json.loads(arg), paused=False),
         }
 
     def command(self, line: str, timeout: float | None = None) -> str | None:
@@ -87,7 +95,7 @@ class FakeEngine:
                 raise AvpProtocolError(f"400 Unknown command: {name}")
             try:
                 reply = handler(arg.strip())
-            except _Refused as exc:
+            except (_Refused, ConfigError) as exc:   # ConfigError: a mixer controller's refusal
                 raise AvpProtocolError(f"500 ERROR: {exc}") from None
         return reply if reply is None or isinstance(reply, str) else json.dumps(reply) + "\n"
 
@@ -227,66 +235,38 @@ class FakeEngine:
 
     # --- sources ---
 
-    def _source_set(self, request):
-        self._for_mixer(request.get("mixer"), lambda: None)
-        source = self.sources.get(request.get("id"))
-        if source is None:
-            raise _Refused(f"source.set: unknown source id {request.get('id')!r}")
-        if source["kind"] not in ("video", "ndi"):
-            raise _Refused(f"source.set: source {source['id']!r} kind {source['kind']!r} is unsupported")
-        url, loop = request.get("url"), request.get("loop")
-        if not isinstance(url, str) or not url or not isinstance(loop, bool):
-            raise _Refused("source.set needs a non-empty url and a boolean loop")
-        source.update(url=url, loop=loop)
-        return {"id": source["id"], "url": url, "loop": loop}
-
-    def _source_pad(self, request, who):
-        self._for_mixer(request.get("mixer"), lambda: None)
-        source = self.sources.get(request.get("id"))
-        if source is None:
-            raise _Refused(f"{who}: unknown source id {request.get('id')!r}")
-        if source["kind"] != "video":
-            raise _Refused(f"{who}: source {source['id']!r} kind {source['kind']!r} has no pause or seek")
-        return source
-
-    def _source_prepare(self, request):
-        source = self._source_pad(request, "source.prepare")
-        url, loop = request.get("url"), request.get("loop")
-        cue = request.get("cue_in_ms", 0)
-        if not isinstance(url, str) or not url or not isinstance(loop, bool):
-            raise _Refused("source.prepare needs a non-empty url and a boolean loop")
-        if not isinstance(cue, int) or isinstance(cue, bool) or cue < 0:
-            raise _Refused("source.prepare: cue_in_ms must be a non-negative int")
-        source.update(url=url, loop=loop, paused=True, position_ms=cue)
-        return {"id": source["id"], "url": url, "loop": loop, "cue_in_ms": cue, "duration_ms": 60_000}
-
-    def _source_media(self, request):
-        source = self._source_pad(request, "source.media")
-        action = request.get("action")
-        if action not in ("play", "pause", "seek", "stop", "restart"):
-            raise _Refused("source.media: unknown action")
-        position = request.get("position_ms")
-        if action == "seek":
-            if not isinstance(position, int) or isinstance(position, bool) or position < 0:
-                raise _Refused("source.media: seek needs a non-negative int position_ms")
-            source["position_ms"] = position
-        elif action == "play":
-            source["paused"] = False
-        elif action in ("pause", "stop"):
-            source["paused"] = True
-            if action == "stop":
-                source["position_ms"] = 0
-        elif action == "restart":
-            source.update(paused=False, position_ms=0)
-        reply = {"id": source["id"], "action": action}
-        if action == "seek":
-            reply["position_ms"] = position
+    def _source(self, command, request, **changes):
+        """The mixer's own checks and answer; then what a client can observe of the pad."""
+        reply = getattr(self._source_control, command)(request)
+        self.sources[reply["id"]].update({key: reply[key] for key in ("url", "loop") if key in reply}, **changes)
         return reply
 
-    def _source_resume_at(self, request):
-        source = self._source_pad(request, "source.resume_at")
-        at_ms = request.get("at_ms")
-        if not isinstance(at_ms, int) or isinstance(at_ms, bool) or at_ms < 0:
-            raise _Refused("source.resume_at needs a non-negative int at_ms")
-        source["paused"] = False
-        return {"id": source["id"], "at_ms": at_ms}
+    def _source_prepare(self, request):
+        return self._source("prepare", request, paused=True, position_ms=request.get("cue_in_ms", 0))
+
+    def _source_media(self, request):
+        action = request.get("action")
+        return self._source("media", request, **{
+            "play": {"paused": False}, "pause": {"paused": True}, "stop": {"paused": True, "position_ms": 0},
+            "restart": {"paused": False, "position_ms": 0}, "seek": {"position_ms": request.get("position_ms")},
+        }.get(action, {}))
+
+
+class _NoGraph:
+    """What `SourceController` asks of an AVPlumber instance, for input chains that have no nodes:
+    every group is stopped and empty, and a node keeps the parameters it is given."""
+
+    def __init__(self):
+        self._parameters: dict[str, dict] = {}
+
+    def group(self, _name):
+        return SimpleNamespace(sortedNodes=[], stopNodes=lambda: None)
+
+    def node(self, name):
+        return SimpleNamespace(parameters=self._parameters.setdefault(name, {}))
+
+    def executeCommandsFromString(self, line):
+        command, _, rest = line.partition(" ")
+        if command == "node.param.set":
+            name, key, value = rest.split(" ", 2)
+            self.node(name).parameters[key] = json.loads(value)
