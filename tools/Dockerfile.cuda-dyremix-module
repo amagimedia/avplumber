@@ -7,8 +7,8 @@
 # Build context must contain:
 #   resample_audio.cpp              patched avplumber src/nodes/resample_audio.cpp
 #   build-python-module-cuda.sh    this repo's tools/build-python-module-cuda.sh
-#   dyremix/                       github.com/tellyo/dyremix checkout
-#   dyremix-node/                  amagi_avplumber_nodes/dyremix from avplumber-nodes
+#   dyremix/                       github.com/tellyo/dyremix at 815ff67 (ramp/curve API)
+#   dyremix-node/                  amagi_avplumber_nodes/dyremix from avplumber-nodes 88d6bb6
 #
 # tools/build-adaptive-module.sh assembles that context and runs this file.
 #

@@ -18,12 +18,17 @@ workspace="$(cd "${repo}/.." && pwd)"
 dyremix_dir="${DYREMIX_DIR:-${workspace}/dyremix}"
 nodes_dir="${NODES_DIR:-${workspace}/avplumber-nodes}"
 node_dir="${nodes_dir}/amagi_avplumber_nodes/dyremix"
+# dyremix 815ff67 adds dyremix_param_curve_t, dyremix_set_connection_gain_ex and
+# the ramp/curve API the amagi dyremix_mixer node compiles against. The RC
+# branch does not have it.
+dyremix_rev="${DYREMIX_REV:-815ff67}"
+# avplumber-nodes 88d6bb6 is the dyremix_mixer with runtime ports and named feeds.
+nodes_rev="${NODES_REV:-88d6bb6}"
 engine_base="${ENGINE_BASE:-}"
 engine_tag="${ENGINE_TAG:-studio-engine:avp-04f9ff8f-x264-aux-adaptive}"
 
-for required in "${dyremix_dir}/CMakeLists.txt" "${node_dir}/Makefile.inc"; do
-    [[ -e "${required}" ]] || { echo "missing ${required}" >&2; exit 2; }
-done
+git -C "${dyremix_dir}" rev-parse --verify "${dyremix_rev}^{commit}" >/dev/null
+git -C "${nodes_dir}" rev-parse --verify "${nodes_rev}^{commit}" >/dev/null
 
 context="$(mktemp -d)"
 trap 'rm -rf "${context}"' EXIT
@@ -31,8 +36,11 @@ trap 'rm -rf "${context}"' EXIT
 cp "${repo}/tools/Dockerfile.cuda-dyremix-module" "${context}/Dockerfile"
 cp "${repo}/src/nodes/resample_audio.cpp" "${context}/resample_audio.cpp"
 cp "${repo}/tools/build-python-module-cuda.sh" "${context}/build-python-module-cuda.sh"
-cp -a "${dyremix_dir}" "${context}/dyremix"
-cp -a "${node_dir}" "${context}/dyremix-node"
+mkdir -p "${context}/dyremix"
+git -C "${dyremix_dir}" archive "${dyremix_rev}" | tar -x -C "${context}/dyremix"
+mkdir -p "${context}/dyremix-node"
+git -C "${nodes_dir}" archive "${nodes_rev}" amagi_avplumber_nodes/dyremix \
+    | tar -x -C "${context}/dyremix-node" --strip-components=2
 
 module_image="avplumber-module-adaptive:$(date +%Y%m%dT%H%M%S)"
 docker build -t "${module_image}" "${context}"
