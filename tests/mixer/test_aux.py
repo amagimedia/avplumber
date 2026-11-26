@@ -537,6 +537,7 @@ def test_external_bus_builds_without_mixer_registration_or_follower(cfg, monkeyp
     avp = SimpleNamespace(addNode=lambda node, **kw: nodes.append(node), edges=SimpleNamespace(planCapacity=lambda *a: None),
                           commands=[])
     avp.executeCommandsFromString = lambda text: avp.commands.append(text)
+    avp.node = lambda _name: SimpleNamespace(getObject=lambda _key: {})   # the compositor runs
     api = SimpleNamespace(FilterVideo=lambda params: SimpleNamespace(parameters=params))
     mixer = SimpleNamespace(add_aux_destination=lambda *a: None, latency_ms=50, name="mixer",
                             canvas_compositor=lambda params, api: SimpleNamespace(parameters=params),
@@ -550,6 +551,9 @@ def test_external_bus_builds_without_mixer_registration_or_follower(cfg, monkeyp
     assert params["name"] == "aux_multiview_comp"
     composition = {"layers": [{"input": 0, "dst_x": 0, "dst_y": 0, "dst_w": 100, "dst_h": 100}],
                    "active_inputs": 1}
+    with pytest.raises(ConfigError, match="needs active_inputs"):   # the compositor's setter would throw
+        bus.set_composition({"composition": {"layers": composition["layers"]}})
+    assert avp.commands == []
     assert bus.set_composition({"composition": composition}) == {
         "bus": "multiview", "node": "aux_multiview_comp"}
     assert avp.commands == [
@@ -566,6 +570,11 @@ def test_aux_composition_command_is_registered(cfg):
     avp.commands = []
     avp.executeCommandsFromString = lambda text: avp.commands.append(text)
     AuxBuses(avp, [bus]).register_commands()
+    # The binding would log and drop a command to a compositor that is not running.
+    with pytest.raises(ConfigError, match="its compositor is not running"):
+        avp.command("mixer.aux_composition", bus="multiview", composition={"layers": [], "active_inputs": 0})
+    assert avp.commands == []
+    avp.statuses[bus.node_name] = {"composition_pending": False}
     reply = avp.command("mixer.aux_composition", bus="multiview",
                         composition={"layers": [], "active_inputs": 0})
     assert reply == {"bus": "multiview", "node": "aux_multiview_comp"}

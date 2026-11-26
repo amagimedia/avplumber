@@ -869,6 +869,15 @@ REST: `PUT /mixer/aux/{bus}/composition` with `{"composition":…}`. Slot / layo
 / page commands refuse on an external bus. Studio monitor buses use this mode
 instead of monkeypatching `AuxBus`.
 
+The answer means the composition was handed to the compositor, not that it is
+drawn. The command refuses a composition without `layers` or `active_inputs`
+and a bus whose compositor is not running. The compositor then stages the
+composition until its inputs have frames: `mixer.aux_status` (`GET /mixer/aux`)
+reports `composition_pending` meanwhile, and `composition_error` when it kept
+the previous picture. What the compositor itself refuses (a layer naming an
+input the bus does not have, more layers than `max_layers`) is in the engine's
+log only: the Python binding does not return a control command's error.
+
 Every preview change is one `MixerState::PreviewChange` (revision, the pts of
 the first program frame of the new program, the take command's receipt and
 kind), published under the feed's own `preview_mutex`, which wakes the

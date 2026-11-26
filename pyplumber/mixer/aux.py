@@ -317,7 +317,9 @@ class AuxBus:
             return self._summary()
 
     def set_composition(self, request):
-        """Write the compositor's ``composition`` object (external mode only)."""
+        """Write the compositor's ``composition`` object (external mode only). The answer says it
+        was handed over: the compositor stages it until its inputs have frames, and the bus's
+        state has ``composition_pending`` and ``composition_error`` for what became of it."""
         with self.lock:
             if not self.external:
                 raise ConfigError(f"aux {self.bus.id}: aux_composition needs mode external")
@@ -326,6 +328,13 @@ class AuxBus:
                 raise ConfigError(f"aux {self.bus.id}: composition needs a layers list")
             if not isinstance(composition["layers"], list):
                 raise ConfigError(f"aux {self.bus.id}: composition.layers must be a list")
+            # The binding logs what the compositor refuses and returns, so the two refusals that
+            # can be told from here are made here: its setter reads active_inputs unconditionally,
+            # and a command to a node that is not running is dropped.
+            if "active_inputs" not in composition:
+                raise ConfigError(f"aux {self.bus.id}: composition needs active_inputs")
+            if self._status(self.node_name) is None:
+                raise ConfigError(f"aux {self.bus.id}: its compositor is not running")
             self.avp.executeCommandsFromString(
                 f"node.object.set {self.node_name} composition {json.dumps(composition)}")
             self.error = ""

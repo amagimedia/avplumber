@@ -267,7 +267,7 @@ class AuxPage(Request):
 class AuxComposition(Request):
     """Direct compositor composition for an AUX bus with `mode: external`."""
     composition: dict[str, Any] = Field(
-        description='`{"layers":[…],"active_inputs":…}` as `node.object.set … composition` expects')
+        description='`{"layers":[…],"active_inputs":…}` as `node.object.set … composition` expects; both keys are required')
 
 
 # --- Sources ---
@@ -508,7 +508,12 @@ def mixer_router(bridge: MixerBridge, *, on_aux_change: Callable[[str, dict], No
 
     @router.put("/aux/{bus}/composition", response_model=dict[str, Any])
     def set_aux_composition(bus: str, request: AuxComposition):
-        """Set the picture of an external-mode AUX bus (no follower; does not freeze mixer.scene)."""
+        """Set the picture of an external-mode AUX bus (no follower; does not freeze mixer.scene).
+
+        200 means the composition was handed to the bus's compositor, which stages it until its
+        inputs have frames: `GET /mixer/aux` reports `composition_pending` meanwhile and
+        `composition_error` when the previous picture was kept. A composition the compositor
+        itself refuses (an input the bus does not have, too many layers) is in the engine's log only."""
         return send("aux_composition", request, bus=bus)
 
     # --- Sources ---

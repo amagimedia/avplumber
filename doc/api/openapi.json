@@ -109,7 +109,7 @@
         "properties": {
           "composition": {
             "additionalProperties": true,
-            "description": "`{\"layers\":[\u2026],\"active_inputs\":\u2026}` as `node.object.set \u2026 composition` expects",
+            "description": "`{\"layers\":[\u2026],\"active_inputs\":\u2026}` as `node.object.set \u2026 composition` expects; both keys are required",
             "title": "Composition",
             "type": "object"
           }
@@ -2971,7 +2971,7 @@
     },
     "/api/v1/mixer/aux/{bus}/composition": {
       "put": {
-        "description": "Set the picture of an external-mode AUX bus (no follower; does not freeze mixer.scene).",
+        "description": "Set the picture of an external-mode AUX bus (no follower; does not freeze mixer.scene).\n\n200 means the composition was handed to the bus's compositor, which stages it until its\ninputs have frames: `GET /mixer/aux` reports `composition_pending` meanwhile and\n`composition_error` when the previous picture was kept. A composition the compositor\nitself refuses (an input the bus does not have, too many layers) is in the engine's log only.",
         "operationId": "mixer_set_aux_composition",
         "parameters": [
           {
