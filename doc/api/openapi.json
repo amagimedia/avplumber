@@ -1273,7 +1273,7 @@
       },
       "SourceMedia": {
         "additionalProperties": false,
-        "description": "play / pause / seek / stop / restart on a playback-enabled source.",
+        "description": "play / pause / seek / stop / restart on a video source of a mixer built with\n`MixerOptions.playback_control`.",
         "properties": {
           "action": {
             "enum": [
@@ -1338,7 +1338,7 @@
       },
       "SourcePrepare": {
         "additionalProperties": false,
-        "description": "Load a URL on a playback-enabled pad, pause on the cue-in frame. Needs\n`MixerOptions.playback_control`.",
+        "description": "Load a URL on a video source, pause on the cue-in frame. Needs\n`MixerOptions.playback_control`; an NDI source has no pause or seek.",
         "properties": {
           "cue_in_ms": {
             "default": 0,

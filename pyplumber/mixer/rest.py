@@ -286,8 +286,8 @@ class SourceSetResult(Reply):
 
 
 class SourcePrepare(Request):
-    """Load a URL on a playback-enabled pad, pause on the cue-in frame. Needs
-    `MixerOptions.playback_control`."""
+    """Load a URL on a video source, pause on the cue-in frame. Needs
+    `MixerOptions.playback_control`; an NDI source has no pause or seek."""
     url: Annotated[str, Field(min_length=1)]
     loop: bool
     cue_in_ms: int = Field(0, ge=0, description="Seek to this offset after pause, in milliseconds")
@@ -302,7 +302,8 @@ class SourcePrepareResult(Reply):
 
 
 class SourceMedia(Request):
-    """play / pause / seek / stop / restart on a playback-enabled source."""
+    """play / pause / seek / stop / restart on a video source of a mixer built with
+    `MixerOptions.playback_control`."""
     action: Literal["play", "pause", "seek", "stop", "restart"]
     position_ms: int | None = Field(None, ge=0, description="Required for seek; ignored otherwise")
 

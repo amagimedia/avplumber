@@ -1049,6 +1049,21 @@ def test_playback_control_wires_pause_seek_and_frame_metadata_teams():
     assert "pause_0" not in plain and "realtime_0" in chain
 
 
+def test_playback_control_leaves_an_ndi_source_as_it_is_without_it():
+    """An NDI feed is read by the plain input node: nothing there waits on a pause team or seeks."""
+    doc = {"canvas": CONFIG["canvas"],
+           "sources": [{"id": "feed", "kind": "ndi", "name": "HOST (feed)", "width": 1920, "height": 1080, "color": "sdr"}],
+           "scenes": [{"id": "full", "items": [{"source": "feed", "dst": {"x": 0, "y": 0, "w": 1920, "h": 1080}}]}]}
+    from pyplumber.mixer.application import build_application as build_mixer, MixerOptions
+
+    def nodes(**options):
+        app = build_mixer(mc.parse(doc), MixerOptions(output="p.mp4", **options), api=fake_api())
+        return {node.parameters["name"]: node.parameters for node in app.avp.nodes}
+
+    assert nodes(playback_control=True) == nodes()
+    assert "pause_0" not in nodes() and nodes()["realtime_0"]["team"] == "input_0_av_sync"
+
+
 def test_config_sources_route_the_video_stream_inside_the_reading_node():
     nodes, chain = _video_source_nodes()
     assert chain == ["input_0", "decode_0", "realtime_0"]

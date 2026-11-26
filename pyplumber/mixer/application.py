@@ -141,8 +141,9 @@ class MixerOptions:
     # leaves this name alone and skips the audio_mixer-specific gain controller.
     audio_router_node: str = ""
     build_audio_mixer: bool = True
-    # Pause node + named realtime team on every build_input chain, so pause / seek / resume
-    # (and resume … at) work without an application monkeypatching build_input. Off for demos.
+    # Pause node + named realtime team on every video source's chain, so pause / seek / resume
+    # (and resume … at) work without an application monkeypatching build_input. Not on an NDI
+    # source's: its plain input node has nothing to pause or seek. Off for demos.
     playback_control: bool = False
     cuda_ipc_inputs: tuple[tuple[str, str], ...] = ()
     cuda_ipc_output: str = ""

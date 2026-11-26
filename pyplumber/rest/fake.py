@@ -234,8 +234,8 @@ class FakeEngine:
         source = self.sources.get(request.get("id"))
         if source is None:
             raise _Refused(f"{who}: unknown source id {request.get('id')!r}")
-        if source["kind"] not in ("video", "ndi"):
-            raise _Refused(f"{who}: source {source['id']!r} kind {source['kind']!r} is unsupported")
+        if source["kind"] != "video":
+            raise _Refused(f"{who}: source {source['id']!r} kind {source['kind']!r} has no pause or seek")
         return source
 
     def _source_prepare(self, request):

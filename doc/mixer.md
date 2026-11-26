@@ -439,16 +439,20 @@ pads answer with a clear error. REST: `PUT /mixer/sources/{id}` with
 
 ### Playback control (`MixerOptions.playback_control`)
 
-Opt in so each `build_input` chain gets a `pause` node (`input_<tag>_pause`), a
-realtime sync team (`input_<tag>_av_sync` even without audio), `pass_on_seek:
-false` on the pause node, and `wallclock` / `frame_ts` on decoded frames. That is
-what pause / seek / `resume … at` need; ordinary demos leave the option off.
+Opt in so the chain of each `video` source gets a `pause` node
+(`input_<tag>_pause`), a realtime sync team (`input_<tag>_av_sync` even without
+audio), `pass_on_seek: false` on the pause node, and `wallclock` / `frame_ts` on
+decoded frames. That is what pause / seek / `resume … at` need; ordinary demos
+leave the option off. An `ndi` source's chain stays as it is without the option:
+it is read by the plain `input` node, which waits on no pause team and has no
+position to seek to.
 Studio and other playout callers set `MixerOptions(playback_control=True)`
 instead of monkeypatching `build_input`.
 
 ### Playout (`mixer.source.prepare` / `media` / `resume_at`)
 
-Need `playback_control`. Address sources by show source id.
+Need `playback_control` and a `video` source; an `ndi` source answers with an
+error (it takes `mixer.source.set` only). Address sources by show source id.
 
 ```text
 mixer.source.prepare {"mixer":"mixer","id":"<sourceId>","url":"…","loop":false,"cue_in_ms":0}

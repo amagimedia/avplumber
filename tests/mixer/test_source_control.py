@@ -161,6 +161,7 @@ def test_source_pads_follow_build_application_naming():
     assert pads["d"].kind == "vmm"
     assert pads["d"].sync_team is None and pads["a"].pause_team is None
     play = source_pads(sources, playback_control=True)
+    assert play["b"].pause_team is None and play["b"].sync_team == "input_1_av_sync"   # NDI: live, no playback
     assert play["d"].sync_team == "input_3_av_sync" and play["d"].pause_team == "input_3_pause"
     assert play["c"].pause_team is None and play["c"].sync_team is None   # a browser pad is no build_input chain
 
@@ -194,6 +195,20 @@ def test_prepare_loads_pauses_and_seeks_to_cue():
     assert avp._group.stop_asked
     assert "node.param.set input_0 url \"file:///clip.mp4\"" in avp.commands
     assert commands == ["pause input_0_pause now", "seek input_0_av_sync now 1500"]
+
+
+@pytest.mark.parametrize("command, request_", [
+    ("prepare", {"url": "ndi://feed", "loop": False}),
+    ("media", {"action": "pause"}),
+    ("resume_at", {"at_ms": 1000}),
+])
+def test_playback_is_refused_on_a_live_ndi_pad_that_set_still_takes(command, request_):
+    commands = []
+    controller, avp = _controller(run=commands.append, kind="ndi", pause_team=None)
+    with pytest.raises(ConfigError, match="'ndi' has no pause or seek"):
+        getattr(controller, command)({"id": "cam1", **request_})
+    assert commands == [] and avp.commands == [] and not avp._group.stop_asked
+    assert controller.set({"id": "cam1", "url": "ndi://feed", "loop": False})["url"] == "ndi://feed"
 
 
 def test_prepare_refuses_without_playback_teams():

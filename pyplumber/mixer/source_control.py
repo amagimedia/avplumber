@@ -6,7 +6,7 @@ compositors. Terminal nodes stop first so the frame stays inside, then every nod
 group's own edges are cleared before params change and the group starts again.
 
 ``mixer.source.media`` / ``prepare`` / ``resume_at`` need ``MixerOptions.playback_control`` so each
-pad has a pause team and a sync team. Pause and seek retry while the chain has no frame yet
+file source's pad has a pause team and a sync team. Pause and seek retry while the chain has no frame yet
 ("Can not determine current time"); that path uses a raising control runner (loopback TCP when a
 ``control_port`` is set, else an injected ``run_command``). Playhead position is not reported by
 the engine — clients keep their own estimate.
@@ -27,6 +27,9 @@ from .config import ConfigError
 # Chains built by ``build_input`` (file / live video and NDI). Browser, raw, MXL and VMM pads need
 # other primitives (navigate, unpack params, IPC) and refuse ``mixer.source.set``.
 SETTABLE_KINDS = frozenset({"video", "ndi"})
+# Pause and seek are input_rec's: a file, or a stream it can seek. An NDI feed is read by the plain
+# input node, which waits on no pause team and has no position to seek to.
+PLAYBACK_KINDS = frozenset({"video"})
 MEDIA_ACTIONS = frozenset({"play", "pause", "seek", "stop", "restart"})
 # Pause / seek need a shown frame; just after group.start there may be none yet.
 _CURRENT_TIME_ERR = "Can not determine current time"
@@ -80,11 +83,11 @@ def stop_group(avp, group: str, timeout: float = 5.0) -> None:
 def chain_teams(index: int, source, *, playback_control: bool) -> tuple[Optional[str], Optional[str]]:
     """The (realtime sync team, pause team) of the ``build_input`` chain of show source *index*:
     what ``build_application`` wires and ``source_pads`` addresses. A sync team where audio or
-    NDI already share one (lip-sync, live backlog), and on every chain with *playback_control*,
-    which also adds the pause team."""
-    sync = (f"input_{index}_av_sync"
-            if playback_control or source.kind == "ndi" or source.has_audio else None)
-    return sync, (f"input_{index}_pause" if playback_control else None)
+    NDI already share one (lip-sync, live backlog), and on every chain *playback_control* gives
+    playback (``PLAYBACK_KINDS``), which also has the pause team."""
+    playback = playback_control and source.kind in PLAYBACK_KINDS
+    sync = f"input_{index}_av_sync" if playback or source.kind == "ndi" or source.has_audio else None
+    return sync, (f"input_{index}_pause" if playback else None)
 
 
 def source_pads(sources, *, external: Optional[set[str]] = None,
@@ -277,6 +280,9 @@ class SourceController:
         if pad.kind not in SETTABLE_KINDS:
             raise ConfigError(f"{who}: source {source_id!r} kind {pad.kind!r} is unsupported "
                               f"(need one of {sorted(SETTABLE_KINDS)})")
+        if playback and pad.kind not in PLAYBACK_KINDS:
+            raise ConfigError(f"{who}: source {source_id!r} kind {pad.kind!r} has no pause or seek "
+                              f"(need one of {sorted(PLAYBACK_KINDS)})")
         if playback and not (pad.pause_team and pad.sync_team):
             raise ConfigError(f"{who}: source {source_id!r} has no pause/sync teams "
                               f"(build with MixerOptions.playback_control=True)")
