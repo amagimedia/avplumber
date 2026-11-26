@@ -27,7 +27,7 @@ from .dmabuf_inputs import (BrowserStartupUnsettled, dmabuf_cuda_input_nodes, op
                             refresh_windows, rest_request, wait_for_sockets)
 from .dsk import DownstreamKeyer, register_dsk_commands
 from .inputs import build_input, build_v210_input, build_raw420_input
-from .source_control import SourceController, register_source_commands, source_pads
+from .source_control import SourceController, chain_teams, register_source_commands, source_pads
 from .janus import (DEFAULT_KEYFRAME_MIN_INTERVAL_MS, JANUS_KEYFRAME_NODE, JanusVideoConfig,
                     RtcpFeedbackGroup, add_nodes, build_janus_output, dpb_options, release_commands)
 from ..transform import transform_output, transform_params
@@ -743,12 +743,12 @@ def load_avp_api():
     )
 
 
-def _playback_input_kwargs(tag: str, *, frame_metadata, input_params: dict | None = None) -> dict:
+def _playback_input_kwargs(pause_team: str, sync_team: str, *, frame_metadata,
+                           input_params: dict | None = None) -> dict:
     """Args that give ``build_input`` a pause node and a seekable realtime team (studio playout)."""
-    pause_team = f"input_{tag}_pause"
     return {
         "pause_team": pause_team,
-        "sync_team": f"input_{tag}_av_sync",
+        "sync_team": sync_team,
         "input_params": {**(input_params or {}), "pause_team": pause_team},
         "pause_params": {"pass_on_seek": False},
         "frame_metadata": sorted(set(frame_metadata or ()) | set(PLAYBACK_FRAME_METADATA)),
@@ -1121,13 +1121,10 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
                 input_params = ({"format": "libndi_newtek", "options": {
                     **NDI_INPUT_OPTIONS, **({"extra_ips": source.extra_ips} if source.extra_ips else {})}}
                     if ndi else None)
-                # Playback: pause + sync team for seek/resume-at. Otherwise a sync team only when
-                # audio or NDI already share one (lip-sync / live backlog).
-                sync_team = (f"input_{index}_av_sync"
-                             if options.playback_control or source.has_audio or ndi else None)
-                playback = (_playback_input_kwargs(str(index), frame_metadata=file_params["frame_metadata"],
-                                                   input_params=input_params)
-                            if options.playback_control else {
+                sync_team, pause_team = chain_teams(index, source, playback_control=options.playback_control)
+                playback = (_playback_input_kwargs(pause_team, sync_team, input_params=input_params,
+                                                   frame_metadata=file_params["frame_metadata"])
+                            if pause_team else {
                                 **({} if input_params is None else {"input_params": input_params}),
                                 **({} if sync_team is None else {"sync_team": sync_team}),
                             })

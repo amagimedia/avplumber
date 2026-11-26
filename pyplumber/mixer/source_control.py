@@ -77,23 +77,29 @@ def stop_group(avp, group: str, timeout: float = 5.0) -> None:
         avp.getEdge(edge).clear()
 
 
+def chain_teams(index: int, source, *, playback_control: bool) -> tuple[Optional[str], Optional[str]]:
+    """The (realtime sync team, pause team) of the ``build_input`` chain of show source *index*:
+    what ``build_application`` wires and ``source_pads`` addresses. A sync team where audio or
+    NDI already share one (lip-sync, live backlog), and on every chain with *playback_control*,
+    which also adds the pause team."""
+    sync = (f"input_{index}_av_sync"
+            if playback_control or source.kind == "ndi" or source.has_audio else None)
+    return sync, (f"input_{index}_pause" if playback_control else None)
+
+
 def source_pads(sources, *, external: Optional[set[str]] = None,
                 playback_control: bool = False) -> dict[str, SourcePad]:
-    """Pads for every show source, named the way ``build_application`` wires them."""
+    """Pads for every show source, named the way ``build_application`` wires them. Only a
+    ``build_input`` chain has teams."""
     external = external or set()
     pads = {}
     for index, source in enumerate(sources):
-        group = f"input_{index}"
-        # Sync team: audio / NDI always; every build_input chain when playback_control is on.
-        sync = (f"input_{index}_av_sync"
-                if playback_control or source.kind == "ndi" or getattr(source, "has_audio", False)
-                else None)
+        kind = source.kind if source.id not in external else "vmm"
+        sync, pause = (chain_teams(index, source, playback_control=playback_control)
+                       if kind in SETTABLE_KINDS else (None, None))
         pads[source.id] = SourcePad(
-            id=source.id, index=index, kind=source.kind if source.id not in external else "vmm",
-            group=group, input_node=f"input_{index}",
-            sync_team=sync,
-            pause_team=(f"input_{index}_pause" if playback_control else None),
-            continuous_loop=True)
+            id=source.id, index=index, kind=kind, group=f"input_{index}", input_node=f"input_{index}",
+            sync_team=sync, pause_team=pause, continuous_loop=True)
     return pads
 
 

@@ -162,7 +162,7 @@ def test_source_pads_follow_build_application_naming():
     assert pads["d"].sync_team is None and pads["a"].pause_team is None
     play = source_pads(sources, playback_control=True)
     assert play["d"].sync_team == "input_3_av_sync" and play["d"].pause_team == "input_3_pause"
-    assert play["c"].pause_team == "input_2_pause"  # pad bookkeeping; set() still refuses browser
+    assert play["c"].pause_team is None and play["c"].sync_team is None   # a browser pad is no build_input chain
 
 
 def test_register_source_commands_wires_the_control_handler():
