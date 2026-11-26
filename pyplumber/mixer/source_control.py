@@ -141,6 +141,29 @@ def _tcp_command(port: int, text: str, *, host: str = "127.0.0.1", timeout: floa
         conn.close()
 
 
+def _is_position(value) -> bool:
+    """A count of milliseconds: an int, and not a bool (which Python counts among them)."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _url_and_loop(request: dict, who: str) -> tuple[str, bool]:
+    url = request.get("url")
+    if not isinstance(url, str) or not url:
+        raise ConfigError(f"{who} needs a non-empty url")
+    if "loop" not in request:
+        raise ConfigError(f"{who} needs a boolean loop")
+    loop = request["loop"]
+    if not isinstance(loop, bool):
+        raise ConfigError(f"{who}: loop must be a boolean")
+    return url, loop
+
+
+def _no_other_fields(request: dict, who: str, *fields: str) -> None:
+    unknown = set(request) - {"mixer", "id", *fields}
+    if unknown:
+        raise ConfigError(f"{who}: unsupported fields {sorted(unknown)}")
+
+
 class SourceController:
     def __init__(self, avp, pads: dict[str, SourcePad], *, mixer: str = "mixer",
                  control_port: int = 0,
@@ -155,56 +178,24 @@ class SourceController:
         self._playback_lock = threading.Lock()
 
     def set(self, request: dict) -> dict:
-        mixer = request.get("mixer", self.mixer)
-        if mixer != self.mixer:
-            raise ConfigError(f"unknown mixer: {mixer}")
-        source_id = request.get("id")
-        if not isinstance(source_id, str) or not source_id:
-            raise ConfigError("source.set needs a non-empty id")
-        pad = self.pads.get(source_id)
-        if pad is None:
-            raise ConfigError(f"source.set: unknown source id {source_id!r}")
-        if pad.kind not in SETTABLE_KINDS:
-            raise ConfigError(f"source.set: source {source_id!r} kind {pad.kind!r} is unsupported "
-                              f"(need one of {sorted(SETTABLE_KINDS)})")
-        url = request.get("url")
-        if not isinstance(url, str) or not url:
-            raise ConfigError("source.set needs a non-empty url")
-        if "loop" not in request:
-            raise ConfigError("source.set needs a boolean loop")
-        loop = request["loop"]
-        if not isinstance(loop, bool):
-            raise ConfigError("source.set: loop must be a boolean")
+        pad = self._pad(request, "source.set")
+        url, loop = _url_and_loop(request, "source.set")
         # Optional fields the chain does not yet retarget (audio track, deinterlace) stay for a
         # follow-up; refuse them so a client does not think they took effect.
-        unknown = set(request) - {"mixer", "id", "url", "loop"}
-        if unknown:
-            raise ConfigError(f"source.set: unsupported fields {sorted(unknown)}")
+        _no_other_fields(request, "source.set", "url", "loop")
 
         with self.lock:
             self._set_unlocked(pad, url, loop)
-        return {"id": source_id, "url": url, "loop": loop}
+        return {"id": pad.id, "url": url, "loop": loop}
 
     def prepare(self, request: dict) -> dict:
         """Load a URL, pause on the cue-in frame, report duration when ffprobe knows it."""
-        mixer = request.get("mixer", self.mixer)
-        if mixer != self.mixer:
-            raise ConfigError(f"unknown mixer: {mixer}")
-        source_id, pad = self._playback_pad(request, "source.prepare")
-        url = request.get("url")
-        if not isinstance(url, str) or not url:
-            raise ConfigError("source.prepare needs a non-empty url")
-        if "loop" not in request:
-            raise ConfigError("source.prepare needs a boolean loop")
-        loop = request["loop"]
-        if not isinstance(loop, bool):
-            raise ConfigError("source.prepare: loop must be a boolean")
+        pad = self._pad(request, "source.prepare", playback=True)
+        url, loop = _url_and_loop(request, "source.prepare")
         cue = request.get("cue_in_ms", 0)
-        if not isinstance(cue, int) or isinstance(cue, bool) or cue < 0:
+        if not _is_position(cue):
             raise ConfigError("source.prepare: cue_in_ms must be a non-negative int")
-        unknown = set(request) - {"mixer", "id", "url", "loop", "cue_in_ms"}
-        if unknown:
-            raise ConfigError(f"source.prepare: unsupported fields {sorted(unknown)}")
+        _no_other_fields(request, "source.prepare", "url", "loop", "cue_in_ms")
 
         with self.lock:
             self._set_unlocked(pad, url, loop)
@@ -213,26 +204,21 @@ class SourceController:
             # (pass_on_seek off) until resume … at.
             self._playback_command(f"pause {pad.pause_team} now", wait_s=10.0)
             self._playback_command(f"seek {pad.sync_team} now {cue}", wait_s=5.0)
-        return {"id": source_id, "url": url, "loop": loop, "cue_in_ms": cue,
+        return {"id": pad.id, "url": url, "loop": loop, "cue_in_ms": cue,
                 "duration_ms": duration_ms}
 
     def media(self, request: dict) -> dict:
-        mixer = request.get("mixer", self.mixer)
-        if mixer != self.mixer:
-            raise ConfigError(f"unknown mixer: {mixer}")
-        source_id, pad = self._playback_pad(request, "source.media")
+        pad = self._pad(request, "source.media", playback=True)
         action = request.get("action")
         if action not in MEDIA_ACTIONS:
             raise ConfigError(f"source.media: action must be one of {sorted(MEDIA_ACTIONS)}")
         position_ms = request.get("position_ms")
         if action == "seek":
-            if not isinstance(position_ms, int) or isinstance(position_ms, bool) or position_ms < 0:
+            if not _is_position(position_ms):
                 raise ConfigError("source.media: seek needs a non-negative int position_ms")
         elif position_ms is not None:
-            raise ConfigError(f"source.media: position_ms is only valid with action seek")
-        unknown = set(request) - {"mixer", "id", "action", "position_ms"}
-        if unknown:
-            raise ConfigError(f"source.media: unsupported fields {sorted(unknown)}")
+            raise ConfigError("source.media: position_ms is only valid with action seek")
+        _no_other_fields(request, "source.media", "action", "position_ms")
 
         pause, team = pad.pause_team, pad.sync_team
         with self.lock:
@@ -247,37 +233,35 @@ class SourceController:
                     self._control(f"resume {pause}")
                 elif action == "stop":
                     self._playback_command(f"pause {pause} now")
-        reply = {"id": source_id, "action": action}
+        reply = {"id": pad.id, "action": action}
         if action == "seek":
             reply["position_ms"] = position_ms
         return reply
 
     def resume_at(self, request: dict) -> dict:
         """Schedule ``resume <pause_team> at <at_ms>`` (wallclock ms, mixer start_pts domain)."""
-        mixer = request.get("mixer", self.mixer)
-        if mixer != self.mixer:
-            raise ConfigError(f"unknown mixer: {mixer}")
-        source_id, pad = self._playback_pad(request, "source.resume_at")
+        pad = self._pad(request, "source.resume_at", playback=True)
         at_ms = request.get("at_ms")
-        if not isinstance(at_ms, int) or isinstance(at_ms, bool) or at_ms < 0:
+        if not _is_position(at_ms):
             raise ConfigError("source.resume_at needs a non-negative int at_ms")
         position_ms = request.get("position_ms")
-        if position_ms is not None and (
-                not isinstance(position_ms, int) or isinstance(position_ms, bool) or position_ms < 0):
+        if position_ms is not None and not _is_position(position_ms):
             raise ConfigError("source.resume_at: position_ms must be a non-negative int when set")
-        unknown = set(request) - {"mixer", "id", "at_ms", "position_ms"}
-        if unknown:
-            raise ConfigError(f"source.resume_at: unsupported fields {sorted(unknown)}")
+        _no_other_fields(request, "source.resume_at", "at_ms", "position_ms")
 
         with self.lock:
             self._control(f"resume {pad.pause_team} at {at_ms}")
-        reply = {"id": source_id, "at_ms": at_ms}
+        reply = {"id": pad.id, "at_ms": at_ms}
         if position_ms is not None:
             # Echo only: the engine does not track playhead; clients keep their own clock.
             reply["position_ms"] = position_ms
         return reply
 
-    def _playback_pad(self, request: dict, who: str) -> tuple[str, SourcePad]:
+    def _pad(self, request: dict, who: str, *, playback: bool = False) -> SourcePad:
+        """The pad a request names, for this mixer; with *playback*, one that can pause and seek."""
+        mixer = request.get("mixer", self.mixer)
+        if mixer != self.mixer:
+            raise ConfigError(f"unknown mixer: {mixer}")
         source_id = request.get("id")
         if not isinstance(source_id, str) or not source_id:
             raise ConfigError(f"{who} needs a non-empty id")
@@ -287,10 +271,10 @@ class SourceController:
         if pad.kind not in SETTABLE_KINDS:
             raise ConfigError(f"{who}: source {source_id!r} kind {pad.kind!r} is unsupported "
                               f"(need one of {sorted(SETTABLE_KINDS)})")
-        if not pad.pause_team or not pad.sync_team:
+        if playback and not (pad.pause_team and pad.sync_team):
             raise ConfigError(f"{who}: source {source_id!r} has no pause/sync teams "
                               f"(build with MixerOptions.playback_control=True)")
-        return source_id, pad
+        return pad
 
     def _set_unlocked(self, pad: SourcePad, url: str, loop: bool) -> None:
         continuous = bool(loop and pad.continuous_loop)
