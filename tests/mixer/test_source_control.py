@@ -1,4 +1,4 @@
-"""mixer.source.set: safe group stop + URL/loop repoint without a live engine."""
+"""mixer.source.set / prepare / media / resume_at without a live engine."""
 from __future__ import annotations
 
 import json
@@ -171,3 +171,93 @@ def test_register_source_commands_wires_the_control_handler():
     reply = json.loads(avp.handlers["mixer.source.set"](json.dumps(
         {"id": "cam1", "url": "file:///a.mp4", "loop": False})))
     assert reply == {"id": "cam1", "url": "file:///a.mp4", "loop": False}
+
+
+def _controller(avp=None, *, run=None, probe=None, **pad_over):
+    avp = avp or _Avp([_Node("input_0", dst="v_pkt"), _Node("otm", src="v_pkt", dst="out")],
+                      edges=["v_pkt"])
+    return SourceController(avp, {"cam1": _pad(**pad_over)},
+                            run_command=run, probe=probe or (lambda _url: 12_345)), avp
+
+
+def test_prepare_loads_pauses_and_seeks_to_cue():
+    commands = []
+
+    def run(text):
+        commands.append(text)
+
+    controller, avp = _controller(run=run)
+    assert controller.prepare({"id": "cam1", "url": "file:///clip.mp4", "loop": False,
+                               "cue_in_ms": 1500}) == {
+        "id": "cam1", "url": "file:///clip.mp4", "loop": False, "cue_in_ms": 1500,
+        "duration_ms": 12_345}
+    assert avp._group.stop_asked
+    assert "node.param.set input_0 url \"file:///clip.mp4\"" in avp.commands
+    assert commands == ["pause input_0_pause now", "seek input_0_av_sync now 1500"]
+
+
+def test_prepare_refuses_without_playback_teams():
+    controller, _ = _controller(pause_team=None, sync_team=None)
+    with pytest.raises(ConfigError, match="playback_control"):
+        controller.prepare({"id": "cam1", "url": "file:///a.mp4", "loop": True})
+
+
+@pytest.mark.parametrize("action, expect", [
+    ("play", ["resume input_0_pause"]),
+    ("pause", ["pause input_0_pause now"]),
+    ("restart", ["seek input_0_av_sync now 0", "resume input_0_pause"]),
+    ("stop", ["seek input_0_av_sync now 0", "pause input_0_pause now"]),
+])
+def test_media_actions(action, expect):
+    commands = []
+    controller, _ = _controller(run=commands.append)
+    assert controller.media({"id": "cam1", "action": action}) == {"id": "cam1", "action": action}
+    assert commands == expect
+
+
+def test_media_seek_needs_position():
+    commands = []
+    controller, _ = _controller(run=commands.append)
+    assert controller.media({"id": "cam1", "action": "seek", "position_ms": 2500}) == {
+        "id": "cam1", "action": "seek", "position_ms": 2500}
+    assert commands == ["seek input_0_av_sync now 2500"]
+    with pytest.raises(ConfigError, match="position_ms"):
+        controller.media({"id": "cam1", "action": "seek"})
+
+
+def test_playback_command_retries_until_a_frame_exists():
+    attempts = {"n": 0}
+    commands = []
+
+    def run(text):
+        commands.append(text)
+        if text.startswith("pause ") and attempts["n"] < 2:
+            attempts["n"] += 1
+            raise RuntimeError("Relative seek not possible. Can not determine current time.")
+
+    controller, _ = _controller(run=run)
+    controller.media({"id": "cam1", "action": "pause"})
+    assert commands == [
+        "pause input_0_pause now", "resume input_0_pause",
+        "pause input_0_pause now", "resume input_0_pause",
+        "pause input_0_pause now",
+    ]
+
+
+def test_resume_at_schedules_the_pause_team():
+    commands = []
+    controller, _ = _controller(run=commands.append)
+    assert controller.resume_at({"id": "cam1", "at_ms": 90_000, "position_ms": 1500}) == {
+        "id": "cam1", "at_ms": 90_000, "position_ms": 1500}
+    assert commands == ["resume input_0_pause at 90000"]
+
+
+def test_register_wires_prepare_media_and_resume_at():
+    commands = []
+    controller, _ = _controller(run=commands.append)
+    register_source_commands(controller.avp, controller)
+    assert set(controller.avp.handlers) >= {
+        "mixer.source.set", "mixer.source.prepare", "mixer.source.media", "mixer.source.resume_at"}
+    prepared = json.loads(controller.avp.handlers["mixer.source.prepare"](json.dumps(
+        {"id": "cam1", "url": "file:///a.mp4", "loop": True, "cue_in_ms": 0})))
+    assert prepared["duration_ms"] == 12_345 and prepared["id"] == "cam1"

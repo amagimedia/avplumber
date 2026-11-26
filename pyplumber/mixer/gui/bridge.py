@@ -330,7 +330,9 @@ class MixerBridge:
         command = request.get("command")
         if command == "lever":
             return self.lever(request)
-        if command in ("dsk", "ftb", "audio_gain", "audio_processor", "source.set", *AUX_COMMANDS):
+        if command in ("dsk", "ftb", "audio_gain", "audio_processor",
+                       "source.set", "source.prepare", "source.media", "source.resume_at",
+                       *AUX_COMMANDS):
             payload = {k: v for k, v in request.items() if k != "command"}
             try:
                 result = json.loads(self.command(f"mixer.{command} " + json.dumps(payload)) or "{}")

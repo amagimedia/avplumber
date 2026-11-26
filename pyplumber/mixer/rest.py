@@ -279,6 +279,56 @@ class SourceSetResult(Reply):
     loop: bool
 
 
+class SourcePrepare(Request):
+    """Load a URL on a playback-enabled pad, pause on the cue-in frame. Needs
+    `MixerOptions.playback_control`."""
+    url: Annotated[str, Field(min_length=1)]
+    loop: bool
+    cue_in_ms: int = Field(0, ge=0, description="Seek to this offset after pause, in milliseconds")
+
+
+class SourcePrepareResult(Reply):
+    id: str
+    url: str
+    loop: bool
+    cue_in_ms: int
+    duration_ms: int | None = Field(None, description="ffprobe length when known; null for live / unprobeable")
+
+
+class SourceMedia(Request):
+    """play / pause / seek / stop / restart on a playback-enabled source."""
+    action: Literal["play", "pause", "seek", "stop", "restart"]
+    position_ms: int | None = Field(None, ge=0, description="Required for seek; ignored otherwise")
+
+    @model_validator(mode="after")
+    def _seek_needs_position(self):
+        if self.action == "seek" and self.position_ms is None:
+            raise ValueError("seek needs position_ms")
+        if self.action != "seek" and self.position_ms is not None:
+            raise ValueError("position_ms is only valid with action seek")
+        return self
+
+
+class SourceMediaResult(Reply):
+    id: str
+    action: str
+    position_ms: int | None = None
+
+
+class SourceResumeAt(Request):
+    """Schedule resume of the source's pause team at a wallclock time (ms)."""
+    at_ms: int = Field(ge=0, description="Wallclock ms in the mixer start_pts domain")
+    position_ms: int | None = Field(
+        None, ge=0,
+        description="Client playhead at resume; echoed only — the engine does not track position")
+
+
+class SourceResumeAtResult(Reply):
+    id: str
+    at_ms: int
+    position_ms: int | None = None
+
+
 # --- Audio ---
 
 GainDb = Annotated[float, Field(ge=DB_MIN, le=DB_MAX)]
@@ -455,6 +505,23 @@ def mixer_router(bridge: MixerBridge, *, on_aux_change: Callable[[str, dict], No
     def set_source(source_id: str, request: SourceSet):
         """Change the URL and loop of an existing show source pad without EOS killing the mixer."""
         return send("source.set", request, id=source_id, mixer=bridge.mixer)
+
+    @router.post("/sources/{source_id}/prepare", response_model=SourcePrepareResult)
+    def prepare_source(source_id: str, request: SourcePrepare):
+        """Load a URL, pause on the cue-in frame. Needs a mixer built with playback_control."""
+        return send("source.prepare", request, id=source_id, mixer=bridge.mixer)
+
+    @router.post("/sources/{source_id}/media", response_model=SourceMediaResult,
+                 response_model_exclude_none=True)
+    def source_media(source_id: str, request: SourceMedia):
+        """play / pause / seek / stop / restart. Playhead stays client-estimated."""
+        return send("source.media", request, id=source_id, mixer=bridge.mixer)
+
+    @router.post("/sources/{source_id}/resume_at", response_model=SourceResumeAtResult,
+                 response_model_exclude_none=True)
+    def resume_source_at(source_id: str, request: SourceResumeAt):
+        """Schedule `resume <pause_team> at <at_ms>` for a timed cue-in."""
+        return send("source.resume_at", request, id=source_id, mixer=bridge.mixer)
 
     # --- Audio ---
 

@@ -1254,6 +1254,200 @@
         "title": "Scenes",
         "type": "object"
       },
+      "SourceMedia": {
+        "additionalProperties": false,
+        "description": "play / pause / seek / stop / restart on a playback-enabled source.",
+        "properties": {
+          "action": {
+            "enum": [
+              "play",
+              "pause",
+              "seek",
+              "stop",
+              "restart"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "position_ms": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Required for seek; ignored otherwise",
+            "title": "Position Ms"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "title": "SourceMedia",
+        "type": "object"
+      },
+      "SourceMediaResult": {
+        "additionalProperties": true,
+        "properties": {
+          "action": {
+            "title": "Action",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "position_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Position Ms"
+          }
+        },
+        "required": [
+          "id",
+          "action"
+        ],
+        "title": "SourceMediaResult",
+        "type": "object"
+      },
+      "SourcePrepare": {
+        "additionalProperties": false,
+        "description": "Load a URL on a playback-enabled pad, pause on the cue-in frame. Needs\n`MixerOptions.playback_control`.",
+        "properties": {
+          "cue_in_ms": {
+            "default": 0,
+            "description": "Seek to this offset after pause, in milliseconds",
+            "minimum": 0.0,
+            "title": "Cue In Ms",
+            "type": "integer"
+          },
+          "loop": {
+            "title": "Loop",
+            "type": "boolean"
+          },
+          "url": {
+            "minLength": 1,
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "loop"
+        ],
+        "title": "SourcePrepare",
+        "type": "object"
+      },
+      "SourcePrepareResult": {
+        "additionalProperties": true,
+        "properties": {
+          "cue_in_ms": {
+            "title": "Cue In Ms",
+            "type": "integer"
+          },
+          "duration_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "ffprobe length when known; null for live / unprobeable",
+            "title": "Duration Ms"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "loop": {
+            "title": "Loop",
+            "type": "boolean"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "url",
+          "loop",
+          "cue_in_ms"
+        ],
+        "title": "SourcePrepareResult",
+        "type": "object"
+      },
+      "SourceResumeAt": {
+        "additionalProperties": false,
+        "description": "Schedule resume of the source's pause team at a wallclock time (ms).",
+        "properties": {
+          "at_ms": {
+            "description": "Wallclock ms in the mixer start_pts domain",
+            "minimum": 0.0,
+            "title": "At Ms",
+            "type": "integer"
+          },
+          "position_ms": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Client playhead at resume; echoed only \u2014 the engine does not track position",
+            "title": "Position Ms"
+          }
+        },
+        "required": [
+          "at_ms"
+        ],
+        "title": "SourceResumeAt",
+        "type": "object"
+      },
+      "SourceResumeAtResult": {
+        "additionalProperties": true,
+        "properties": {
+          "at_ms": {
+            "title": "At Ms",
+            "type": "integer"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "position_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Position Ms"
+          }
+        },
+        "required": [
+          "id",
+          "at_ms"
+        ],
+        "title": "SourceResumeAtResult",
+        "type": "object"
+      },
       "SourceSet": {
         "additionalProperties": false,
         "description": "Repoint a wired file / live video (or NDI) source: stop its group safely, set URL and loop,\nrestart. Browser, raw, MXL and VMM pads refuse the command.",
@@ -4522,6 +4716,420 @@
           }
         ],
         "summary": "Set Source",
+        "tags": [
+          "mixer"
+        ]
+      }
+    },
+    "/api/v1/mixer/sources/{source_id}/media": {
+      "post": {
+        "description": "play / pause / seek / stop / restart. Playhead stays client-estimated.",
+        "operationId": "mixer_source_media",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "source_id",
+            "required": true,
+            "schema": {
+              "title": "Source Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SourceMedia"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceMediaResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unauthorized`: the gateway requires a bearer token and the request has none, or another one"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`cross_origin`: a browser sent the request for another site's page"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`not_available`: this show or engine has no such command (e.g. keys in a show without a keyer)"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`engine_rejected`: the engine refused the command, `message` is its reason; `conflict`: the resource changed since the revision the request names"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`invalid_request`: the request does not match the schema, `details` lists the fields"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`internal_error`: the gateway failed; its log has the cause"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`bad_engine_reply`: the engine's reply is not JSON, or lacks a field this route's schema promises"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`engine_unreachable`: no control connection to the engine; `engine_not_ready`: the engine is starting and does not take this command yet"
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`engine_timeout`: the engine did not answer in time; the command may still have run"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Source Media",
+        "tags": [
+          "mixer"
+        ]
+      }
+    },
+    "/api/v1/mixer/sources/{source_id}/prepare": {
+      "post": {
+        "description": "Load a URL, pause on the cue-in frame. Needs a mixer built with playback_control.",
+        "operationId": "mixer_prepare_source",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "source_id",
+            "required": true,
+            "schema": {
+              "title": "Source Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SourcePrepare"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourcePrepareResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unauthorized`: the gateway requires a bearer token and the request has none, or another one"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`cross_origin`: a browser sent the request for another site's page"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`not_available`: this show or engine has no such command (e.g. keys in a show without a keyer)"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`engine_rejected`: the engine refused the command, `message` is its reason; `conflict`: the resource changed since the revision the request names"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`invalid_request`: the request does not match the schema, `details` lists the fields"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`internal_error`: the gateway failed; its log has the cause"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`bad_engine_reply`: the engine's reply is not JSON, or lacks a field this route's schema promises"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`engine_unreachable`: no control connection to the engine; `engine_not_ready`: the engine is starting and does not take this command yet"
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`engine_timeout`: the engine did not answer in time; the command may still have run"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Prepare Source",
+        "tags": [
+          "mixer"
+        ]
+      }
+    },
+    "/api/v1/mixer/sources/{source_id}/resume_at": {
+      "post": {
+        "description": "Schedule `resume <pause_team> at <at_ms>` for a timed cue-in.",
+        "operationId": "mixer_resume_source_at",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "source_id",
+            "required": true,
+            "schema": {
+              "title": "Source Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SourceResumeAt"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceResumeAtResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unauthorized`: the gateway requires a bearer token and the request has none, or another one"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`cross_origin`: a browser sent the request for another site's page"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`not_available`: this show or engine has no such command (e.g. keys in a show without a keyer)"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`engine_rejected`: the engine refused the command, `message` is its reason; `conflict`: the resource changed since the revision the request names"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`invalid_request`: the request does not match the schema, `details` lists the fields"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`internal_error`: the gateway failed; its log has the cause"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`bad_engine_reply`: the engine's reply is not JSON, or lacks a field this route's schema promises"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`engine_unreachable`: no control connection to the engine; `engine_not_ready`: the engine is starting and does not take this command yet"
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`engine_timeout`: the engine did not answer in time; the command may still have run"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Resume Source At",
         "tags": [
           "mixer"
         ]

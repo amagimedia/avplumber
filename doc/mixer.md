@@ -446,6 +446,26 @@ what pause / seek / `resume … at` need; ordinary demos leave the option off.
 Studio and other playout callers set `MixerOptions(playback_control=True)`
 instead of monkeypatching `build_input`.
 
+### Playout (`mixer.source.prepare` / `media` / `resume_at`)
+
+Need `playback_control`. Address sources by show source id.
+
+```text
+mixer.source.prepare {"mixer":"mixer","id":"<sourceId>","url":"…","loop":false,"cue_in_ms":0}
+mixer.source.media   {"mixer":"mixer","id":"<sourceId>","action":"play"|"pause"|"seek"|"stop"|"restart",…}
+mixer.source.resume_at {"mixer":"mixer","id":"<sourceId>","at_ms":<wallclock_ms>,"position_ms":?}
+```
+
+`prepare` repoints like `source.set`, probes duration when ffprobe knows it, pauses on
+the first frame, then seeks to `cue_in_ms` (the pause node holds that frame). `media`
+drives play / pause / seek / stop / restart; pause and seek retry while the chain has
+no frame yet (`Can not determine current time`). `resume_at` schedules
+`resume <pause_team> at <at_ms>` in the mixer wallclock domain.
+
+The engine does **not** report playhead position. `position_ms` on `resume_at` is
+echoed for the client's own clock only. REST: `POST /mixer/sources/{id}/prepare`,
+`/media`, `/resume_at`.
+
 ## Profiling
 
 The engine marks its timeline with NVTX ([timeline.hpp](../src/timeline.hpp)). Without a

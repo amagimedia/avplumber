@@ -1334,7 +1334,8 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
     avp.registerControlCommand("mixer.debug_overlay", debug_overlay, True)
     register_source_commands(avp, SourceController(
         avp, source_pads(cfg.sources, external=set(external),
-                         playback_control=options.playback_control), mixer=MIXER_NAME))
+                         playback_control=options.playback_control), mixer=MIXER_NAME,
+        control_port=options.remote_control_port))
     held = []
     # Purge idle imports left by the capture pool's start-up churn.
     importers = tuple(f"input_{index}_to_cuda" for index in browsers)

@@ -65,6 +65,9 @@ class FakeEngine:
             "mixer.audio_processor": lambda arg: self._audio_processor(json.loads(arg)),
             "mixer.audio_processor_status": lambda _arg: [self.processor],
             "mixer.source.set": lambda arg: self._source_set(json.loads(arg)),
+            "mixer.source.prepare": lambda arg: self._source_prepare(json.loads(arg)),
+            "mixer.source.media": lambda arg: self._source_media(json.loads(arg)),
+            "mixer.source.resume_at": lambda arg: self._source_resume_at(json.loads(arg)),
         }
 
     def command(self, line: str, timeout: float | None = None) -> str | None:
@@ -215,3 +218,57 @@ class FakeEngine:
             raise _Refused("source.set needs a non-empty url and a boolean loop")
         source.update(url=url, loop=loop)
         return {"id": source["id"], "url": url, "loop": loop}
+
+    def _source_pad(self, request, who):
+        self._for_mixer(request.get("mixer"), lambda: None)
+        source = self.sources.get(request.get("id"))
+        if source is None:
+            raise _Refused(f"{who}: unknown source id {request.get('id')!r}")
+        if source["kind"] not in ("video", "ndi"):
+            raise _Refused(f"{who}: source {source['id']!r} kind {source['kind']!r} is unsupported")
+        return source
+
+    def _source_prepare(self, request):
+        source = self._source_pad(request, "source.prepare")
+        url, loop = request.get("url"), request.get("loop")
+        cue = request.get("cue_in_ms", 0)
+        if not isinstance(url, str) or not url or not isinstance(loop, bool):
+            raise _Refused("source.prepare needs a non-empty url and a boolean loop")
+        if not isinstance(cue, int) or isinstance(cue, bool) or cue < 0:
+            raise _Refused("source.prepare: cue_in_ms must be a non-negative int")
+        source.update(url=url, loop=loop, paused=True, position_ms=cue)
+        return {"id": source["id"], "url": url, "loop": loop, "cue_in_ms": cue, "duration_ms": 60_000}
+
+    def _source_media(self, request):
+        source = self._source_pad(request, "source.media")
+        action = request.get("action")
+        if action not in ("play", "pause", "seek", "stop", "restart"):
+            raise _Refused("source.media: unknown action")
+        position = request.get("position_ms")
+        if action == "seek":
+            if not isinstance(position, int) or isinstance(position, bool) or position < 0:
+                raise _Refused("source.media: seek needs a non-negative int position_ms")
+            source["position_ms"] = position
+        elif action == "play":
+            source["paused"] = False
+        elif action in ("pause", "stop"):
+            source["paused"] = True
+            if action == "stop":
+                source["position_ms"] = 0
+        elif action == "restart":
+            source.update(paused=False, position_ms=0)
+        reply = {"id": source["id"], "action": action}
+        if action == "seek":
+            reply["position_ms"] = position
+        return reply
+
+    def _source_resume_at(self, request):
+        source = self._source_pad(request, "source.resume_at")
+        at_ms = request.get("at_ms")
+        if not isinstance(at_ms, int) or isinstance(at_ms, bool) or at_ms < 0:
+            raise _Refused("source.resume_at needs a non-negative int at_ms")
+        source["paused"] = False
+        reply = {"id": source["id"], "at_ms": at_ms}
+        if "position_ms" in request and request["position_ms"] is not None:
+            reply["position_ms"] = request["position_ms"]
+        return reply

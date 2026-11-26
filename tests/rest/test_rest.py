@@ -75,6 +75,14 @@ def spaced(command, **payload):
     ("PUT", "/mixer/aux/mv/layout", {"layout": {"preset": "source_pages"}}, 200, spaced("aux_layout", layout={"preset": "source_pages"}, bus="mv")),
     ("PUT", "/mixer/sources/cam1", {"url": "file:///clip.mp4", "loop": True},
      200, spaced("source.set", url="file:///clip.mp4", loop=True, id="cam1", mixer="mixer")),
+    ("POST", "/mixer/sources/cam1/prepare", {"url": "file:///clip.mp4", "loop": False, "cue_in_ms": 500},
+     200, spaced("source.prepare", url="file:///clip.mp4", loop=False, cue_in_ms=500, id="cam1", mixer="mixer")),
+    ("POST", "/mixer/sources/cam1/media", {"action": "pause"},
+     200, spaced("source.media", action="pause", id="cam1", mixer="mixer")),
+    ("POST", "/mixer/sources/cam1/media", {"action": "seek", "position_ms": 1000},
+     200, spaced("source.media", action="seek", position_ms=1000, id="cam1", mixer="mixer")),
+    ("POST", "/mixer/sources/cam1/resume_at", {"at_ms": 90000, "position_ms": 500},
+     200, spaced("source.resume_at", at_ms=90000, position_ms=500, id="cam1", mixer="mixer")),
     ("GET", "/mixer/audio/gains", None, 200, "mixer.audio_gain_status"),
     ("PATCH", "/mixer/audio/gains", {"gains": {"cam1": -6, "cam2": 3.5}}, 200, spaced("audio_gain", gains={"cam1": -6.0, "cam2": 3.5})),
     ("GET", "/mixer/audio/processors", None, 200, "mixer.audio_processor_status"),
@@ -101,6 +109,17 @@ def test_source_set_repoints_a_wired_pad(api, engine):
     assert engine.sources["cam2"]["url"] == "file:///next.mp4"
     refused = api.put("/mixer/sources/nowhere", json={"url": "file:///x", "loop": True})
     assert refused.status_code == 409 and refused.json()["error"]["code"] == "engine_rejected"
+
+
+def test_source_prepare_media_and_resume_at(api, engine):
+    prepared = api.post("/mixer/sources/cam2/prepare",
+                        json={"url": "file:///next.mp4", "loop": True, "cue_in_ms": 250}).json()
+    assert prepared == {"id": "cam2", "url": "file:///next.mp4", "loop": True, "cue_in_ms": 250,
+                        "duration_ms": 60_000}
+    assert api.post("/mixer/sources/cam2/media", json={"action": "play"}).json() == {
+        "id": "cam2", "action": "play"}
+    assert api.post("/mixer/sources/cam2/resume_at", json={"at_ms": 12_000}).json() == {
+        "id": "cam2", "at_ms": 12_000}
 
 
 def test_key_and_aux_replies_are_the_mixers(api):
@@ -148,6 +167,13 @@ def test_key_and_aux_replies_are_the_mixers(api):
     ("PUT", "/mixer/sources/cam1", {}),
     ("PUT", "/mixer/sources/cam1", {"url": "", "loop": True}),
     ("PUT", "/mixer/sources/cam1", {"url": "file:///a.mp4", "loop": 1}),
+    ("POST", "/mixer/sources/cam1/prepare", {"url": "file:///a.mp4"}),
+    ("POST", "/mixer/sources/cam1/prepare", {"url": "file:///a.mp4", "loop": True, "cue_in_ms": -1}),
+    ("POST", "/mixer/sources/cam1/media", {"action": "rewind"}),
+    ("POST", "/mixer/sources/cam1/media", {"action": "seek"}),
+    ("POST", "/mixer/sources/cam1/media", {"action": "play", "position_ms": 1}),
+    ("POST", "/mixer/sources/cam1/resume_at", {}),
+    ("POST", "/mixer/sources/cam1/resume_at", {"at_ms": -1}),
     ("PATCH", "/mixer/audio/gains", {"gains": {}}),
     ("PATCH", "/mixer/audio/gains", {"gains": {"cam1": 11}}),
     ("PATCH", "/mixer/audio/processors/program/duck", {}),

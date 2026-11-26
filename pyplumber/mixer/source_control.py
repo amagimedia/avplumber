@@ -1,23 +1,35 @@
-"""Safe per-source input-chain restart: stop from the terminals, clear EOS, repoint URL/loop.
+"""Safe per-source input-chain restart and playout primitives.
 
 A stopping input ends its stream with an end-of-stream frame. Left in a group queue it ends the
 node that reads it after the next start; passed on, it can end the mixer's own nodes behind the
 compositors. Terminal nodes stop first so the frame stays inside, then every node stops, then the
 group's own edges are cleared before params change and the group starts again.
+
+``mixer.source.media`` / ``prepare`` / ``resume_at`` need ``MixerOptions.playback_control`` so each
+pad has a pause team and a sync team. Pause and seek retry while the chain has no frame yet
+("Can not determine current time"); that path uses a raising control runner (loopback TCP when a
+``control_port`` is set, else an injected ``run_command``). Playhead position is not reported by
+the engine — clients keep their own estimate.
 """
 from __future__ import annotations
 
 import json
+import shutil
+import socket
+import subprocess
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from .config import ConfigError
 
 # Chains built by ``build_input`` (file / live video and NDI). Browser, raw, MXL and VMM pads need
 # other primitives (navigate, unpack params, IPC) and refuse ``mixer.source.set``.
 SETTABLE_KINDS = frozenset({"video", "ndi"})
+MEDIA_ACTIONS = frozenset({"play", "pause", "seek", "stop", "restart"})
+# Pause / seek need a shown frame; just after group.start there may be none yet.
+_CURRENT_TIME_ERR = "Can not determine current time"
 
 
 @dataclass(frozen=True)
@@ -85,10 +97,62 @@ def source_pads(sources, *, external: Optional[set[str]] = None,
     return pads
 
 
+def probe_duration_ms(url: str, *, timeout: float = 20.0) -> Optional[int]:
+    """Clip length in ms via ffprobe, or None when the URL has no duration (live) or probe fails."""
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return None
+    try:
+        out = subprocess.run(
+            [ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", url],
+            capture_output=True, text=True, timeout=timeout)
+        text = out.stdout.strip()
+        if not text or text.upper() == "N/A":
+            return None
+        return int(float(text) * 1000)
+    except (subprocess.SubprocessError, ValueError, OSError):
+        return None
+
+
+def _tcp_command(port: int, text: str, *, host: str = "127.0.0.1", timeout: float = 10.0) -> Optional[str]:
+    """One raising exchange on the control port (``executeCommandsFromString`` only logs failures)."""
+    conn = socket.create_connection((host, port), timeout=timeout)
+    try:
+        stream = conn.makefile("rw", encoding="utf-8", newline="\n")
+        greeting = stream.readline()
+        if not greeting.startswith("100"):
+            raise RuntimeError(f"avplumber control: unexpected greeting {greeting.strip()!r}")
+        stream.write(text + "\n")
+        stream.flush()
+        head = stream.readline()
+        if not head:
+            raise ConnectionError("avplumber closed the control connection")
+        code = int(head.split(" ", 1)[0])
+        body = None
+        if code == 201:
+            lines = []
+            while (line := stream.readline()) not in ("\n", "\r\n", ""):
+                lines.append(line)
+            body = "".join(lines)
+        if not 200 <= code < 300:
+            raise RuntimeError(f"{text.split(' ', 1)[0]}: {head.strip()}")
+        return body
+    finally:
+        conn.close()
+
+
 class SourceController:
-    def __init__(self, avp, pads: dict[str, SourcePad], *, mixer: str = "mixer"):
+    def __init__(self, avp, pads: dict[str, SourcePad], *, mixer: str = "mixer",
+                 control_port: int = 0,
+                 run_command: Optional[Callable[[str], Optional[str]]] = None,
+                 probe: Callable[[str], Optional[int]] = probe_duration_ms):
         self.avp, self.pads, self.mixer = avp, pads, mixer
+        self.control_port = control_port
+        self._run_command = run_command
+        self._probe = probe
         self.lock = threading.Lock()
+        # Pause and seek retries serialize: a failed pause can leave the team needing resume first.
+        self._playback_lock = threading.Lock()
 
     def set(self, request: dict) -> dict:
         mixer = request.get("mixer", self.mixer)
@@ -117,26 +181,171 @@ class SourceController:
         if unknown:
             raise ConfigError(f"source.set: unsupported fields {sorted(unknown)}")
 
-        continuous = bool(loop and pad.continuous_loop)
         with self.lock:
-            stop_group(self.avp, pad.group)
-            self._param(pad.input_node, "url", url)
-            self._param(pad.input_node, "loop", loop)
-            self._param(pad.input_node, "loop_continuous_ts", continuous)
-            # The chain paces on one realtime team; the new input starts its own timeline, so the
-            # team starts again too (otherwise it waits on the old one).
-            if pad.sync_team:
-                self.avp.executeCommandsFromString(f"realtime.team.reset {pad.sync_team}")
-            if pad.pause_team:
-                self.avp.executeCommandsFromString(f"resume {pad.pause_team}")
-            self.avp.executeCommandsFromString(f"group.start {pad.group}")
+            self._set_unlocked(pad, url, loop)
         return {"id": source_id, "url": url, "loop": loop}
+
+    def prepare(self, request: dict) -> dict:
+        """Load a URL, pause on the cue-in frame, report duration when ffprobe knows it."""
+        mixer = request.get("mixer", self.mixer)
+        if mixer != self.mixer:
+            raise ConfigError(f"unknown mixer: {mixer}")
+        source_id, pad = self._playback_pad(request, "source.prepare")
+        url = request.get("url")
+        if not isinstance(url, str) or not url:
+            raise ConfigError("source.prepare needs a non-empty url")
+        if "loop" not in request:
+            raise ConfigError("source.prepare needs a boolean loop")
+        loop = request["loop"]
+        if not isinstance(loop, bool):
+            raise ConfigError("source.prepare: loop must be a boolean")
+        cue = request.get("cue_in_ms", 0)
+        if not isinstance(cue, int) or isinstance(cue, bool) or cue < 0:
+            raise ConfigError("source.prepare: cue_in_ms must be a non-negative int")
+        unknown = set(request) - {"mixer", "id", "url", "loop", "cue_in_ms"}
+        if unknown:
+            raise ConfigError(f"source.prepare: unsupported fields {sorted(unknown)}")
+
+        with self.lock:
+            self._set_unlocked(pad, url, loop)
+            duration_ms = self._probe(url)
+            # Pause on the first frame, then seek to cue-in; the pause node holds that frame
+            # (pass_on_seek off) until resume … at.
+            self._playback_command(f"pause {pad.pause_team} now", wait_s=10.0)
+            self._playback_command(f"seek {pad.sync_team} now {cue}", wait_s=5.0)
+        return {"id": source_id, "url": url, "loop": loop, "cue_in_ms": cue,
+                "duration_ms": duration_ms}
+
+    def media(self, request: dict) -> dict:
+        mixer = request.get("mixer", self.mixer)
+        if mixer != self.mixer:
+            raise ConfigError(f"unknown mixer: {mixer}")
+        source_id, pad = self._playback_pad(request, "source.media")
+        action = request.get("action")
+        if action not in MEDIA_ACTIONS:
+            raise ConfigError(f"source.media: action must be one of {sorted(MEDIA_ACTIONS)}")
+        position_ms = request.get("position_ms")
+        if action == "seek":
+            if not isinstance(position_ms, int) or isinstance(position_ms, bool) or position_ms < 0:
+                raise ConfigError("source.media: seek needs a non-negative int position_ms")
+        elif position_ms is not None:
+            raise ConfigError(f"source.media: position_ms is only valid with action seek")
+        unknown = set(request) - {"mixer", "id", "action", "position_ms"}
+        if unknown:
+            raise ConfigError(f"source.media: unsupported fields {sorted(unknown)}")
+
+        pause, team = pad.pause_team, pad.sync_team
+        with self.lock:
+            if action == "play":
+                self._control(f"resume {pause}")
+            elif action == "pause":
+                self._playback_command(f"pause {pause} now")
+            elif action in ("seek", "restart", "stop"):
+                target = 0 if action != "seek" else position_ms
+                self._playback_command(f"seek {team} now {target}")
+                if action == "restart":
+                    self._control(f"resume {pause}")
+                elif action == "stop":
+                    self._playback_command(f"pause {pause} now")
+        reply = {"id": source_id, "action": action}
+        if action == "seek":
+            reply["position_ms"] = position_ms
+        return reply
+
+    def resume_at(self, request: dict) -> dict:
+        """Schedule ``resume <pause_team> at <at_ms>`` (wallclock ms, mixer start_pts domain)."""
+        mixer = request.get("mixer", self.mixer)
+        if mixer != self.mixer:
+            raise ConfigError(f"unknown mixer: {mixer}")
+        source_id, pad = self._playback_pad(request, "source.resume_at")
+        at_ms = request.get("at_ms")
+        if not isinstance(at_ms, int) or isinstance(at_ms, bool) or at_ms < 0:
+            raise ConfigError("source.resume_at needs a non-negative int at_ms")
+        position_ms = request.get("position_ms")
+        if position_ms is not None and (
+                not isinstance(position_ms, int) or isinstance(position_ms, bool) or position_ms < 0):
+            raise ConfigError("source.resume_at: position_ms must be a non-negative int when set")
+        unknown = set(request) - {"mixer", "id", "at_ms", "position_ms"}
+        if unknown:
+            raise ConfigError(f"source.resume_at: unsupported fields {sorted(unknown)}")
+
+        with self.lock:
+            self._control(f"resume {pad.pause_team} at {at_ms}")
+        reply = {"id": source_id, "at_ms": at_ms}
+        if position_ms is not None:
+            # Echo only: the engine does not track playhead; clients keep their own clock.
+            reply["position_ms"] = position_ms
+        return reply
+
+    def _playback_pad(self, request: dict, who: str) -> tuple[str, SourcePad]:
+        source_id = request.get("id")
+        if not isinstance(source_id, str) or not source_id:
+            raise ConfigError(f"{who} needs a non-empty id")
+        pad = self.pads.get(source_id)
+        if pad is None:
+            raise ConfigError(f"{who}: unknown source id {source_id!r}")
+        if pad.kind not in SETTABLE_KINDS:
+            raise ConfigError(f"{who}: source {source_id!r} kind {pad.kind!r} is unsupported "
+                              f"(need one of {sorted(SETTABLE_KINDS)})")
+        if not pad.pause_team or not pad.sync_team:
+            raise ConfigError(f"{who}: source {source_id!r} has no pause/sync teams "
+                              f"(build with MixerOptions.playback_control=True)")
+        return source_id, pad
+
+    def _set_unlocked(self, pad: SourcePad, url: str, loop: bool) -> None:
+        continuous = bool(loop and pad.continuous_loop)
+        stop_group(self.avp, pad.group)
+        self._param(pad.input_node, "url", url)
+        self._param(pad.input_node, "loop", loop)
+        self._param(pad.input_node, "loop_continuous_ts", continuous)
+        # The chain paces on one realtime team; the new input starts its own timeline, so the
+        # team starts again too (otherwise it waits on the old one).
+        if pad.sync_team:
+            self.avp.executeCommandsFromString(f"realtime.team.reset {pad.sync_team}")
+        if pad.pause_team:
+            self.avp.executeCommandsFromString(f"resume {pad.pause_team}")
+        self.avp.executeCommandsFromString(f"group.start {pad.group}")
 
     def _param(self, node: str, key: str, value: Any) -> None:
         self.avp.executeCommandsFromString(f"node.param.set {node} {key} {json.dumps(value)}")
 
+    def _control(self, text: str) -> Optional[str]:
+        """Run a control line; raises on refusal when a raising runner is available."""
+        if self._run_command is not None:
+            return self._run_command(text)
+        if self.control_port:
+            return _tcp_command(self.control_port, text)
+        self.avp.executeCommandsFromString(text)
+        return None
+
+    def _playback_command(self, text: str, wait_s: float = 3.0) -> None:
+        """Pause and seek need a frame of the clip to have been shown; just after a source starts
+        there may be none yet, so they are tried again for a moment.
+
+        A pause that fails that way has already paused its team on avplumber builds before the
+        pause fix: the input, which waits on the team, stops reading and the frame never comes. So
+        the team is resumed before the pause is tried again."""
+        words = text.split()
+        team = words[1] if len(words) > 2 and words[0] == "pause" else None
+        with self._playback_lock:
+            deadline = time.monotonic() + wait_s
+            while True:
+                try:
+                    self._control(text)
+                    return
+                except RuntimeError as exc:
+                    if _CURRENT_TIME_ERR not in str(exc) or time.monotonic() > deadline:
+                        raise
+                    if team is not None:
+                        self._control(f"resume {team}")
+                time.sleep(0.1)
+
 
 def register_source_commands(avp, controller: SourceController) -> None:
-    avp.registerControlCommand(
-        "mixer.source.set",
-        lambda arg: json.dumps(controller.set(json.loads(arg))) + "\n", True)
+    def handle(method):
+        return lambda arg: json.dumps(method(json.loads(arg))) + "\n"
+
+    avp.registerControlCommand("mixer.source.set", handle(controller.set), True)
+    avp.registerControlCommand("mixer.source.prepare", handle(controller.prepare), True)
+    avp.registerControlCommand("mixer.source.media", handle(controller.media), True)
+    avp.registerControlCommand("mixer.source.resume_at", handle(controller.resume_at), True)
