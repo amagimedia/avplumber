@@ -91,10 +91,11 @@ backend.on('connection', (client, req) => {
     const findRequest = (from, instance, command) => requests.slice(from).find(r => r.instanceId === instance && r.command === command);
     await call('Runtime.enable');
     await until(() => findRequest(0, 'a', 'nodes.json'));
+    const hud = () => evaluate("document.querySelector('.gv-hud')?.innerText.replace(/\\s+/g, ' ') || ''");
+    await until(async () => (await hud()).includes('p95 – · p99 – ms · waiting for timing samples'));
     startupGraphReady = true;
     await until(async () => await count() === 2);
-    const hud = () => evaluate("document.querySelector('.gv-hud')?.innerText.replace(/\\s+/g, ' ') || ''");
-    await until(async () => (await hud()).includes('waiting for timing samples'));
+    await until(() => findRequest(0, 'a', 'mixer.status demo'));
     timingReady = true;
     await until(async () => /Program compose mean 2.0\s*· p95 3.0 · p99 4.0 \/ 40.0 ms/.test(await hud())).catch(async error => { throw new Error(await hud(), {cause: error}); });
     assert.match(await hud(), /Queue traffic 35 frames\/s/);
