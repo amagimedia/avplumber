@@ -175,6 +175,23 @@ public:
             av::Timestamp swr_delay_r = { swr_get_delay(resampler_->raw(), dst_params_.sample_rate), {1, dst_params_.sample_rate} };
             av::Timestamp cur_drift_r = addTS(in_samples.pts(), negateTS(next_out_ts_), negateTS(inside_resampler_));
             double cur_drift = cur_drift_r.seconds();
+
+            // A large error is not something to smooth away: reset the resampler to the
+            // incoming source time. This is the hard resync that stops loop/seeking
+            // offsets (historically 0.5-8 s) from accumulating indefinitely.
+            if ((comp_samp_==0) && (std::fabs(cur_drift) > 0.1)) {
+                logstream << "Hard audio resync: drift " << cur_drift << " s";
+                flushInternal();
+                createResampler();
+                next_out_ts_ = rescaleTS(in_samples.pts(), dst_params_.timebase());
+                inside_resampler_ = {0, timebase_};
+                drifts_ = std::vector<double>(drifts_size_, 0);
+                drift_index_ = 0;
+                drifted_frames_ = 0;
+                now_compensating_ = false;
+                really_drift = false;
+                cur_drift = 0;
+            }
             drifts_[drift_index_++] = cur_drift;
             drift_index_ %= drifts_size_;
             
