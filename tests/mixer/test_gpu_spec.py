@@ -15,6 +15,7 @@ def test_a_known_card_takes_its_engines():
 @pytest.mark.parametrize("name, nvdec, nvenc", [
     ("NVIDIA GeForce RTX 4060 Ti", 1, 1), ("NVIDIA GeForce RTX 4090", 1, 2), ("NVIDIA L4", 4, 2),
     ("Tesla T4", 2, 1), ("NVIDIA GeForce RTX 5080 Laptop GPU", 2, 2), ("NVIDIA T400 4GB", 1, 1),
+    ("NVIDIA GeForce RTX 4070 Ti SUPER", 1, 2), ("NVIDIA GeForce RTX 3090 Ti", 1, 1), ("NVIDIA GeForce RTX 2070", 1, 1),
 ])
 def test_names_match_the_matrix_spelling(name, nvdec, nvenc):
     spec = gpu_spec.parse(f"{name}, 8.9, 16000, 15000")
