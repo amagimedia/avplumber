@@ -37,6 +37,7 @@ RUN cmake -S /build/dyremix -B /build/dyremix/build-static \
         -DCMAKE_BUILD_TYPE=Release \
         -DBUILD_SHARED=OFF \
         -DBUILD_STATIC=ON \
+        -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
         -DCMAKE_INSTALL_PREFIX=/dyremix-install \
     && cmake --build /build/dyremix/build-static -j"$(nproc)" \
     && cmake --install /build/dyremix/build-static
