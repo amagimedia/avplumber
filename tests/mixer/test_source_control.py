@@ -11,8 +11,8 @@ import pytest
 
 from pyplumber.mixer.config import ConfigError
 from pyplumber.mixer.source_control import (
-    SourceController, SourcePad, control_command, group_shape, register_source_commands, source_pads,
-    stop_group,
+    SourceController, SourcePad, SourceUrls, control_command, group_shape, register_source_commands,
+    source_pads, stop_group, url_protocol,
 )
 
 
@@ -168,6 +168,59 @@ def test_set_checks_the_request_before_stopping(request_, match):
         controller.set(request_)
     assert avp.commands == []
     assert not avp._group.stop_asked
+
+
+@pytest.mark.parametrize("url, protocol", [
+    ("srt://ingest:9000?mode=caller", "srt"),
+    ("/media/clip.mp4", "file"), ("clip.mp4", "file"), ("file:/media/clip.mp4", "file"),
+    ("/media/a:b.mp4", "file"),                           # a colon after a character no scheme has
+    ("concat:/media/a.ts|/etc/passwd", "concat"),
+    ("crypto+https://cdn/clip.ts", "crypto+https"),       # FFmpeg opens it with crypto
+    ("subfile,,start,0,end,100,,:/etc/passwd", "subfile"),
+    ("subfile,name.mp4", "file"),                         # no colon behind: FFmpeg reads a path
+    (":x", ""),
+])
+def test_url_protocol_is_the_one_ffmpeg_opens_the_url_with(url, protocol):
+    assert url_protocol(url) == protocol
+
+
+def test_source_urls_allow_protocols_and_the_files_below_directories(tmp_path):
+    media, other = tmp_path / "media", tmp_path / "other"
+    media.mkdir(), other.mkdir()
+    (media / "out").symlink_to(other)
+    urls = SourceUrls(("srt", "https", str(media)))
+    for allowed in ("srt://ingest:9000", "https://cdn/clip.mp4", f"{media}/clip.mp4", f"file:{media}/sub/clip.mp4",
+                    f"{media}/sub/../clip.mp4"):
+        assert urls.refusal(allowed) is None, allowed
+    for refused, why in (("udp://239.0.0.1:5000", "protocol 'udp'"),
+                         (f"concat:{media}/a.ts|/etc/passwd", "protocol 'concat'"),
+                         ("crypto+https://cdn/clip.ts", "protocol 'crypto+https'"),
+                         ("/etc/passwd", "outside"), (f"{media}/../other/clip.mp4", "outside"),
+                         (f"{media}/out/clip.mp4", "outside"),          # a link that leads out of the directory
+                         (f"{media}-2/clip.mp4", "outside"), (str(media), "outside"),
+                         ("clip.mp4", "outside")):                      # relative: resolved in the engine's directory
+        assert why in urls.refusal(refused), refused
+    assert SourceUrls(("file",)).refusal("/etc/passwd") is None       # "file" is every file
+    assert SourceUrls(()).refusal("srt://ingest") == "protocol 'srt'"   # an empty list allows nothing
+    assert SourceUrls().refusal("concat:a|b") is None                 # no list: every URL
+
+
+@pytest.mark.parametrize("allowed", ["srt", ("srt://",), ("media/clips",), ("",), (7,)])
+def test_a_malformed_list_of_source_urls_is_refused_when_the_mixer_is_built(allowed):
+    with pytest.raises(ValueError, match="source_urls"):
+        SourceController(_Avp([]), {}, allowed_urls=allowed)
+
+
+@pytest.mark.parametrize("command, extra", [("set", {}), ("prepare", {"cue_in_ms": 0})])
+def test_a_url_that_is_not_allowed_is_refused_before_anything_is_stopped_or_probed(command, extra):
+    probed, avp = [], _Avp([_Node("input_0", dst="out")])
+    controller = SourceController(avp, {"cam1": _pad()}, run_command=lambda _text: None, probe=probed.append,
+                                  allowed_urls=("srt",))
+    with pytest.raises(ConfigError, match=f"source.{command}: url is not allowed here: a file outside"):
+        getattr(controller, command)({"id": "cam1", "url": "/etc/passwd", "loop": False, **extra})
+    assert avp.commands == [] and not avp._group.stop_asked and probed == []
+    assert getattr(controller, command)({"id": "cam1", "url": "srt://ingest:9000", "loop": False, **extra})["url"] \
+        == "srt://ingest:9000"
 
 
 def test_a_parameter_the_engine_did_not_take_is_an_error_and_the_source_plays_again():

@@ -289,7 +289,10 @@ class AuxCompositionResult(Reply):
 
 class SourceSet(Request):
     """Repoint a wired file / live video (or NDI) source: stop its group safely, set URL and loop,
-    restart. Browser, raw, MXL and VMM pads refuse the command."""
+    restart. Browser, raw, MXL and VMM pads refuse the command.
+
+    The engine opens the URL on its host. A mixer built with `MixerOptions.source_urls` refuses
+    one outside the protocols and directories listed there (409 `engine_rejected`)."""
     url: Annotated[str, Field(min_length=1)]
     loop: bool
 

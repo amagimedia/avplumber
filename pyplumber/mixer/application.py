@@ -27,7 +27,7 @@ from .dmabuf_inputs import (BrowserStartupUnsettled, dmabuf_cuda_input_nodes, op
                             refresh_windows, rest_request, wait_for_sockets)
 from .dsk import DownstreamKeyer, register_dsk_commands
 from .inputs import build_input, build_v210_input, build_raw420_input
-from .source_control import SourceController, chain_teams, register_source_commands, source_pads
+from .source_control import SourceController, SourceUrls, chain_teams, register_source_commands, source_pads
 from .janus import (DEFAULT_KEYFRAME_MIN_INTERVAL_MS, JANUS_KEYFRAME_NODE, JanusVideoConfig,
                     RtcpFeedbackGroup, add_nodes, build_janus_output, dpb_options, release_commands)
 from ..transform import transform_output, transform_params
@@ -145,6 +145,11 @@ class MixerOptions:
     # (and resume … at) work without an application monkeypatching build_input. Not on an NDI
     # source's: its plain input node has nothing to pause or seek. Off for demos.
     playback_control: bool = False
+    # What mixer.source.set / prepare may give an input: FFmpeg protocol names ("srt", "https";
+    # "file" is every file) and absolute directories (the files below them). None: any URL, as
+    # the control port's node.param.set takes. Set it when the commands are reachable by others
+    # than the operator of the host, e.g. through the REST API (source_control.SourceUrls).
+    source_urls: tuple[str, ...] | None = None
     cuda_ipc_inputs: tuple[tuple[str, str], ...] = ()
     cuda_ipc_output: str = ""
     cuda_ipc_slots: int = 12
@@ -163,6 +168,7 @@ class MixerOptions:
         object.__setattr__(self, "fps", mixer_config.parse_rate(self.fps, "--fps"))
         if not 0 <= self.remote_control_port <= 65535:
             raise ValueError("remote_control_port must be between 0 and 65535")
+        SourceUrls(self.source_urls)
         if not 0 <= self.janus_rtcp_port <= 65535:
             raise ValueError("janus_rtcp_port must be between 0 and 65535")
         if self.preheat_timeout_sec <= 0:
@@ -1329,7 +1335,7 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
     register_source_commands(avp, SourceController(
         avp, source_pads(cfg.sources, external=set(external),
                          playback_control=options.playback_control), mixer=MIXER_NAME,
-        control_port=options.remote_control_port))
+        control_port=options.remote_control_port, allowed_urls=options.source_urls))
     held = []
     # Purge idle imports left by the capture pool's start-up churn.
     importers = tuple(f"input_{index}_to_cuda" for index in browsers)

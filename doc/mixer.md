@@ -445,6 +445,27 @@ built by `build_input`). Browser, raw (`v210` / `nv12` / `p010`), MXL and VMM
 pads answer with a clear error. REST: `PUT /mixer/sources/{id}` with
 `{"url","loop"}`.
 
+The URL is opened by the engine, on its host: a file there, or an address that
+host reaches. By default any URL is taken, as `node.param.set` on the control
+port takes one. `MixerOptions.source_urls` limits what `mixer.source.set` and
+`mixer.source.prepare` accept; set it when others than the host's operator can
+send these commands, e.g. through the REST API. It is a list of:
+
+* FFmpeg protocol names: `"srt"`, `"https"`, `"udp"`. `"file"` allows every
+  file. The name is the URL's whole scheme, so `"https"` does not allow
+  `crypto+https://…`, and `concat:` or `subfile,…:` need their own entry.
+* absolute directories: `"/media/clips"` allows the files below it, given as a
+  path or as `file:<path>`. `..` and symbolic links are resolved first.
+
+```python
+MixerOptions(source_urls=("srt", "/media/clips"))
+```
+
+An empty list allows nothing. A URL outside the list is refused before the
+source is stopped. The rule is about the URL the request names: a playlist in
+an allowed directory may still refer to files elsewhere. The control port
+itself is not limited by it.
+
 ### Playback control (`MixerOptions.playback_control`)
 
 Opt in so the chain of each `video` source gets a `pause` node

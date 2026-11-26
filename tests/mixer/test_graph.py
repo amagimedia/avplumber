@@ -1049,6 +1049,20 @@ def test_playback_control_wires_pause_seek_and_frame_metadata_teams():
     assert "pause_0" not in plain and "realtime_0" in chain
 
 
+def test_source_urls_limit_what_the_mixers_source_commands_take():
+    doc = {"canvas": CONFIG["canvas"], "sources": [CONFIG["sources"][0]],
+           "scenes": [{"id": "full", "items": [{"source": "cam", "dst": {"x": 0, "y": 0, "w": 1920, "h": 1080}}]}]}
+    from pyplumber.mixer.application import build_application as build_mixer, MixerOptions
+    app = build_mixer(mc.parse(doc), MixerOptions(output="p.mp4", source_urls=("srt",)), api=fake_api())
+    before = list(app.avp.commands)
+    with pytest.raises(mc.ConfigError, match="source.set: url is not allowed here: a file outside"):
+        app.avp.commands_registered["mixer.source.set"](json.dumps({"id": "cam", "url": "/etc/passwd", "loop": True}))
+    assert app.avp.commands == before
+    for build in (lambda options: options.validate(), lambda options: build_mixer(mc.parse(doc), options, api=fake_api())):
+        with pytest.raises(ValueError, match="source_urls"):
+            build(MixerOptions(output="p.mp4", source_urls=("srt://ingest",)))
+
+
 def test_playback_control_leaves_an_ndi_source_as_it_is_without_it():
     """An NDI feed is read by the plain input node: nothing there waits on a pause team or seeks."""
     doc = {"canvas": CONFIG["canvas"],

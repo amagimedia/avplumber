@@ -131,7 +131,8 @@ engine reports (the schema marks those objects `additionalProperties: true`).
 
 Read-only in this version. Commands that change the graph (`node.add`,
 `node.object.set`, `group.*`, …) open files and URLs on the engine's host; they
-stay on the control port.
+stay on the control port. The one exception is under `/mixer`: a source's URL
+(see [Mixer](#mixer)).
 
 | Operation | Control command |
 | --- | --- |
@@ -204,6 +205,12 @@ takes to open, up to about 20 s, and is a 504 `engine_timeout` after 30 s (it
 may still complete). Each source request has a control connection of its own
 while it runs, so takes, state reads and requests for other sources do not wait
 for it; requests for one source run one at a time.
+
+`PUT /mixer/sources/{id}` and `POST …/prepare` make the engine open the URL they
+name: a file on its host, or an address that host reaches. Whoever may call the
+gateway chooses it. `MixerOptions.source_urls` limits it to protocols and
+directories ([mixer.md](mixer.md#source-repoint-mixersourceset)); a URL outside
+them is a 409 `engine_rejected`. Without that option any URL is taken.
 
 ```
 curl -s http://127.0.0.1:7682/api/v1/mixer/status

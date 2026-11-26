@@ -16,12 +16,14 @@ from __future__ import annotations
 import asyncio
 import functools
 import json
+import os
+import re
 import shutil
 import subprocess
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from .config import ConfigError
 from .control import AvpConnection, AvpProtocolError
@@ -157,21 +159,62 @@ def control_command(port: int, text: str, *, timeout: float = 10.0) -> Optional[
         raise RuntimeError(f"{text.split(' ', 1)[0]}: {exc}") from None
 
 
+_SCHEME_CHARS = re.compile(r"[A-Za-z0-9+.-]*")   # libavformat's URL_SCHEME_CHARS
+
+
+def url_protocol(url: str) -> str:
+    """The name of the protocol FFmpeg opens *url* with: "file" for a path. libavformat answers
+    this with avio_find_protocol_name, which has no Python binding here; this is its rule
+    (url_find_protocol in libavformat/avio.c) for a host without DOS paths. The name is the whole
+    scheme: "crypto+https" is not "https"."""
+    end = _SCHEME_CHARS.match(url).end()
+    if url[end:end + 1] == ":" or (url.startswith("subfile,") and ":" in url[end + 1:]):
+        return url[:end]
+    return "file"
+
+
+class SourceUrls:
+    """Which URLs ``mixer.source.set`` and ``prepare`` may give an input
+    (``MixerOptions.source_urls``).
+
+    *allowed* holds protocol names as FFmpeg has them ("srt", "https"; "file" is every file) and
+    absolute directories, which allow the files below them. None allows every URL. The rule is
+    about the URL a request names, not about what an allowed file refers to (a playlist)."""
+
+    def __init__(self, allowed: Optional[Iterable[str]] = None):
+        self.protocols: Optional[frozenset[str]] = None
+        self.directories: tuple[str, ...] = ()
+        if allowed is None:
+            return
+        wrong = "source_urls is a list of protocol names (srt, https, file) and absolute directories, not {!r}"
+        if isinstance(allowed, str):   # would be read as a list of its letters
+            raise ValueError(wrong.format(allowed))
+        entries = list(allowed)
+        for entry in entries:
+            if not isinstance(entry, str) or not (entry.startswith("/") or entry and _SCHEME_CHARS.fullmatch(entry)):
+                raise ValueError(wrong.format(entry))
+        self.protocols = frozenset(entry for entry in entries if not entry.startswith("/"))
+        self.directories = tuple(entry for entry in entries if entry.startswith("/"))
+
+    def refusal(self, url: str) -> Optional[str]:
+        """Why *url* is not allowed, or None when it is."""
+        if self.protocols is None:
+            return None
+        protocol = url_protocol(url)
+        if protocol in self.protocols:
+            return None
+        if protocol != "file":
+            return f"protocol {protocol!r}"
+        # As the file protocol reads it; resolved, so that neither ".." nor a link leads outside.
+        path = os.path.realpath(url.removeprefix("file:"))
+        if any(path.startswith(os.path.realpath(directory).rstrip("/") + "/") for directory in self.directories):
+            return None
+        return "a file outside the allowed directories"
+
+
 def _is_position(value) -> bool:
     """A count of milliseconds: an int, and not a bool (which Python counts among them)."""
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
-
-
-def _url_and_loop(request: dict, who: str) -> tuple[str, bool]:
-    url = request.get("url")
-    if not isinstance(url, str) or not url:
-        raise ConfigError(f"{who} needs a non-empty url")
-    if "loop" not in request:
-        raise ConfigError(f"{who} needs a boolean loop")
-    loop = request["loop"]
-    if not isinstance(loop, bool):
-        raise ConfigError(f"{who}: loop must be a boolean")
-    return url, loop
 
 
 def _no_other_fields(request: dict, who: str, *fields: str) -> None:
@@ -186,11 +229,14 @@ class SourceController:
     def __init__(self, avp, pads: dict[str, SourcePad], *, mixer: str = "mixer",
                  control_port: int = 0,
                  run_command: Optional[Callable[[str], Optional[str]]] = None,
-                 probe: Callable[[str], Optional[int]] = probe_duration_ms):
+                 probe: Callable[[str], Optional[int]] = probe_duration_ms,
+                 allowed_urls: Optional[Iterable[str]] = None):
         """*run_command* sends one control line and raises RuntimeError with the engine's reason
         when it is refused: ``control_command`` on *control_port* unless given. With neither, the
-        playback commands are refused (``mixer.source.set`` needs no refusal and works)."""
+        playback commands are refused (``mixer.source.set`` needs no refusal and works).
+        *allowed_urls* is ``SourceUrls``' list; a ValueError when it is malformed."""
         self.avp, self.pads, self.mixer = avp, pads, mixer
+        self._urls = SourceUrls(allowed_urls)
         if run_command is None and control_port:
             run_command = functools.partial(control_command, control_port)
         self._run_command = run_command
@@ -200,7 +246,7 @@ class SourceController:
 
     def set(self, request: dict) -> dict:
         pad = self._pad(request, "source.set")
-        url, loop = _url_and_loop(request, "source.set")
+        url, loop = self._url_and_loop(request, "source.set")
         # Optional fields the chain does not yet retarget (audio track, deinterlace) stay for a
         # follow-up; refuse them so a client does not think they took effect.
         _no_other_fields(request, "source.set", "url", "loop")
@@ -212,7 +258,7 @@ class SourceController:
     def prepare(self, request: dict) -> dict:
         """Load a URL, pause on the cue-in frame, report duration when ffprobe knows it."""
         pad = self._pad(request, "source.prepare", playback=True)
-        url, loop = _url_and_loop(request, "source.prepare")
+        url, loop = self._url_and_loop(request, "source.prepare")
         cue = request.get("cue_in_ms", 0)
         if not _is_position(cue):
             raise ConfigError("source.prepare: cue_in_ms must be a non-negative int")
@@ -301,6 +347,20 @@ class SourceController:
             # Pause and seek are tried again on the engine's refusal, which the binding only logs.
             raise ConfigError(f"{who} needs the engine's control port (MixerOptions.remote_control_port)")
         return pad
+
+    def _url_and_loop(self, request: dict, who: str) -> tuple[str, bool]:
+        url = request.get("url")
+        if not isinstance(url, str) or not url:
+            raise ConfigError(f"{who} needs a non-empty url")
+        refusal = self._urls.refusal(url)
+        if refusal:
+            raise ConfigError(f"{who}: url is not allowed here: {refusal}")
+        if "loop" not in request:
+            raise ConfigError(f"{who} needs a boolean loop")
+        loop = request["loop"]
+        if not isinstance(loop, bool):
+            raise ConfigError(f"{who}: loop must be a boolean")
+        return url, loop
 
     def _set_unlocked(self, pad: SourcePad, url: str, loop: bool) -> None:
         continuous = bool(loop and pad.continuous_loop)
