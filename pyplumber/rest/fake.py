@@ -2,8 +2,8 @@
 
 `python -m pyplumber.rest --fake` serves the REST API over it, for writing a client away from
 a mixer host, and the gateway's tests run on it. It keeps what a client can observe through the
-API (Program and Preview, keys, one AUX bus, gains) and records every line it was sent. It does
-not model time: a take is on Program at once, and a key is on or off without a fade.
+API (Program and Preview, keys, an AUX bus of each mode, gains) and records every line it was sent.
+It does not model time: a take is on Program at once, and a key is on or off without a fade.
 """
 
 from __future__ import annotations
@@ -31,7 +31,10 @@ class FakeEngine:
         self.all_rate, self.prepared, self.ftb_on = 0.4, [], False
         layouts = [{"preset": "pgm_pvw_grid"}, {"preset": "source_pages", "page": 0}]
         self.aux = {"id": "mv", "revision": uuid.uuid4().hex, "layout": layouts[0], "scenes": self.scenes[:2],
-                    "layouts": layouts, "mode": "follow", "composition": None}
+                    "layouts": layouts, "mode": "follow"}
+        # An external bus: its picture is the composition a client sets, not the layout it was built with.
+        self.external = {"id": "monitor", "revision": uuid.uuid4().hex, "layout": layouts[0], "scenes": self.scenes[:2],
+                         "layouts": layouts[:1], "mode": "external", "composition": None}
         self.gains = {source: 0.0 for source in audio_sources}
         # Show source pads a client may repoint: scenes double as source ids in this fake.
         self.sources = {scene: {"id": scene, "url": f"fake://{scene}", "loop": False, "kind": "video"}
@@ -59,9 +62,10 @@ class FakeEngine:
             "mixer.aux": lambda arg: self._aux_scenes(self._bus(json.loads(arg))),
             "mixer.aux_layout": lambda arg: self._aux_layout(self._bus(json.loads(arg))),
             "mixer.aux_page": lambda arg: self._aux_page(self._bus(json.loads(arg))),
-            "mixer.aux_composition": lambda arg: self._aux_composition(self._bus(json.loads(arg))),
-            "mixer.aux_status": lambda _arg: [{key: value for key, value in self.aux.items() if key != "layouts"}],
-            "mixer.aux_layouts": lambda _arg: {self.aux["id"]: self.aux["layouts"]},
+            "mixer.aux_composition": lambda arg: self._aux_composition(self._bus(json.loads(arg), "external")),
+            "mixer.aux_status": lambda _arg: [{key: value for key, value in bus.items() if key != "layouts"}
+                                              for bus in (self.aux, self.external)],
+            "mixer.aux_layouts": lambda _arg: {bus["id"]: bus["layouts"] for bus in (self.aux, self.external)},
             "mixer.audio_gain": lambda arg: self._audio_gain(json.loads(arg)),
             "mixer.audio_gain_status": lambda _arg: self._gains(),
             "mixer.audio_processor": lambda arg: self._audio_processor(json.loads(arg)),
@@ -116,7 +120,7 @@ class FakeEngine:
     def _settings(self):
         return {"source_count": len(self.scenes), "canvas": {"width": 1920, "height": 1080, "fps": 30, "working_format": "nv12"},
                 "dsk_keys": [{"id": key["id"], "source": key["source"]} for key in self.keys.values()],
-                "aux_buses": [{"id": self.aux["id"]}], "audio_sources": list(self.gains),
+                "aux_buses": [{"id": self.aux["id"]}, {"id": self.external["id"]}], "audio_sources": list(self.gains),
                 "audio_processors": [{key: value for key, value in self.processor.items() if key != "gain_db"}], "wipes": []}
 
     def _scene(self, request):
@@ -159,9 +163,13 @@ class FakeEngine:
 
     # --- the AUX bus ---
 
-    def _bus(self, request):
-        if request.get("bus") != self.aux["id"]:
+    def _bus(self, request, mode="follow"):
+        """*request*, for a bus of *mode*: each mode refuses the other's commands, as the mixer does."""
+        bus = next((bus for bus in (self.aux, self.external) if bus["id"] == request.get("bus")), None)
+        if bus is None:
             raise _Refused(f"Unknown aux bus {request.get('bus')!r}")
+        if bus["mode"] != mode:
+            raise _Refused(f"aux {bus['id']}: this command needs mode {mode} (the bus is {bus['mode']})")
         return request
 
     def _aux_changed(self, **changes):
@@ -191,11 +199,12 @@ class FakeEngine:
 
     def _aux_composition(self, request):
         composition = request.get("composition")
-        if not isinstance(composition, dict) or "layers" not in composition:
+        if not isinstance(composition, dict) or not isinstance(composition.get("layers"), list):
             raise _Refused("aux composition needs a layers list")
-        # The fake treats every bus as writable so REST clients can exercise the route.
-        self.aux["composition"] = composition
-        return {"bus": self.aux["id"], "node": f"aux_{self.aux['id']}_comp"}
+        if "active_inputs" not in composition:
+            raise _Refused("aux composition needs active_inputs")
+        self.external["composition"] = composition
+        return {"bus": self.external["id"], "node": f"aux_{self.external['id']}_comp"}
 
     # --- audio ---
 

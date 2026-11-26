@@ -554,10 +554,13 @@ def test_external_bus_builds_without_mixer_registration_or_follower(cfg, monkeyp
     with pytest.raises(ConfigError, match="needs active_inputs"):   # the compositor's setter would throw
         bus.set_composition({"composition": {"layers": composition["layers"]}})
     assert avp.commands == []
+    assert bus.state()["composition"] is None   # still the layout it was built with
     assert bus.set_composition({"composition": composition}) == {
         "bus": "multiview", "node": "aux_multiview_comp"}
     assert avp.commands == [
         f"node.object.set aux_multiview_comp composition {json.dumps(composition)}"]
+    state = bus.state()
+    assert state["mode"] == "external" and state["composition"] == composition
     with pytest.raises(ConfigError, match="mode follow"):
         bus.set_layout({"layout": {"preset": "pgm_pvw_grid"}})
     assert bus.tick(time.monotonic()) == 1.0

@@ -4,14 +4,38 @@
       "AuxBus": {
         "additionalProperties": true,
         "properties": {
+          "composition": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "External buses: the composition last set; null while the bus still draws `layout`",
+            "title": "Composition"
+          },
           "id": {
             "title": "Id",
             "type": "string"
           },
           "layout": {
             "additionalProperties": true,
+            "description": "Of an external bus: what it was built with and draws until its first composition",
             "title": "Layout",
             "type": "object"
+          },
+          "mode": {
+            "default": "follow",
+            "description": "`follow`: the bus draws `layout` with `scenes`, changed by `PUT \u2026/scenes`, `\u2026/layout` and `\u2026/page`. `external`: the client sets the picture with `PUT \u2026/composition`, and those refuse",
+            "enum": [
+              "follow",
+              "external"
+            ],
+            "title": "Mode",
+            "type": "string"
           },
           "revision": {
             "description": "Changes with every assignment or layout change; `PUT \u2026/scenes` names the one it edits",
@@ -118,6 +142,26 @@
           "composition"
         ],
         "title": "AuxComposition",
+        "type": "object"
+      },
+      "AuxCompositionResult": {
+        "additionalProperties": true,
+        "properties": {
+          "bus": {
+            "title": "Bus",
+            "type": "string"
+          },
+          "node": {
+            "description": "The bus's compositor node, as `GET /engine/nodes` names it",
+            "title": "Node",
+            "type": "string"
+          }
+        },
+        "required": [
+          "bus",
+          "node"
+        ],
+        "title": "AuxCompositionResult",
         "type": "object"
       },
       "AuxLayout": {
@@ -2999,9 +3043,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Mixer Set Aux Composition",
-                  "type": "object"
+                  "$ref": "#/components/schemas/AuxCompositionResult"
                 }
               }
             },

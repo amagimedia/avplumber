@@ -38,8 +38,9 @@ python -m pyplumber.rest --fake                        # no engine: an in-memory
 (`mixer.status NAME`); `pyplumber.mixer` applications use `mixer`.
 
 `--fake` answers from memory (`pyplumber/rest/fake.py`): four scenes, two keys,
-one AUX bus, two audio sources, a ducker. A take is on Program at once, and a key
-is on or off without a fade. Use it to write a client away from a mixer host.
+two AUX buses (`mv` follows the layout, `monitor` is external), two audio
+sources, a ducker. A take is on Program at once, and a key is on or off without
+a fade. Use it to write a client away from a mixer host.
 
 ### Who may call
 

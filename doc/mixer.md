@@ -869,6 +869,11 @@ REST: `PUT /mixer/aux/{bus}/composition` with `{"composition":…}`. Slot / layo
 / page commands refuse on an external bus. Studio monitor buses use this mode
 instead of monkeypatching `AuxBus`.
 
+Until the first composition the bus draws the layout and scenes it was built
+with. `mixer.aux_status` reports them for an external bus too, and beside them
+`composition`: null until one is set, then the one last handed to the
+compositor.
+
 The answer means the composition was handed to the compositor, not that it is
 drawn. The command refuses a composition without `layers` or `active_inputs`
 and a bus whose compositor is not running. The compositor then stages the

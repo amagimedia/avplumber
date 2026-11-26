@@ -65,6 +65,9 @@ class AuxBus:
         self.lock = threading.Lock()
         self.listener, self.error, self.follower_status = None, "", {}
         self.layout, self.scenes = bus.layout, list(bus.scenes)
+        # External mode: the composition last handed to the compositor. None while the bus still
+        # draws what it was built with, its configured layout and scenes.
+        self.composition = None
         self.checked_at = time.monotonic()
         self.revision = uuid.uuid4().hex
         for source, edge in zip(cfg.sources, self.edges):
@@ -262,6 +265,9 @@ class AuxBus:
                     "fps": rate_number(self.fps), "latency_ms": self.latency_ms(), "pvw_align": self.bus.pvw_align,
                     "pgm_delay_frames": self.pgm_delay_frames, "follower": self.follower_status,
                     "pvw_scene": self.follower_status.get("pvw_scene", ""), **self._live(), **status,
+                    # layout, scenes and cells are what an external bus was built with: its picture
+                    # until the first composition, and no longer once this is set.
+                    **({"composition": self.composition} if self.external else {}),
                     "running": running, "composition_pending": pending}
 
     def assign(self, request):
@@ -337,7 +343,7 @@ class AuxBus:
                 raise ConfigError(f"aux {self.bus.id}: its compositor is not running")
             self.avp.executeCommandsFromString(
                 f"node.object.set {self.node_name} composition {json.dumps(composition)}")
-            self.error = ""
+            self.composition, self.error = composition, ""
             return {"bus": self.bus.id, "node": self.node_name}
 
     def tick(self, now):

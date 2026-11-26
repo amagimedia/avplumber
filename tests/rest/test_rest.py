@@ -73,8 +73,8 @@ def spaced(command, **payload):
     ("PUT", "/mixer/ftb", {"toggle": True}, 200, spaced("ftb", toggle=True)),
     ("GET", "/mixer/aux", None, 200, "mixer.aux_status"),
     ("PUT", "/mixer/aux/mv/layout", {"layout": {"preset": "source_pages"}}, 200, spaced("aux_layout", layout={"preset": "source_pages"}, bus="mv")),
-    ("PUT", "/mixer/aux/mv/composition", {"composition": {"layers": [], "active_inputs": 0}},
-     200, spaced("aux_composition", composition={"layers": [], "active_inputs": 0}, bus="mv")),
+    ("PUT", "/mixer/aux/monitor/composition", {"composition": {"layers": [], "active_inputs": 0}},
+     200, spaced("aux_composition", composition={"layers": [], "active_inputs": 0}, bus="monitor")),
     ("PUT", "/mixer/sources/cam1", {"url": "file:///clip.mp4", "loop": True},
      200, spaced("source.set", url="file:///clip.mp4", loop=True, id="cam1", mixer="mixer")),
     ("POST", "/mixer/sources/cam1/prepare", {"url": "file:///clip.mp4", "loop": False, "cue_in_ms": 500},
@@ -131,6 +131,23 @@ def test_key_and_aux_replies_are_the_mixers(api):
     bus = api.get("/mixer/aux").json()["buses"][0]
     changed = api.put("/mixer/aux/mv/scenes", json={"scenes": ["cam3", None], "expected_revision": bus["revision"]}).json()
     assert changed["scenes"] == ["cam3", None] and changed["revision"] != bus["revision"]
+
+
+def test_each_aux_mode_refuses_the_other_modes_commands_and_an_external_bus_reports_its_composition(api):
+    follow, external = api.get("/mixer/aux").json()["buses"]
+    assert (follow["id"], follow["mode"], follow["composition"]) == ("mv", "follow", None)
+    assert (external["id"], external["mode"], external["composition"]) == ("monitor", "external", None)
+    composition = {"layers": [{"input": 0, "dst_x": 0, "dst_y": 0, "dst_w": 960, "dst_h": 540}], "active_inputs": 1}
+    assert api.put("/mixer/aux/monitor/composition", json={"composition": composition}).json() == {
+        "bus": "monitor", "node": "aux_monitor_comp"}
+    assert api.get("/mixer/aux").json()["buses"][1]["composition"] == composition
+    for refused in (api.put("/mixer/aux/mv/composition", json={"composition": composition}),
+                    api.put("/mixer/aux/monitor/layout", json={"layout": {"preset": "pgm_pvw_grid"}}),
+                    api.put("/mixer/aux/monitor/page", json={"step": 1}),
+                    api.put("/mixer/aux/monitor/scenes", json={"scenes": ["cam1", None], "expected_revision": external["revision"]}),
+                    api.put("/mixer/aux/monitor/composition", json={"composition": {"layers": []}})):
+        assert refused.status_code == 409 and refused.json()["error"]["code"] == "engine_rejected", refused.text
+    assert api.get("/mixer/aux").json()["buses"][1]["composition"] == composition
 
 
 # --- refused before the engine sees it ---

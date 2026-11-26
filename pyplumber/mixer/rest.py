@@ -228,9 +228,14 @@ class FtbChange(Request):
 
 class AuxBus(Reply):
     id: str
+    mode: Literal["follow", "external"] = Field(
+        "follow", description="`follow`: the bus draws `layout` with `scenes`, changed by `PUT …/scenes`, `…/layout` and "
+                              "`…/page`. `external`: the client sets the picture with `PUT …/composition`, and those refuse")
     revision: str = Field(description="Changes with every assignment or layout change; `PUT …/scenes` names the one it edits")
     scenes: list[str | None]
-    layout: dict[str, Any]
+    layout: dict[str, Any] = Field(description="Of an external bus: what it was built with and draws until its first composition")
+    composition: dict[str, Any] | None = Field(
+        None, description="External buses: the composition last set; null while the bus still draws `layout`")
 
 
 class AuxBuses(BaseModel):
@@ -268,6 +273,11 @@ class AuxComposition(Request):
     """Direct compositor composition for an AUX bus with `mode: external`."""
     composition: dict[str, Any] = Field(
         description='`{"layers":[…],"active_inputs":…}` as `node.object.set … composition` expects; both keys are required')
+
+
+class AuxCompositionResult(Reply):
+    bus: str
+    node: str = Field(description="The bus's compositor node, as `GET /engine/nodes` names it")
 
 
 # --- Sources ---
@@ -506,7 +516,7 @@ def mixer_router(bridge: MixerBridge, *, on_aux_change: Callable[[str, dict], No
         """Show a page of a bus whose layout pages through the sources."""
         return aux("aux_page", bus, request)
 
-    @router.put("/aux/{bus}/composition", response_model=dict[str, Any])
+    @router.put("/aux/{bus}/composition", response_model=AuxCompositionResult)
     def set_aux_composition(bus: str, request: AuxComposition):
         """Set the picture of an external-mode AUX bus (no follower; does not freeze mixer.scene).
 
