@@ -189,6 +189,15 @@ waiting when a newer one arrives is not sent; its answer is
 `{"superseded": true}`. The answer to a take says the mixer accepted it, not
 that it is on Program: poll `GET /mixer/status` for `pgm_scene`.
 
+The source routes answer when the mixer has done the work, not when it has
+accepted it: `PUT /mixer/sources/{id}` after the source's group stopped and was
+asked to start again, `POST …/prepare` after the URL opened, a frame was shown
+and the seek to the cue-in ran. A prepare therefore takes as long as the URL
+takes to open, up to about 20 s, and is a 504 `engine_timeout` after 30 s (it
+may still complete). Each source request has a control connection of its own
+while it runs, so takes, state reads and requests for other sources do not wait
+for it; requests for one source run one at a time.
+
 ```
 curl -s http://127.0.0.1:7682/api/v1/mixer/status
 curl -s -X PUT  http://127.0.0.1:7682/api/v1/mixer/preview -H 'Content-Type: application/json' -d '{"scene": "cam2"}'

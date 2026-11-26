@@ -1382,7 +1382,7 @@
       },
       "SourcePrepare": {
         "additionalProperties": false,
-        "description": "Load a URL on a video source, pause on the cue-in frame. Needs\n`MixerOptions.playback_control`; an NDI source has no pause or seek.",
+        "description": "Load a URL on a video source, pause on the cue-in frame. Needs\n`MixerOptions.playback_control`; an NDI source has no pause or seek.\n\nAnswers when the source is paused on that frame: as long as the URL takes to open, up to\nabout 20 s. Other requests do not wait for it.",
         "properties": {
           "cue_in_ms": {
             "default": 0,

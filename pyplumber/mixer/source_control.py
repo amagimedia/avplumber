@@ -37,6 +37,13 @@ MEDIA_ACTIONS = frozenset({"play", "pause", "seek", "stop", "restart"})
 # protocol has no error codes: this text, from RealTimeTeam (src/RealTimeTeam.hpp), is the only
 # sign of that refusal, so a change of its wording there must be made here too.
 _CURRENT_TIME_ERR = "Can not determine current time"
+# How long each step of a source command may take. A command answers when its work is done, so
+# these bound the answer: COMMAND_BUDGET_S is the longest, prepare's, whose probe runs beside the rest.
+STOP_TIMEOUT_S = 5.0          # the source's group to stop
+FIRST_FRAME_WAIT_S = 10.0     # the pause after a start: the input opens the URL and shows a frame
+SEEK_WAIT_S = 5.0
+PROBE_TIMEOUT_S = 20.0        # ffprobe opens the URL itself
+COMMAND_BUDGET_S = max(PROBE_TIMEOUT_S, STOP_TIMEOUT_S + FIRST_FRAME_WAIT_S + SEEK_WAIT_S)
 
 
 @dataclass(frozen=True)
@@ -65,7 +72,7 @@ def group_shape(nodes: list[dict]) -> tuple[list[str], list[str]]:
     return last, sorted(produced & consumed)
 
 
-def stop_group(avp, group: str, timeout: float = 5.0) -> None:
+def stop_group(avp, group: str, timeout: float = STOP_TIMEOUT_S) -> None:
     """Stop a group's nodes so that it can start again: nothing of the old stream stays in it or
     leaves it."""
     handle = avp.group(group)
@@ -110,7 +117,7 @@ def source_pads(sources, *, external: Optional[set[str]] = None,
     return pads
 
 
-def probe_duration_ms(url: str, *, timeout: float = 20.0) -> Optional[int]:
+def probe_duration_ms(url: str, *, timeout: float = PROBE_TIMEOUT_S) -> Optional[int]:
     """Clip length in ms via ffprobe, or None when the URL has no duration (live) or probe fails."""
     ffprobe = shutil.which("ffprobe")
     if not ffprobe:
@@ -174,7 +181,7 @@ def _no_other_fields(request: dict, who: str, *fields: str) -> None:
 
 
 class SourceController:
-    STOP_TIMEOUT_S = 5.0
+    STOP_TIMEOUT_S = STOP_TIMEOUT_S
 
     def __init__(self, avp, pads: dict[str, SourcePad], *, mixer: str = "mixer",
                  control_port: int = 0,
@@ -188,7 +195,8 @@ class SourceController:
             run_command = functools.partial(control_command, control_port)
         self._run_command = run_command
         self._probe = probe
-        self.lock = threading.Lock()
+        # One command at a time on a pad; pads do not wait for each other (a prepare takes seconds).
+        self._locks = {source_id: threading.Lock() for source_id in pads}
 
     def set(self, request: dict) -> dict:
         pad = self._pad(request, "source.set")
@@ -197,7 +205,7 @@ class SourceController:
         # follow-up; refuse them so a client does not think they took effect.
         _no_other_fields(request, "source.set", "url", "loop")
 
-        with self.lock:
+        with self._locks[pad.id]:
             self._set_unlocked(pad, url, loop)
         return {"id": pad.id, "url": url, "loop": loop}
 
@@ -210,15 +218,20 @@ class SourceController:
             raise ConfigError("source.prepare: cue_in_ms must be a non-negative int")
         _no_other_fields(request, "source.prepare", "url", "loop", "cue_in_ms")
 
-        with self.lock:
+        # The probe opens the URL itself and may take as long as the load: it runs beside it,
+        # and not under the pad's lock.
+        probed: list[Optional[int]] = []
+        probe = threading.Thread(target=lambda: probed.append(self._probe(url)), name="source-probe", daemon=True)
+        probe.start()
+        with self._locks[pad.id]:
             self._set_unlocked(pad, url, loop)
-            duration_ms = self._probe(url)
             # Pause on the first frame, then seek to cue-in; the pause node holds that frame
             # (pass_on_seek off) until resume … at.
-            self._playback_command(f"pause {pad.pause_team} now", wait_s=10.0)
-            self._playback_command(f"seek {pad.sync_team} now {cue}", wait_s=5.0)
+            self._playback_command(f"pause {pad.pause_team} now", wait_s=FIRST_FRAME_WAIT_S)
+            self._playback_command(f"seek {pad.sync_team} now {cue}", wait_s=SEEK_WAIT_S)
+        probe.join()
         return {"id": pad.id, "url": url, "loop": loop, "cue_in_ms": cue,
-                "duration_ms": duration_ms}
+                "duration_ms": probed[0] if probed else None}
 
     def media(self, request: dict) -> dict:
         pad = self._pad(request, "source.media", playback=True)
@@ -234,7 +247,7 @@ class SourceController:
         _no_other_fields(request, "source.media", "action", "position_ms")
 
         pause, team = pad.pause_team, pad.sync_team
-        with self.lock:
+        with self._locks[pad.id]:
             if action == "play":
                 self._control(f"resume {pause}")
             elif action == "pause":
@@ -260,7 +273,7 @@ class SourceController:
             raise ConfigError("source.resume_at needs a non-negative int at_ms")
         _no_other_fields(request, "source.resume_at", "at_ms")
 
-        with self.lock:
+        with self._locks[pad.id]:
             self._control(f"resume {pad.pause_team} at {at_ms}")
         return {"id": pad.id, "at_ms": at_ms}
 

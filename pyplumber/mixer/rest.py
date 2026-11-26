@@ -22,7 +22,7 @@ from pyplumber.rest.errors import ApiError, Starting, refused_while
 from .audio_gain import DB_MAX, DB_MIN
 from .audio_processors import DUCKER_RANGES
 from .config import MAX_KEY_FADE_SECONDS
-from .gui.bridge import MixerBridge
+from .gui.bridge import SOURCE_COMMAND_TIMEOUT_S, MixerBridge
 
 log = logging.getLogger(__name__)
 
@@ -47,6 +47,9 @@ class ClientBridge(MixerBridge):
 
     def command(self, line: str, timeout: float | None = None) -> str | None:
         return self._client.command(line, timeout)
+
+    def source_command(self, line: str) -> str | None:
+        return self._client.command(line, SOURCE_COMMAND_TIMEOUT_S)
 
 
 class Request(BaseModel):
@@ -299,7 +302,10 @@ class SourceSetResult(Reply):
 
 class SourcePrepare(Request):
     """Load a URL on a video source, pause on the cue-in frame. Needs
-    `MixerOptions.playback_control`; an NDI source has no pause or seek."""
+    `MixerOptions.playback_control`; an NDI source has no pause or seek.
+
+    Answers when the source is paused on that frame: as long as the URL takes to open, up to
+    about 20 s. Other requests do not wait for it."""
     url: Annotated[str, Field(min_length=1)]
     loop: bool
     cue_in_ms: int = Field(0, ge=0, description="Seek to this offset after pause, in milliseconds")

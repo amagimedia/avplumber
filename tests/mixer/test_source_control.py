@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import socketserver
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -262,6 +263,42 @@ def test_playback_is_refused_on_a_live_ndi_pad_that_set_still_takes(command, req
         getattr(controller, command)({"id": "cam1", **request_})
     assert commands == [] and avp.commands == [] and not avp._group.stop_asked
     assert controller.set({"id": "cam1", "url": "ndi://feed", "loop": False})["url"] == "ndi://feed"
+
+
+def test_prepare_probes_beside_the_load_and_not_under_the_pads_lock():
+    """ffprobe opens the URL itself, for up to PROBE_TIMEOUT_S."""
+    commands, probing, probed = [], threading.Event(), threading.Event()
+
+    def probe(_url):
+        probing.set()
+        probed.wait(5)
+        return 9_000
+
+    controller, _ = _controller(run=commands.append, probe=probe)
+    replies = []
+    prepare = threading.Thread(daemon=True, target=lambda: replies.append(controller.prepare(
+        {"id": "cam1", "url": "file:///clip.mp4", "loop": False})))
+    prepare.start()
+    assert probing.wait(5)
+    deadline = time.monotonic() + 5
+    while len(commands) < 2 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    # Loaded, paused and cued while the probe still runs, and the pad takes its next command.
+    assert commands == ["pause input_0_pause now", "seek input_0_av_sync now 0"]
+    controller.media({"id": "cam1", "action": "play"})
+    assert prepare.is_alive() and replies == []
+    probed.set()
+    prepare.join(5)
+    assert replies[0]["duration_ms"] == 9_000
+
+
+def test_a_command_waits_for_its_own_pad_only():
+    commands = []
+    avp = _Avp([_Node("input_0", dst="out")])
+    controller = SourceController(avp, {"cam1": _pad(), "cam2": _pad(id="cam2", index=1)}, run_command=commands.append)
+    with controller._locks["cam2"]:   # a prepare at work on cam2
+        controller.media({"id": "cam1", "action": "play"})
+    assert commands == ["resume input_0_pause"]
 
 
 def test_prepare_refuses_without_playback_teams():

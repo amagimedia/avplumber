@@ -9,10 +9,15 @@ import threading
 import time
 
 from pyplumber.mixer.control import AvpConnection, AvpProtocolError, mixer_command
+from pyplumber.mixer.source_control import COMMAND_BUDGET_S
 
 TAKE_COMMANDS = ("cut", "fade", "wipe", "move", "preview", "interrupt")
 PROGRAM_TAKES = ("cut", "fade", "wipe", "move")
 AUX_COMMANDS = ("aux", "aux_layout", "aux_page", "aux_composition")
+SOURCE_COMMANDS = ("source.set", "source.prepare", "source.media", "source.resume_at")
+# A source command answers when the mixer has done the work (a prepare: the group stopped, the
+# URL opened, a frame shown, the seek), plus one exchange of the mixer's own with its engine.
+SOURCE_COMMAND_TIMEOUT_S = COMMAND_BUDGET_S + 10.0
 STATE_TTL_S = 0.2
 # What a show fixes when it is built (its settings, its scenes, the layouts its AUX buses offer) is
 # asked for this often, not on every poll: a new show is seen within that time of its start.
@@ -91,6 +96,7 @@ class MixerBridge:
         # so a state poll never holds a position back.
         self._lever_connection = AvpConnection(host, port)
         self._lever_connection_lock = threading.Lock()
+        self._host = host
         self._loop = asyncio.new_event_loop()
         threading.Thread(target=self._loop.run_forever, daemon=True, name="mixer-bridge").start()
         self._init_sharing()
@@ -250,6 +256,20 @@ class MixerBridge:
             self._run(connection.connect())
             return self._run(connection.command(line, budget), budget)
 
+    def source_command(self, line: str) -> str | None:
+        """A `mixer.source.*` command, on a connection opened for it and with the time such a
+        command may take. It answers after seconds of work (a prepare): on the shared connection
+        every take and state poll would wait for it, and on one connection kept for source
+        commands another source's command would. The mixer itself runs the commands of one
+        source one at a time. Never sent twice: the connection is new, so its failure is not the
+        mixer having closed it earlier."""
+        connection = AvpConnection(self._host, self.port)
+        try:
+            self._run(connection.connect())
+            return self._run(connection.command(line, SOURCE_COMMAND_TIMEOUT_S), SOURCE_COMMAND_TIMEOUT_S)
+        finally:
+            self._run(connection.disconnect())
+
     def status(self, timeout: float | None = None) -> dict:
         return json.loads(self.command(f"mixer.status {self.mixer}", timeout) or "{}")
 
@@ -330,12 +350,12 @@ class MixerBridge:
         command = request.get("command")
         if command == "lever":
             return self.lever(request)
-        if command in ("dsk", "ftb", "audio_gain", "audio_processor",
-                       "source.set", "source.prepare", "source.media", "source.resume_at",
-                       *AUX_COMMANDS):
+        if command in ("dsk", "ftb", "audio_gain", "audio_processor", *SOURCE_COMMANDS, *AUX_COMMANDS):
             payload = {k: v for k, v in request.items() if k != "command"}
+            line = f"mixer.{command} " + json.dumps(payload)
             try:
-                result = json.loads(self.command(f"mixer.{command} " + json.dumps(payload)) or "{}")
+                result = json.loads((self.source_command(line) if command in SOURCE_COMMANDS
+                                     else self.command(line)) or "{}")
             finally:
                 self._changed_at = time.monotonic()
             if isinstance(result, dict) and result.get("error"):

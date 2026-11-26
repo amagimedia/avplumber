@@ -135,14 +135,15 @@ def test_lateness_is_capped_and_a_pause_starts_a_new_stroke():
 
 class ControlServer(socketserver.ThreadingTCPServer):
     """AVPlumber's line protocol: a greeting, then one reply per command line, each recorded with
-    the connection it came on; `refuse` prefixes are answered with an error."""
+    the connection it came on; `refuse` prefixes are answered with an error, `hold` prefixes
+    only once `release` is set."""
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, refuse=()):
+    def __init__(self, refuse=(), hold=()):
         self.lines: list[tuple[int, str]] = []
         self.connections = 0
-        self.refuse = refuse
+        self.refuse, self.hold, self.release = refuse, hold, threading.Event()
         super().__init__(("127.0.0.1", 0), self.Handler)
 
     class Handler(socketserver.StreamRequestHandler):
@@ -154,6 +155,8 @@ class ControlServer(socketserver.ThreadingTCPServer):
             for raw in self.rfile:
                 line = raw.decode().rstrip("\n")
                 server.lines.append((connection, line))
+                if any(line.startswith(prefix) for prefix in server.hold):
+                    server.release.wait(10)
                 refused = any(line.startswith(prefix) for prefix in server.refuse)
                 self.wfile.write(b"400 mixer: the lever wipes only cached clips\n" if refused else b"200 OK\n")
 
@@ -183,6 +186,28 @@ def test_lever_positions_have_a_connection_of_their_own(control_server):
     status, lever, scenes, lever_again = server.lines
     assert status[0] == scenes[0] and lever[0] == lever_again[0] and status[0] != lever[0]
     assert lever[1].startswith("mixer.lever ") and server.connections == 2
+
+
+def test_a_source_command_at_work_holds_back_neither_the_shared_connection_nor_another_source(control_server):
+    """A prepare answers after seconds (the group stops, the URL opens, a frame is shown)."""
+    server = control_server(hold=("mixer.source.prepare ",))
+    bridge = MixerBridge("127.0.0.1", server.server_address[1], "mixer")
+    prepare = threading.Thread(target=bridge.take, daemon=True, args=(
+        {"command": "source.prepare", "id": "cam1", "url": "file:///a.mp4", "loop": False},))
+    prepare.start()
+    deadline = time.monotonic() + 5
+    while not server.lines and time.monotonic() < deadline:
+        time.sleep(0.01)
+    bridge.command("mixer.status mixer")
+    bridge.take({"command": "source.media", "id": "cam2", "action": "pause"})
+    assert prepare.is_alive()   # still at work, and the two above have their answers
+    server.release.set()
+    prepare.join(5)
+    assert not prepare.is_alive()
+    (first, prepared), (second, status), (third, media) = server.lines
+    assert prepared.startswith("mixer.source.prepare ") and status == "mixer.status mixer"
+    assert media == 'mixer.source.media {"id": "cam2", "action": "pause"}'
+    assert len({first, second, third}) == 3   # each source command on a connection opened for it
 
 
 def test_a_command_the_mixer_refused_is_not_sent_again(control_server):
