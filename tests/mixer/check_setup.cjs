@@ -145,6 +145,15 @@ const { chromium } = require('playwright');
     await defaultsButton.click();
     assert.deepEqual((await apply()).encodes, defaults, 'Defaults resets codecs as well as preset and bitrate');
 
+    await page.locator('#mode').selectOption('8:422');
+    assert.match(await text('canvas-format'), /BT.709, 8-bit 4:2:2/);
+    const nv16Setup = await apply();
+    assert.equal(nv16Setup.bit_depth, 8);
+    assert.equal(nv16Setup.chroma, '422');
+    assert.equal(nv16Setup.weights[2], 0);
+    await reset(nv16Setup);
+    assert.equal(await page.locator('#mode').inputValue(), '8:422');
+
     // The total follows the maximum unless a lower one is typed; that one stays, within the maximum.
     await reset();
     await page.locator('#fps').selectOption('30');
@@ -417,28 +426,28 @@ const { chromium } = require('playwright');
     await count('sdr420').fill('0');
     await count('hlg420').fill('999');
     assert.equal(await count('hlg420').inputValue(),'53','HDR surface budget is separate from total NVDEC');
-    // Desktop buttons stage a complete setup without posting. A saved Low keeps its
-    // own mix on reload even when the host suggests High.
+    // Desktop buttons stage a complete setup without posting. A saved 96-input show keeps its
+    // own mix on reload even when the host suggests 192.
     instanceType='geforce';
     const desktopPreset=(source_count,weights)=>({source_count,weights,scene_count:256,
       orientation:'landscape',fps:25,bit_depth:8,chroma:'420',layout:'balanced',extra_aux:0,
       clean_feed:true,dsk:['lower_third','ticker','bug_left','bug_right'],encodes:{}});
-    const presets={low:desktopPreset(92,[60,0,0,0,16,16,0,0,0]),high:desktopPreset(188,[120,0,0,0,36,32,0,0,0])};
-    auxStatus={aux_buses:ownAux,janus_api:true,desktop:{presets,suggested:'high',free_mib_at_start:26000}};
+    const presets={'96':desktopPreset(92,[60,0,0,0,16,16,0,0,0]),'192':desktopPreset(188,[120,0,0,0,36,32,0,0,0])};
+    auxStatus={aux_buses:ownAux,janus_api:true,desktop:{presets,suggested:'192',fits:{96:true,192:true}}};
     await reset();
-    assert.equal(await sources.inputValue(),'92','a fresh desktop starts with Low even with ample free VRAM');
+    assert.equal(await sources.inputValue(),'188','a fresh desktop starts with the suggested size');
     const before=submissions.length;
-    await page.getByRole('button',{name:'Low · 96 inputs'}).click();
+    await page.getByRole('button',{name:'96 inputs',exact:true}).click();
     assert.equal(submissions.length,before);
     assert.equal(await page.locator('#source-total').textContent(),'96');
     const low=await apply();
-    assert.deepEqual(low.weights,presets.low.weights);
+    assert.deepEqual(low.weights,presets[96].weights);
     assert.equal(low.source_count+low.dsk.length,96);
     await reset(low);
     assert.deepEqual((await apply()).weights,low.weights);
-    await page.getByRole('button',{name:'High · 192 inputs'}).click();
+    await page.getByRole('button',{name:'192 inputs · suggested'}).click();
     const high=await apply();
-    assert.deepEqual(high.weights,presets.high.weights);
+    assert.deepEqual(high.weights,presets[192].weights);
     assert.equal(high.source_count+high.dsk.length,192);
     assert.equal(await extraAux.getAttribute('max'),'8');
     await sources.fill('8');

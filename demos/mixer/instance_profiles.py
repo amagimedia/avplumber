@@ -40,7 +40,7 @@ INSTANCE_PROFILES = {
         # above which the GPU-side SDR-to-HLG work saturates NVDEC, and 61 of 75 at 60, where 64 ran
         # out of GPU compute. HLG 4:2:2 costs more GPU per source: 55 at 60 fps keeps the margin of
         # 61 at 4:2:0 (61 and 57 ran at GPU p95 92-96%); 81 at 25/30 fps is not measured (90 passed).
-        "mode_share": {"8:420": 1.0, "10:420": 0.82, "10:422": 0.74},
+        "mode_share": {"8:420": 1.0, "8:422": 0.74, "10:420": 0.82, "10:422": 0.74},
         # SDR + HLG decodes: about 1100 decoded frames/s keeps NVDEC near 90% (40 streams at 25 fps
         # measured 81%), at most 40 streams.
         "nvdec_decodes": {25: 40, 30: 36, 50: 22, 60: 18},
@@ -83,7 +83,7 @@ INSTANCE_PROFILES = {
         # the limit (46% idle), and 100 at 60 (41, 40, 19; CPU 47% idle) less the decode below.
         "sources": {25: 170, 30: 170, 50: 110, 60: 99},
         # The 10-bit canvases have their own limits (mode_limits), not a share of the SDR total.
-        "mode_share": {"8:420": 1.0, "10:420": 1.0, "10:422": 1.0},
+        "mode_share": {"8:420": 1.0, "8:422": 1.0, "10:420": 1.0, "10:422": 1.0},
         # H.264: 83 decodes at 30 fps ran NVDEC at 88-89%; 41 at 60 fps ran it at 91% beside 15 and
         # beside 19 uploads, so 40.
         "nvdec_decodes": {25: 83, 30: 83, 50: 48, 60: 40},
@@ -142,6 +142,10 @@ INSTANCE_PROFILES = {
         },
     },
 }
+
+# Until NV16 capacity is measured, use the P210 limits for the same chroma sampling.
+l4_modes = INSTANCE_PROFILES[InstanceType.NVIDIA_L4]["mode_limits"]
+l4_modes["8:422"] = deepcopy(l4_modes["10:422"])
 
 # Opt-in measured HEVC fixtures and fixed CUarray pools; the linear
 # profiles retain their decoder contracts and capacities.

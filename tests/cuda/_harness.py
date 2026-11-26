@@ -28,7 +28,9 @@ def v210_chain(nodes, tag, path, *, width, height, stride, fmt, hwaccel, color,
              f"setsar={sample_aspect_ratio}"]
     if tags:
         graph.append("setparams=" + ":".join(f"{key}={value}" for key, value in tags.items()))
-    if fmt != "p210le":
+    if fmt == "nv16":
+        graph[0] += ":v210_format=nv16"
+    elif fmt != "p210le":
         graph.append(f"scale_cuda=format={fmt}")
     nodes += [
         Input({"name": f"in_{tag}", "url": str(path), "format": "rawvideo", "dst": f"pkt_{tag}",
@@ -44,7 +46,11 @@ def v210_chain(nodes, tag, path, *, width, height, stride, fmt, hwaccel, color,
 
 
 def frame_planes(frame, fmt):
-    """Downloaded frame -> (Y, U, V) logical 10-bit planes."""
+    """Downloaded frame -> (Y, U, V) logical sample planes."""
+    if fmt == "nv16":
+        y, uv = (np.frombuffer(d, np.uint8).reshape(frame.height, pitch)[:, :frame.width]
+                 for d, pitch in zip(frame.data[:2], frame.linesize[:2]))
+        return y, uv[:, 0::2], uv[:, 1::2]
     if fmt in ("p010le", "p210le"):
         heights = (frame.height, (frame.height + 1) // 2 if fmt == "p010le" else frame.height)
         y, uv = [np.frombuffer(d, "<u2").reshape(h, p // 2)

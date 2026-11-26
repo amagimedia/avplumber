@@ -77,7 +77,7 @@ extern "C" __global__ void pack_v210(
     }
 }
 
-// ---- Unpack: v210 rows to the canvas storage (p210le, p010le or nv12) in one pass ----
+// ---- Unpack: v210 rows to the canvas storage (p210le, p010le, nv16 or nv12) in one pass ----
 //
 // The same kernels as FFmpeg's hwupload_cuda=v210_width (deps/ffmpeg/9/0017, libavfilter/
 // vf_hwupload_cuda.cu), which the demuxer path of an MXL source and tests/cuda still use: a change
@@ -163,6 +163,7 @@ extern "C" __global__ void unpack_v210_##format( \
 
 UNPACK(p210le, uint16_t, uint64_t, 1)
 UNPACK(p010le, uint16_t, uint64_t, 2)
+UNPACK(nv16, uint8_t, uint32_t, 1)
 UNPACK(nv12, uint8_t, uint32_t, 2)
 
 // ---- Unpack: UYVY rows and packed RGB to nv12 or bgra ----

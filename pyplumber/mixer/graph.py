@@ -67,7 +67,7 @@ from pyplumber.node import (
 )
 
 
-from .color import Color
+from .color import Color, SEMIPLANAR_FORMATS
 from .config import (MOVE_UNMATCHED, DEFAULT_FADE_CURVE, DEFAULT_MAX_COMPOSITOR_LAYERS, default_latency_ms, fade_color, fade_curve,
                      protocol_name)
 from .backend import mixer_backend
@@ -590,8 +590,8 @@ class MixerGraphBuilder:
     def _color_graph(self, source):
         """The filter graph that brings *source*'s frames to the canvas's colour and storage."""
         if source.packed_rgb:
-            if self.working_format not in ("nv12", "p010le", "p210le"):
-                raise ValueError("Packed RGB compositing requires a semiplanar canvas (NV12/P010/P210)")
+            if self.working_format not in SEMIPLANAR_FORMATS:
+                raise ValueError("Packed RGB compositing requires a semiplanar canvas (NV12/NV16/P010/P210)")
             return source.color.setparams + (":alpha_mode=premultiplied" if source.premultiplied_alpha else "")
         pixel_format = self.working_format
         if (pixel_format == "p210le" and self.color.transfer != "sdr" and
@@ -633,17 +633,6 @@ class MixerGraphBuilder:
         held = {}   # prepared edge -> the same frames past a reconnect-proof EOF stop
 
         for src in self._sources:
-            fan_out_src = prepared_edges[src.name]
-            if src.reconnects and src.route_router is None:
-                if fan_out_src not in held:
-                    held[fan_out_src] = self._e(f"{src.name}_live")
-                    self.avp.addNode(AssumeVideoFormat({
-                        "name": self._n(f"live_{src.name}"), "src": fan_out_src, "dst": held[fan_out_src],
-                        "ignore_eof": True, "width": src.reconnects[0], "height": src.reconnects[1],
-                        "pixel_format": "cuda", "group": src.input_group,
-                        "real_pixel_format": src.pixel_format if src.packed_rgb else self.working_format,
-                    }))
-                fan_out_src = held[fan_out_src]
             is_in_initial = src.name in initial_scene.sources
             # Slot A = bit 0, slot B = bit 1.
             # Initial PGM is on the configured slot; sources in the scene
@@ -651,6 +640,17 @@ class MixerGraphBuilder:
             outputs_init = (1 << pgm_slot_bit) if is_in_initial else 0
 
             if src.route_router is None:
+                fan_out_src = prepared_edges[src.name]
+                if src.reconnects:
+                    if fan_out_src not in held:
+                        held[fan_out_src] = self._e(f"{src.name}_live")
+                        self.avp.addNode(AssumeVideoFormat({
+                            "name": self._n(f"live_{src.name}"), "src": fan_out_src, "dst": held[fan_out_src],
+                            "ignore_eof": True, "width": src.reconnects[0], "height": src.reconnects[1],
+                            "pixel_format": "cuda", "group": src.input_group,
+                            "real_pixel_format": src.pixel_format if src.packed_rgb else self.working_format,
+                        }))
+                    fan_out_src = held[fan_out_src]
                 aux_edges = self._aux_routes.get(src.name, [])
                 # On the source's pacing loop when it names one: no thread wakes for each frame.
                 fan_out = OneToManyNb if src.fan_out_loop else OneToMany

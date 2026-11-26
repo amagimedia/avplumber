@@ -1,0 +1,135 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: avplumber patches <patches@local>
+Date: Thu, 26 Nov 2026 17:55:25 +0100
+Subject: [PATCH] avfilter: support NV16 in CUDA transitions and v210 upload
+
+---
+ libavfilter/vf_hwupload_cuda.c         |  6 +++---
+ libavfilter/vf_hwupload_cuda.cu        |  1 +
+ libavfilter/vf_transition_cuda.c       | 24 ++++++++++++++++++++----
+ libavfilter/vf_transition_cuda_array.h |  3 ++-
+ 4 files changed, 26 insertions(+), 8 deletions(-)
+
+diff --git a/libavfilter/vf_hwupload_cuda.c b/libavfilter/vf_hwupload_cuda.c
+index 0e60fc6dd6..3dbd68e2f6 100644
+--- a/libavfilter/vf_hwupload_cuda.c
++++ b/libavfilter/vf_hwupload_cuda.c
+@@ -323,9 +323,9 @@ static int cudaupload_config_output(AVFilterLink *outlink)
+     if (s->v210_width && (s->v210_width % 2 || inlink->format != AV_PIX_FMT_GRAY8 ||
+         inlink->w % 32 || inlink->w < ((int64_t)s->v210_width * 2 + 2) / 3 * 4 ||
+         (s->v210_format != AV_PIX_FMT_P210 && s->v210_format != AV_PIX_FMT_P010 &&
+-         s->v210_format != AV_PIX_FMT_NV12))) {
++         s->v210_format != AV_PIX_FMT_NV12 && s->v210_format != AV_PIX_FMT_NV16))) {
+         av_log(ctx, AV_LOG_ERROR, "v210 unpack needs an even v210_width, gray input whose width is the "
+-               "row stride (a multiple of 32) and v210_format p210le, p010le or nv12\n");
++               "row stride (a multiple of 32) and v210_format p210le, p010le, nv16 or nv12\n");
+         return AVERROR(EINVAL);
+     }
+ 
+@@ -413,7 +413,7 @@ fail:
+ #define FLAGS (AV_OPT_FLAG_FILTERING_PARAM | AV_OPT_FLAG_VIDEO_PARAM)
+ static const AVOption cudaupload_options[] = {
+     { "v210_width", "Unpack gray-wrapped v210 rows on the GPU (implies pinned)", OFFSET(v210_width), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, INT_MAX, FLAGS },
+-    { "v210_format", "Storage the v210 rows are unpacked into: p210le, p010le or nv12", OFFSET(v210_format), AV_OPT_TYPE_PIXEL_FMT, { .i64 = AV_PIX_FMT_P210 }, -1, INT_MAX, FLAGS },
++    { "v210_format", "Storage the v210 rows are unpacked into: p210le, p010le, nv16 or nv12", OFFSET(v210_format), AV_OPT_TYPE_PIXEL_FMT, { .i64 = AV_PIX_FMT_P210 }, -1, INT_MAX, FLAGS },
+     { "pinned", "Upload software NV12/P010/RGBA through pinned staging on a private stream", OFFSET(pinned), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, FLAGS },
+     { "device", "Number of the device to use", OFFSET(device_idx), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, INT_MAX, FLAGS },
+     { "output_format", "Output frame format", OFFSET(output_format), AV_OPT_TYPE_INT, { .i64 = CUDAUPLOAD_FMT_CUDA }, 0, CUDAUPLOAD_FMT_NB - 1, FLAGS, .unit = "output_format" },
+diff --git a/libavfilter/vf_hwupload_cuda.cu b/libavfilter/vf_hwupload_cuda.cu
+index 5b9a85292a..06c49c405a 100644
+--- a/libavfilter/vf_hwupload_cuda.cu
++++ b/libavfilter/vf_hwupload_cuda.cu
+@@ -80,4 +80,5 @@ extern "C" __global__ void unpack_v210_##format( \
+ 
+ UNPACK(p210le, uint16_t, uint64_t, 1)
+ UNPACK(p010le, uint16_t, uint64_t, 2)
++UNPACK(nv16, uint8_t, uint32_t, 1)
+ UNPACK(nv12, uint8_t, uint32_t, 2)
+diff --git a/libavfilter/vf_transition_cuda.c b/libavfilter/vf_transition_cuda.c
+index 3b88e54f74..d9009627f0 100644
+--- a/libavfilter/vf_transition_cuda.c
++++ b/libavfilter/vf_transition_cuda.c
+@@ -50,6 +50,7 @@
+ #define OVERLAY 1
+ 
+ static const enum AVPixelFormat supported_main_formats[] = {
++    AV_PIX_FMT_NV16,
+     AV_PIX_FMT_NV12,
+     AV_PIX_FMT_YUV420P,
+     AV_PIX_FMT_YUV422P,
+@@ -63,6 +64,7 @@ static const enum AVPixelFormat supported_main_formats[] = {
+ };
+ 
+ static const enum AVPixelFormat supported_overlay_formats[] = {
++    AV_PIX_FMT_NV16,
+     AV_PIX_FMT_NV12,
+     AV_PIX_FMT_YUV420P,
+     AV_PIX_FMT_YUVA420P,
+@@ -248,8 +250,9 @@ static void dip_plane_codes(const float color[3], enum AVColorRange range,
+  */
+ static int formats_match(const enum AVPixelFormat format_main, const enum AVPixelFormat format_overlay) {
+     switch(format_main) {
++    case AV_PIX_FMT_NV16:
+     case AV_PIX_FMT_NV12:
+-        return format_overlay == AV_PIX_FMT_NV12;
++        return format_overlay == format_main;
+     case AV_PIX_FMT_YUV420P:
+         return format_overlay == AV_PIX_FMT_YUV420P ||
+                format_overlay == AV_PIX_FMT_YUVA420P;
+@@ -341,6 +344,18 @@ static int transition_cuda_call_kernel_word(
+         0, ctx->cu_stream, kernel_args, NULL));
+ }
+ 
++/* The byte kernel advances a horizontal wipe by bytes. Snap the NV16 UV
++ * boundary to a whole Cb/Cr pair; each luma byte is still an independent pixel. */
++static float plane_alpha(const TransitionCUDAContext *ctx, int plane, int width, float alpha)
++{
++    if (ctx->in_format_overlay == AV_PIX_FMT_NV16 && plane == 1 && width > 0 &&
++        (ctx->transition_mode == TRANSITION_MODE_WIPE_LEFT || ctx->transition_mode == TRANSITION_MODE_WIPE_RIGHT)) {
++        const int pairs = AV_CEIL_RSHIFT(width, 1);
++        return floorf(alpha * pairs + 0.5f) / pairs;
++    }
++    return alpha;
++}
++
+ #include "vf_transition_cuda_array.h"
+ 
+ /* Propagate selected per-source metadata from the frames framesync actually sampled.
+@@ -515,14 +530,15 @@ static int transition_cuda_blend(FFFrameSync *fs)
+     // overlay rest planes depending on pixel format
+ 
+     switch(ctx->in_format_overlay) {
++    case AV_PIX_FMT_NV16:
+     case AV_PIX_FMT_NV12:
+         ret = transition_cuda_call_kernel(ctx,
+             input_main->data[1], input_main->linesize[1],
+-            input_main->width, input_main->height / 2,
++            input_main->width, AV_CEIL_RSHIFT(input_main->height, desc->log2_chroma_h),
+             input_overlay->data[1], input_overlay->linesize[1],
+-            input_overlay->width, input_overlay->height / 2,
++            input_overlay->width, AV_CEIL_RSHIFT(input_overlay->height, desc->log2_chroma_h),
+             0, 0, 0, 0,
+-            ctx->alpha_coef, ctx->transition_mode, dip[1]);
++            plane_alpha(ctx, 1, input_overlay->width, ctx->alpha_coef), ctx->transition_mode, dip[1]);
+         break;
+     case AV_PIX_FMT_YUV420P:
+     case AV_PIX_FMT_YUVA420P:
+diff --git a/libavfilter/vf_transition_cuda_array.h b/libavfilter/vf_transition_cuda_array.h
+index a338be447a..4bf1402867 100644
+--- a/libavfilter/vf_transition_cuda_array.h
++++ b/libavfilter/vf_transition_cuda_array.h
+@@ -74,12 +74,13 @@ static int transition_cuda_array(AVFilterContext *avctx, AVFrame *main, AVFrame
+         uint8_t *alpha_data = overlay->format == AV_PIX_FMT_CUDA ? overlay->data[3] : NULL;
+         int alpha_pitch = alpha_data ? overlay->linesize[3] : 0;
+         int alpha_x = 1 << sx, alpha_y = 1 << sy;
++        float coef = plane_alpha(ctx, p, overlay->width, alpha);
+         void *args[] = {
+             &out->data[p], &out_pitch, &main_data, &main_pitch, &textures[p],
+             &overlay_data, &overlay_pitch, &textures[4 + p],
+             &width, &height, &overlay_width, &overlay_height,
+             &alpha_data, &alpha_pitch, &alpha_x, &alpha_y,
+-            &lanes, &shift, &alpha, &mode, &dip[p][0], &dip[p][1],
++            &lanes, &shift, &coef, &mode, &dip[p][0], &dip[p][1],
+         };
+         ret = ff_cuda_input_texture(avctx, cu, main, p, &textures[p]);
+         if (ret >= 0)

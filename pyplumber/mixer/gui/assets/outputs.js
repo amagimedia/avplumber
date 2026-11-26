@@ -3,7 +3,7 @@
 const codecName = (codec) => ({h264: "H.264", h265: "H.265"})[codec] || String(codec || "").toUpperCase();
 const canvasText = (c) => `${c.width}×${c.height}p${c.fps}`;
 // The working format's range and chroma ("SDR 4:2:0"); a format without its own name is HDR.
-const formatName = (c) => ({nv12: "SDR 4:2:0", p010le: "HDR 4:2:0", p210le: "HDR 4:2:2"})[c.working_format] || "HDR";
+const formatName = (c) => ({nv12: "SDR 4:2:0", nv16: "SDR 4:2:2", p010le: "HDR 4:2:0", p210le: "HDR 4:2:2"})[c.working_format] || "HDR";
 const formatText = (c) => c ? `${canvasText(c)} ${formatName(c)}` : "";
 
 const query = new URLSearchParams(location.search);
@@ -73,7 +73,7 @@ function programOptions(s, keys) {
              unplayable: !playable(preferred),
              meta: [keys && "with keys", s.preview_codecs?.length && codecName(preferred), formatText(s.canvas)].filter(Boolean).join(" · ")}];
   }
-  const hdr = s.canvas.working_format !== "nv12";
+  const hdr = ["p010le", "p210le"].includes(s.canvas.working_format);
   return codecs.filter(playable).map((codec) => ({
     ...base, value: `program:${codec}`, label: `${name} · ${(hdr && RANGE_OF_CODEC[codec]) || codecName(codec)}`,
     preferred: codec === preferred, url: playerUrl(null, codec, s.preview_codecs),

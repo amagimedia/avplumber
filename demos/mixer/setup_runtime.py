@@ -204,10 +204,8 @@ def recipe_for(profile, settings):
     most = max(profile["sources"].values())   # the page sends source counts as weights
     if not isinstance(weights, list) or len(weights) != 9 or any(type(w) is not int or not 0 <= w <= most for w in weights):
         raise ValueError(f"Provide nine integer source weights from 0 to {most}")
-    if settings["bit_depth"] == 8 and (any(weights[1:4]) or weights[6]):
-        raise ValueError("8-bit mode supports SDR 4:2:0 and browser sources only")
-    if settings["bit_depth"] == 8 and settings["chroma"] != "420":
-        raise ValueError("8-bit mode supports a 4:2:0 canvas only")
+    if settings["bit_depth"] == 8 and (any(weights[1:3]) or weights[6]):
+        raise ValueError("8-bit mode supports SDR sources only")
     if settings["chroma"] == "420" and any(weights[2:4]):
         raise ValueError("4:2:0 mode supports 4:2:0 and browser sources only")
     counts = source_counts(for_mode(profile, settings["bit_depth"], settings["chroma"]), settings["source_count"],
@@ -232,7 +230,7 @@ def recipe_for(profile, settings):
     canvas_width, canvas_height = (height, width) if settings["orientation"] == "portrait" else (width, height)
     recipe["canvas"].update(width=canvas_width, height=canvas_height, fps=settings["fps"])
     if settings["bit_depth"] == 8:
-        recipe["canvas"].update(working_format="nv12", color="sdr")
+        recipe["canvas"].update(working_format="nv16" if settings["chroma"] == "422" else "nv12", color="sdr")
         recipe["renditions"] = [recipe["renditions"][0]]
     else:
         recipe["canvas"]["working_format"] = "p010le" if settings["chroma"] == "420" else "p210le"

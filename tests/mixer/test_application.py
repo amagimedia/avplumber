@@ -75,7 +75,7 @@ assert not any(name.startswith('demos.') for name in sys.modules)
 
 
 @pytest.mark.parametrize("reader", config.MXL_READERS)
-@pytest.mark.parametrize("color, storage", [("sdr", "nv12"), ("hlg", "p210le")])
+@pytest.mark.parametrize("color, storage", [("sdr", "nv12"), ("sdr", "nv16"), ("hlg", "p210le")])
 def test_an_mxl_writer_restart_never_ends_the_program(native_boundary, color, storage, reader):
     """A writer coming back restarts the MXL input group, which then sends an EOF that would end a
     program showing only that source. A format declaration that ignores EOF, restarting with the
@@ -84,7 +84,8 @@ def test_an_mxl_writer_restart_never_ends_the_program(native_boundary, color, st
     The native reader is one node that restarts its group itself; the demuxer chain is the fallback."""
     api = fake_api()
     api.MixerGraphBuilder = native_boundary[1]
-    cfg = config.parse({"canvas": {**CONFIG["canvas"], "mxl_reader": reader},
+    cfg = config.parse({"canvas": {**CONFIG["canvas"], "mxl_reader": reader,
+                                   "working_format": storage if color == "sdr" else "nv12"},
                         "renditions": [{"id": "record", "target": "program.ts"}],
                         "sources": [{"id": "cam", "kind": "mxl", "url": "/dev/shm/mxl", "flow": "f",
                                      "width": 1920, "height": 1080, "color": color}],
@@ -821,14 +822,14 @@ def test_managed_browser_start_keeps_outputs_held_on_unstable_graph(monkeypatch,
     assert not engine.at(" reset_counters true")
 
 
-def test_the_v210_unpack_kernels_of_the_node_and_of_the_ffmpeg_patch_are_the_same():
+def test_the_v210_unpack_kernels_of_the_node_and_of_the_ffmpeg_patch_are_the_same(tmp_path):
     """hwupload_cuda=v210_width (FFmpeg patch 0017: the demuxer chain, v210 files) and
     raw_video_file_cuda unpack with the same kernels, kept in two files; a change belongs in both."""
     repo = Path(__file__).resolve().parents[2]
-    patch = (repo / "deps/ffmpeg/9/0017-avfilter-hwupload-cuda-pinned.patch").read_text()
-    hunk = patch.split("+++ b/libavfilter/vf_hwupload_cuda.cu\n")[1].split("\ndiff --git ")[0].splitlines()[1:]
-    assert all(line.startswith("+") for line in hunk)
-    kernels = "\n".join(line[1:] for line in hunk)
+    source = "libavfilter/vf_hwupload_cuda.cu"
+    patches = sorted((repo / "deps/ffmpeg/9").glob("*.patch"))
+    subprocess.run(["git", "apply", f"--include={source}", *patches], cwd=tmp_path, check=True)
+    kernels = (tmp_path / source).read_text()
     start = "#define INLINE"
     # The node's file goes on with the UYVY and RGB unpacks (packed_to_cuda), which the patch does not have.
     node = (repo / "src/nodes/hwaccel/v210_pack.cu").read_text().split("\n// ---- Unpack: UYVY rows")[0]

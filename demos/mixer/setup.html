@@ -141,7 +141,7 @@ summary { cursor: pointer; }
 const $ = id => document.getElementById(id);
 MixerSetup.canvasControls($('canvas-controls'),{
  orientation:[['portrait','Portrait · 9:16'],['landscape','Landscape · 16:9']],
- fps:[[25,'25'],['30000/1001','29.97'],[30,'30'],[50,'50'],['60000/1001','59.94'],[60,'60']],mode:[['10:422','HDR · 10-bit · 4:2:2'],['10:420','HDR · 10-bit · 4:2:0'],['8:420','SDR · 8-bit · 4:2:0']]
+ fps:[[25,'25'],['30000/1001','29.97'],[30,'30'],[50,'50'],['60000/1001','59.94'],[60,'60']],mode:[['10:422','HDR · 10-bit · 4:2:2'],['10:420','HDR · 10-bit · 4:2:0'],['8:420','SDR · 8-bit · 4:2:0'],['8:422','SDR · 8-bit · 4:2:2']]
 },{fps:60});
 const types = [
  {id:'sdr420',name:'SDR · 4:2:0 · NVDEC',detail:'H.264 patterns · NVDEC',color:'#439a86'},
@@ -270,7 +270,7 @@ function sourceCounts(total,values){
 function sourceAvailable(i){
  const {bit_depth,chroma}=outputMode(),fps=rateWeight(rate());
  if(i===0||i===1)return nvdecLimit(fps)>0&&(i===0||bit_depth===10);
- if(i===2||i===3)return chroma==='422'&&limits().hlg_v210>0;
+ if(i===2||i===3)return chroma==='422'&&(i===3||bit_depth===10)&&limits().hlg_v210>0;
  if(i===4)return browserLimit()>dskPages().length;
  if(i===7)return mxlLimit()>0&&rawUploadUnits(fps)>0;
  if(i===8)return ndiLimit()>0;
@@ -325,7 +325,7 @@ function update(){
  });
  $('source-total').textContent=counts.reduce((a,b)=>a+b,0)+dskPages().length;
  const basis=profile.reference_profile?`Reference limits from ${profile.reference_profile}. Desktop capacity is unmeasured.`:`Limits measured on ${instanceType}.`;
- $('source-limit').textContent=`Maximum ${limit} unique sources at ${label} fps${tenBit?` on a 10-bit ${chroma==='422'?'4:2:2':'4:2:0'} canvas (estimated)`:''}. ${basis}`;
+ $('source-limit').textContent=`Maximum ${limit} unique sources at ${label} fps${tenBit||chroma==='422'?` on a ${bit_depth}-bit ${chroma==='422'?'4:2:2':'4:2:0'} canvas (estimated)`:''}. ${basis}`;
  $('browser-max').textContent=` · maximum ${browserLimit()}`;$('mxl-max').textContent=` · maximum ${mxlLimit()}`;
  $('ndi-max').textContent=` · maximum ${ndiLimit()}`;
  $('mxl-generated').hidden=!mxlLimit();$('ndi-generated').hidden=!ndiLimit();
@@ -382,7 +382,7 @@ function update(){
  $('allocation').replaceChildren(...sourceGroups.flatMap(([,indices])=>indices).map(i=>{const span=document.createElement('span');span.style.width=`${100*counts[i]/sourceCount}%`;span.style.background=types[i].color;return span}));
  $('allocation-note').textContent=`${sourceCount} independent inputs. NVDEC: ${counts[0]+counts[1]}/${nvdecLimit(fps)} combined SDR + HDR. Upload: ${counts[5]+2*counts[6]+counts[7]}/${rawUploadUnits(fps)} units (NV12 = 1, P010 = 2${mxlLimit()?', MXL = 1':''}). Capacity depends on codec and content.`;
  $('canvas-label').textContent=`${width} × ${height} · ${label} fps · ${portrait?'portrait':'landscape'}`;
- $('canvas-format').textContent=tenBit?`HLG, 10-bit ${chroma==='422'?'4:2:2':'4:2:0'} canvas · SDR and HDR outputs`:'BT.709, 8-bit 4:2:0 canvas · SDR output';
+ $('canvas-format').textContent=tenBit?`HLG, 10-bit ${chroma==='422'?'4:2:2':'4:2:0'} canvas · SDR and HDR outputs`:`BT.709, 8-bit ${chroma==='422'?'4:2:2':'4:2:0'} canvas · SDR output`;
  $('input-size').textContent=`Generated inputs: ${sourceWidth} × ${sourceHeight} at ${label} fps`;
  $('summary-title').textContent=`${height>width?'Portrait':'Landscape'} ${sourceHeight}p${label}`;
  $('source-total').textContent=sourceCount+currentSettings.dsk.length;$('scene-total').textContent=sceneCount;$('fps-total').textContent=label;
@@ -455,12 +455,12 @@ async function refresh(){
   online=false;$('feedback').textContent=error.message;$('apply').disabled=true;
  }finally{setTimeout(refresh,1500);}
 }
-// Kinds this canvas cannot carry go to the kind it can: HLG and 4:2:2 to SDR 4:2:0 on an 8-bit
-// canvas, 4:2:2 to its 4:2:0 twin on a 4:2:0 one.
+// Fold HLG into SDR on 8-bit canvases, then fold 4:2:2 into 4:2:0 on a 4:2:0 canvas.
 function foldForMode(values){
  if(outputMode().bit_depth===8){
-  values[0]+=values[1]+values[2]+values[3];values[5]+=values[6];values[1]=values[2]=values[3]=values[6]=0;
- }else if(outputMode().chroma==='420'){
+  values[0]+=values[1];values[3]+=values[2];values[5]+=values[6];values[1]=values[2]=values[6]=0;
+ }
+ if(outputMode().chroma==='420'){
   values[0]+=values[3];values[1]+=values[2];values[2]=values[3]=0;
  }
  return values;

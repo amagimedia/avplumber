@@ -22,7 +22,7 @@ from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 from pyplumber.composition.motion import DEFAULT_FADE_CURVE, FADE_CURVES as FADE_CURVES, MOVE_UNMATCHED, validate_curve
 from pyplumber.composition.nodes import MAX_INPUTS as MAX_SOURCES
 
-from .color import Color, declared_color, default_codec, rendition_color, OPERATORS, TRANSFER_TAGS, YUV_FORMATS
+from .color import Color, declared_color, default_codec, rendition_color, SEMIPLANAR_FORMATS, OPERATORS, TRANSFER_TAGS, YUV_FORMATS
 
 FITS = ("stretch", "contain", "cover")
 TRANSITIONS = ("cut", "fade", "wipe", "move")
@@ -30,7 +30,7 @@ TRANSITIONS = ("cut", "fade", "wipe", "move")
 # 8-bit default; P010/P210 are 10-bit 4:2:0/4:2:2. Planar layouts are excluded on
 # purpose: the compositor cannot promote 8-bit sources or draw the RGBA wipe
 # onto them, so they only fail later.
-WORKING_FORMATS = ("nv12", "p010le", "p210le")
+WORKING_FORMATS = SEMIPLANAR_FORMATS
 # How nv12/p010 sources reach the GPU: FFmpeg hwupload after pacing (the library default),
 # patched hwupload_cuda's pinned staging on a private stream (opt-in; the setup recipe selects it),
 # or one raw_video_file_cuda node that reads each picture into page-locked memory and uploads it
@@ -215,7 +215,7 @@ class Rect:
 # What a raw source's frames are stored as on the GPU; a decoded file's storage is known only per frame.
 # NDI's packed 4:2:2 is converted to NV12 on the CPU and uploaded.
 RAW_STORAGE = {"v210": "p210le", "mxl": "p210le", "nv12": "nv12", "p010": "p010le", "ndi": "nv12"}
-TRANSFORM_FORMATS = ("nv12", "p010le", "p210le")   # the canvases cuda_transform draws a video source on
+TRANSFORM_FORMATS = SEMIPLANAR_FORMATS   # the canvases cuda_transform draws a video source on
 
 
 class SourceTransform(NamedTuple):

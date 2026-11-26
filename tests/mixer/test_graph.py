@@ -411,7 +411,7 @@ def test_large_catalogue_keeps_paging_without_geometry_filters():
     assert mixer.scenes["grid_16_page_4"]["routes"] == {"source_0": 64}
 
 
-@pytest.mark.parametrize("working_format,storage", [("nv12", "nv12"), ("p010le", "p010le"), ("p210le", "p010le")])
+@pytest.mark.parametrize("working_format,storage", [("nv12", "nv12"), ("nv16", "nv12"), ("p010le", "p010le"), ("p210le", "p010le")])
 def test_a_large_catalogue_is_normalized_in_the_decoders_storage_at_the_working_depth(working_format, storage):
     # 4:2:0 as NVDEC decodes it: a source already at the canonical size is passed on undrawn, and
     # the routed slots' color graphs make 4:2:2 only for the slots that are on screen.

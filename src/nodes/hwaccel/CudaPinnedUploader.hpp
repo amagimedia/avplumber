@@ -112,7 +112,7 @@ public:
     /// CPU then; whether filling it is cheaper depends on who writes it and is to be measured.
     /// `pictures`: how many pictures the block holds. `pool_frames`: at most that many device
     /// frames, 0 for as many as are ever out at once. `packed`: the block holds pictures packed
-    /// so and the frames are `sw_format` unpacked from them (v210 to p210le, p010le or nv12,
+    /// so and the frames are `sw_format` unpacked from them (v210 to p210le, p010le, nv16 or nv12,
     /// UYVY and RGB to nv12 or bgra, by `conversion` between RGB and Y'CbCr); `interlaced`: its
     /// rows are two woven fields, so 4:2:0 chroma is taken field by field.
     CudaPinnedUploader(std::shared_ptr<HWAccelDevice> device, AVPixelFormat sw_format, int width, int height,
@@ -179,7 +179,7 @@ public:
                 if (!failed(cuMemAlloc(&packed_, size_t(layout_.frame_size)), "cuMemAlloc", error) &&
                     !failed(cuModuleLoadDataEx(&module_, image.c_str(), 0, nullptr, nullptr), "cuModuleLoadDataEx", error) &&
                     failed(cuModuleGetFunction(&unpack_, module_, name.c_str()), "cuModuleGetFunction", error))
-                    error += " (v210 unpacks to p210le, p010le or nv12, UYVY and RGB to nv12 or bgra)";
+                    error += " (v210 unpacks to p210le, p010le, nv16 or nv12, UYVY and RGB to nv12 or bgra)";
 #else
                 error = "a packed picture needs the CUDA kernels of a HAVE_NVCC=1 build";
 #endif

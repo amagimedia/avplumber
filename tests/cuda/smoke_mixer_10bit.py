@@ -42,6 +42,8 @@ def planes444(index, source):
 
 
 def source_planes(family, index, source):
+    if family == "nv16":
+        return tuple(p >> 2 for p in source_planes("sdr8", index, source))
     if family == "420":
         y, u, v = planes444(index, source)
         return y, u[::2, ::2], v[::2, ::2]
@@ -83,9 +85,10 @@ def scene_a(family, index, n=2):
     cols, tw, th = grid(n)
     cw = W if family == "444" else W // 2
     ch = H // 2 if family == "420" else H
-    y = np.full((H, W), 64, np.int64)
-    u = np.full((ch, cw), 512, np.int64)
-    v = np.full((ch, cw), 512, np.int64)
+    scale = 1 if family == "nv16" else 4
+    y = np.full((H, W), 16 * scale, np.int64)
+    u = np.full((ch, cw), 128 * scale, np.int64)
+    v = np.full((ch, cw), 128 * scale, np.int64)
     for source in range(n):
         sy, su, sv = source_planes(family, index, source)
         x0, y0 = (source % cols) * tw, (source // cols) * th
@@ -97,7 +100,7 @@ def scene_a(family, index, n=2):
     return y, u, v
 
 
-def blend(a_planes, b_planes, mode, coef):
+def blend(a_planes, b_planes, mode, coef, *, eight_bit=False):
     """transition_cuda word arithmetic: per-plane wipe position over that
     plane's own pixel width, round-half-up store. A dip reads one side: A
     towards the colour below alpha 1/2, the colour towards B above."""
@@ -105,15 +108,18 @@ def blend(a_planes, b_planes, mode, coef):
     for pa, pb, color in zip(a_planes, b_planes, DIP_COLOR):
         width = pa.shape[1]
         if mode == "dip":
-            a, code = 2 * coef, color * 4
+            a, code = 2 * coef, color if eight_bit else color * 4
             source, weight = (pa, 1 - a) if a <= 1 else (pb, a - 1)
             out.append(np.floor(code + weight * (source - code) + 0.5).astype(np.int64))
             continue
         if mode == "fade":
             alpha = np.full(width, coef)
+        elif mode == "wipe_down":
+            height = pa.shape[0]
+            alpha = ((np.arange(height)[:, None] + 0.5) / height <= coef).astype(np.float64)
         else:  # wipe_left
             alpha = ((np.arange(width) + 0.5) / width <= coef).astype(np.float64)
-        out.append(np.floor(alpha * pb + (1 - alpha) * pa + 0.5).astype(np.int64))
+        out.append(np.floor(alpha * pb + (1 - alpha) * pa + (0 if eight_bit else 0.5)).astype(np.int64))
     return out
 
 
@@ -146,15 +152,16 @@ def run(root, family, fmt, mode, coef, timeout, n=2, margin=TAIL_MARGIN, capacit
             paths.append(path)
         edges = [upload_chain(nodes, tag, paths[src], "mix_gpu", fmt) for tag, src in chains]
     else:
+        fixture = "sdr8" if family == "nv16" else family
         stride = frame_stride(W)
         paths = []
         for source in range(n):
             path = Path(root) / f"{family}_{source}_{gen_frames}.v210"
             if not path.exists():
-                write_fixture(path, W, H, gen_frames, family=family, source=source)
+                write_fixture(path, W, H, gen_frames, family=fixture, source=source)
             paths.append(path)
         edges = [v210_chain(nodes, tag, paths[src], width=W, height=H, stride=stride, fmt=fmt,
-                            hwaccel="mix_gpu", color=COLOR[family]) for tag, src in chains]
+                            hwaccel="mix_gpu", color=COLOR[fixture]) for tag, src in chains]
     full = {"dst_x": 0, "dst_y": 0, "dst_w": W, "dst_h": H}
     cols, tw, th = grid(n)
     layers_a = [{"dst_x": (s % cols) * tw, "dst_y": (s // cols) * th, "dst_w": tw, "dst_h": th}
@@ -185,7 +192,7 @@ def run(root, family, fmt, mode, coef, timeout, n=2, margin=TAIL_MARGIN, capacit
             if index >= FRAMES:
                 continue
             reference = blend(scene_a(family, index, n),
-                              source_planes(family, index, 0), mode, coef)
+                              source_planes(family, index, 0), mode, coef, eight_bit=fmt == "nv16")
             for plane, (actual, expected) in enumerate(zip(frame_planes(frame, fmt), reference)):
                 np.testing.assert_array_equal(actual, expected,
                                               err_msg=f"frame {index} plane {plane}")
@@ -212,17 +219,21 @@ def main():
     FRAMES = args.frames
     with tempfile.TemporaryDirectory(prefix="avp-mix10-") as root:
         for family in args.families if not args.no_pairs else ():
-            fmt = {"420": "p010le", "444": "yuv444p10le"}.get(family, "p210le")
-            for mode, coef in TRANSITIONS:
+            fmt = {"420": "p010le", "444": "yuv444p10le", "nv16": "nv16"}.get(family, "p210le")
+            transitions = TRANSITIONS
+            if fmt == "nv16":
+                transitions += (("wipe_left", 33 / 128), ("wipe_down", 0.75))
+            for mode, coef in transitions:
                 run(root, family, fmt, mode, coef, args.timeout, margin=args.tail_margin, capacity=args.capacity, pad_offset=args.pad_offset)
                 print(f"PASS {family}/{fmt} {mode} alpha={coef}", flush=True)
         # Many simultaneous full-resolution sources drawn as a grid (16 = 4x4).
         for family in args.families if args.grid else ():
             if family in ("420", "444"):
                 continue  # CPU upload chains add nothing over the v210 grid
-            run(root, family, "p210le", "fade", 0.25, args.timeout, n=args.grid,
+            fmt = "nv16" if family == "nv16" else "p210le"
+            run(root, family, fmt, "fade", 0.25, args.timeout, n=args.grid,
                 margin=args.tail_margin, capacity=args.capacity, pad_offset=args.pad_offset)
-            print(f"PASS {family}/p210le grid of {args.grid}, fade alpha=0.25", flush=True)
+            print(f"PASS {family}/{fmt} grid of {args.grid}, fade alpha=0.25", flush=True)
 
 
 if __name__ == "__main__":

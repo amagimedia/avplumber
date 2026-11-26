@@ -22,7 +22,7 @@ from ..dmabuf_inputs import BrowserStartupUnsettled
 from ..thumbnail import encode_options, is_thumbnail, reserve_buses
 from pyplumber.mixer.tools.extra_aux import aux_encode, extra_buses
 import pyplumber.mixer.tools.janus_mountpoints as janus_mountpoints
-from pyplumber.mixer.color import default_codec
+from pyplumber.mixer.color import TEN_BIT_FORMATS, default_codec
 from pyplumber.mixer.control import AvpProtocolError
 from pyplumber.mixer.aux_layout import parse_layout
 from pyplumber.mixer.config import ConfigError, aux_fps, aux_label, parse, parse_aux_buses, rate_json, rate_weight
@@ -65,8 +65,8 @@ def extra_aux_limit(profile, cfg, encodes, *, reserve_clean=False):
     Applications may reserve a clean program even while it is disabled.
     """
     nvenc = profile["nvenc"]
-    mode = for_mode(profile, 8 if cfg.working_format == "nv12" else 10,
-                    "422" if cfg.working_format == "p210le" else "420")
+    mode = for_mode(profile, 10 if cfg.working_format in TEN_BIT_FORMATS else 8,
+                    "422" if cfg.working_format in ("p210le", "nv16") else "420")
     # 29.97 and 59.94 are weighed as 30 and 60 (config.rate_weight), as the profiles measured them.
     def share(width, height, fps, codec, preset):
         return rate_weight(fps) * width * height / (1920 * 1080) * nvenc["pct_per_fps"]["hevc" if "hevc" in codec else "h264"][preset]

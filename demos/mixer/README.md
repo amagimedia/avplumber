@@ -125,6 +125,8 @@ Program and clean Program, Program/Preview and Multiviewer. You can lower **Uniq
 before applying. The launcher keeps shows and the CUDA JIT cache in
 `media/desktop/` across restarts.
 
+For an 8-bit 4:2:2 show, choose **SDR · 8-bit · 4:2:2** in Setup. The NV16 canvas preserves each input chroma row from SDR v210 through compositing. H.264 and HEVC outputs use 4:2:0. Setup estimates NV16 capacity from the 10-bit 4:2:2 profile. The desktop smoke check compares NV16 output pixels with a reference during fades, dips and wipes.
+
 | Size | HEVC decoded | Raw NV12 | Browser scene sources | Browser keys |
 | ---: | ---: | ---: | ---: | ---: |
 | 24 | 15 | 4 | 1 | 4 |

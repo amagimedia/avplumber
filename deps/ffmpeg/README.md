@@ -239,9 +239,9 @@ into FFmpeg does not by itself eliminate driver locks or CPU waits.
 width is the packed v210 byte stride, a multiple of 32 (the standard row is
 padded to 128). It uploads the packed bytes and unpacks them on the GPU, without
 CPU v210 decoding, into `v210_format`: `p210le` (the default, every code as it
-is), `p010le` or `nv12`, written by the one kernel pass with no P210
+is), `nv16` (8-bit 4:2:2), `p010le` or `nv12`, written by the one kernel pass with no P210
 intermediate. A thread owns 12 pixels of one row (of the row pair for 4:2:0):
-two aligned 128-bit loads a row, word-sized stores. NV12 samples are rounded; a
+two aligned 128-bit loads a row, word-sized stores. NV12 and NV16 samples are rounded; a
 4:2:0 chroma row is the rounded mean of its two rows, of the chroma row's own
 field in a frame flagged interlaced. A `scale_cuda=format=` after the unpack
 instead re-reads the P210 frame on its filtered path (bicubic, a horizontal and

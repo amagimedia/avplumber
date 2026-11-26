@@ -66,6 +66,8 @@ def run_graph(path, width, height, frames, stride, fmt, scale, timeout):
         for index, frame in enumerate(drain(result, errors, timeout, state=state)):
             assert index < frames, "extra frame"
             expected = sample_planes(width, height, index)
+            if fmt == "nv16":
+                expected = tuple(np.minimum((plane.astype(np.int32) + 2) >> 2, 255) for plane in expected)
             if scale:
                 expected = tuple(plane.repeat(2, axis=0).repeat(2, axis=1) for plane in expected)
             for actual, reference in zip(frame_planes(frame, fmt), expected):
@@ -103,7 +105,7 @@ def main():
             reference = Path(root) / "reference.v210"
             write_fixture(reference, args.width, args.height, args.frames)
         cpu_reference(args.ffmpeg, reference, args.width, args.height, args.frames)
-        for fmt in ("p210le", "yuv422p10le"):
+        for fmt in ("p210le", "yuv422p10le", "nv16"):
             run_graph(path, args.width, args.height, args.frames, stride, fmt, args.scale, args.timeout)
             print(f"PASS {args.width}x{args.height} @ 60 fps, {args.frames} frames, "
                   f"stride={stride}, format={fmt}, scale={args.scale}", flush=True)

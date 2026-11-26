@@ -1134,7 +1134,7 @@ Parameters:
     A trailing part of a picture of a file is not shown.
 -   `pixel_format` (string, required) - `nv12` or `p010le`, whose rows carry no padding, or `v210`
 -   `storage` (string, default `p210le`) - what v210 is unpacked into: `p210le` (every sample as it
-    is), `p010le` or `nv12` (4:2:0: a chroma row is the rounded mean of its two rows; NV12 samples
+    is), `nv16` (4:2:2 rounded to 8 bits), `p010le` or `nv12` (4:2:0: a chroma row is the rounded mean of its two rows; NV12 samples
     are rounded to 8 bits)
 -   `field_order` (string, default `progressive`) - `tff` or `bff`: the rows are two woven fields.
     Frames are flagged interlaced with that field order, and 4:2:0 chroma unpacked from v210 is taken

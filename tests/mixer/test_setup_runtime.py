@@ -228,7 +228,7 @@ def test_bit_depth_controls_canvas_sources_and_encoders(tmp_path, bit_depth):
 
 
 def test_8bit_rejects_ten_bit_sources():
-    with pytest.raises(ValueError, match="SDR 4:2:0 and browser"):
+    with pytest.raises(ValueError, match="8-bit mode"):
         recipe_for(T4, {**DEFAULT_SETTINGS, "bit_depth": 8})
 
 
@@ -412,7 +412,6 @@ def test_raw_only_mix_keeps_a_steady_alpha_background(tmp_path):
 @pytest.mark.parametrize("changes, message", [
     ({"chroma": "444"}, "Unsupported chroma"),
     ({"chroma": "420"}, "4:2:0 mode"),
-    ({"bit_depth": 8, "weights": [1, 0, 0, 0, 0, 0, 0]}, "4:2:0 canvas"),
     ({"weights": [0, 0, 1, 0, 0, 0, 0]}, "enable another source type"),
 ])
 def test_reject_incompatible_chroma(changes, message):
@@ -1123,7 +1122,7 @@ def test_a_show_above_the_modes_capacity_is_scaled_down(tmp_path, fps, mode, exp
 def test_every_profile_covers_every_rate_and_canvas(tmp_path, instance_type):
     """A new instance type fails here, not in a live Apply."""
     profile = INSTANCE_PROFILES[instance_type]
-    assert set(profile["mode_share"]) == {"8:420", "10:420", "10:422"}
+    assert set(profile["mode_share"]) == {"8:420", "8:422", "10:420", "10:422"}
     for fps in (25, 30, 50, 60):
         recipe_for(profile, {**DEFAULT_SETTINGS, "fps": fps})
         assert source_limit(profile, fps) < MAX_SOURCES   # room for a bus's PGM pad in the pad mask
@@ -1542,7 +1541,7 @@ def test_decode_mix_changes_the_sdr_clips_codec_and_nothing_else(tmp_path):
 
 
 @pytest.mark.parametrize("fps", [25, 30, 50, 60])
-@pytest.mark.parametrize("depth,chroma", [(8, "420"), (10, "420"), (10, "422")])
+@pytest.mark.parametrize("depth,chroma", [(8, "420"), (8, "422"), (10, "420"), (10, "422")])
 def test_setup_keeps_capacity_profile_runtime_bounds(tmp_path, fps, depth, chroma):
     profile = INSTANCE_PROFILES[InstanceType.NVIDIA_L4_CUARRAY]
     settings = {**DEFAULT_SETTINGS, "fps": fps, "bit_depth": depth, "chroma": chroma,
@@ -1555,7 +1554,7 @@ def test_setup_keeps_capacity_profile_runtime_bounds(tmp_path, fps, depth, chrom
     assert cfg.source_fan_out == "event_loop"
     assert cfg.input_poll_ms == cfg.aux_input_poll_ms == 16
     assert cfg.fps == fps
-    assert cfg.working_format == ("nv12" if depth == 8 else "p010le" if chroma == "420" else "p210le")
+    assert cfg.working_format == {(8, "420"): "nv12", (8, "422"): "nv16", (10, "420"): "p010le", (10, "422"): "p210le"}[depth, chroma]
 
 
 def test_first_resume_keeps_declared_outputs_and_applies_shared_aux_codec(runtime, monkeypatch):
@@ -1782,6 +1781,7 @@ def test_mxl_writers_start_before_the_mixer_and_stop_after_it(tmp_path, monkeypa
         events.append("writers start")
         flow.mkdir()
         return SimpleNamespace(pid=1, returncode=0, poll=lambda: None, wait=lambda timeout=None: stopped.wait(3))
+    monkeypatch.setattr(demo, "ndi_available", lambda: False)
     monkeypatch.setattr(demo.subprocess, "Popen", launch)
     def killpg(pid, sig):
         if not sig:   # the stop's poll: the group has exited
@@ -1847,6 +1847,7 @@ def test_ndi_senders_report_full_names_that_the_setup_puts_in_the_show_before_th
         events.append("writers start")
         ndi_senders.names_path(config).write_text(json.dumps({"sdr_ndi_000": "HOST.EXAMPLE (avp-sdr_ndi_000)"}))
         return SimpleNamespace(pid=1, returncode=0, poll=lambda: None, wait=lambda timeout=None: stopped.wait(3))
+    monkeypatch.setattr(demo, "mxl_available", lambda: False)
     monkeypatch.setattr(demo.subprocess, "Popen", launch)
     def killpg(pid, sig):
         if not sig:

@@ -248,8 +248,8 @@ public:
         const std::string storage = r->v210_ ? params.value("storage", "p210le") : format;
         r->sw_format_ = av_get_pix_fmt(storage.c_str());
         if (r->sw_format_ != AV_PIX_FMT_NV12 && r->sw_format_ != AV_PIX_FMT_P010LE &&
-            !(r->v210_ && r->sw_format_ == AV_PIX_FMT_P210LE))
-            throw Error("raw_video_file_cuda: pixel_format must be nv12, p010le or v210 (storage p210le, p010le or nv12), not " +
+            !(r->v210_ && (r->sw_format_ == AV_PIX_FMT_P210LE || r->sw_format_ == AV_PIX_FMT_NV16)))
+            throw Error("raw_video_file_cuda: pixel_format must be nv12, p010le or v210 (storage p210le, p010le, nv16 or nv12), not " +
                         format + (r->v210_ ? " to " + storage : ""));
         if (isMxlUrl(r->path_) && !r->v210_)
             throw Error("raw_video_file_cuda: an MXL flow is v210; pixel_format must say so");
