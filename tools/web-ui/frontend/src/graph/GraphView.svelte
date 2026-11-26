@@ -21,6 +21,8 @@
   let level = -1, max = false;
 
   $: model = graphModel(nodes, queues);
+  $: programEdge = nodes.find(n => n.type === 'mixer_delivery')?.params?.dst;
+  $: programFps = programEdge && queues.find(q => q.name === programEdge)?.pps;
   $: throughput = queues.reduce((sum, q) =>
     q.type === 'av::VideoFrame' || q.type === 'EglImageFrame' ? sum + (q.pps || 0) : sum, 0);
   $: if (stage) sync(model);
@@ -145,8 +147,9 @@
         </div>
       {/if}
       <span><b>{model.nodeCount.toLocaleString()}</b> nodes</span><span><b>{model.edges.length.toLocaleString()}</b> queues</span>
+      {#if programEdge || mixerName || !nodes.length}<span data-tip="Frames per second leaving Program delivery, including repeated frames. Each output picture counts once.">Program <b>{fresh && Number.isFinite(programFps) ? programFps.toFixed(1) : '–'}</b> fps</span>{/if}
       <span data-tip="Video frames per second summed across video and EGL image queues. Each queue crossing counts.">Queue traffic <b>{fresh ? fmtK(throughput) : '–'}</b> frames/s</span>
-      {#if compose}<span data-tip="Time the mixer takes to compose one program frame, against the frame period: mean over the last 2 s{compose.p99Ms != null ? `, p95 and p99 over its last ${compose.recent} frames` : ''}; worst frame since start {compose.maxMs.toFixed(1)} ms">Program compose mean <b>{compose.ms.toFixed(1)}</b>{#if compose.p99Ms != null} · p95 <b>{compose.p95Ms.toFixed(1)}</b> · p99 <b>{compose.p99Ms.toFixed(1)}</b>{/if} / {compose.budgetMs.toFixed(1)} ms</span>
+      {#if compose}<span data-tip="Time the mixer takes to compose one program frame, against the frame period: mean over the last 2 s{compose.p99Ms != null ? `, p95 and p99 over its last ${compose.recent} frames` : ''}; worst frame since start {compose.maxMs.toFixed(1)} ms">Program compose mean <b>{compose.ms.toFixed(1)}</b> · p95 <b>{compose.p95Ms?.toFixed(1) ?? '–'}</b> · p99 <b>{compose.p99Ms?.toFixed(1) ?? '–'}</b> / {compose.budgetMs.toFixed(1)} ms</span>
       {:else if mixerName || !nodes.length}<span>Program compose mean – · p95 – · p99 – ms · waiting for timing samples</span>{/if}
     </div>
     {#if !noGl}

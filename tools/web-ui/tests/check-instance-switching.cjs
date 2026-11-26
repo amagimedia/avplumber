@@ -10,9 +10,11 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const root = path.resolve(__dirname, '../frontend/dist');
 const instances = ['a', 'b'].map(id => ({ id, name: id, host: '127.0.0.1', port: 1 }));
 const nodes = source => [{ name: 'shared', type: 'input', params: { source, dst: source + '_queue' } },
-  ...(source === 'old' ? [{ name: 'old_extra', type: 'mixer_compositor', params: { mixer: 'demo', src: 'old_queue' } }] : [])];
+  ...(source === 'old' ? [{ name: 'old_extra', type: 'mixer_compositor', params: { mixer: 'demo', src: 'old_queue' } },
+    { name: 'delivery', type: 'mixer_delivery', params: { dst: 'delivered' } }] : [])];
 const queue = source => [{ name: `${source}_queue`, type: 'av::VideoFrame', occupied: 1, capacity: 3, pps: 25 },
-  {name: 'browser_import', type: 'EglImageFrame', pps: 10}, {name: 'audio', type: 'av::AudioSamples', pps: 50}];
+  {name: 'browser_import', type: 'EglImageFrame', pps: 10}, {name: 'audio', type: 'av::AudioSamples', pps: 50},
+  ...(source === 'old' ? [{name: 'delivered', type: 'av::VideoFrame', pps: 24.8}] : [])];
 let startupGraphReady = false, timingReady = false;
 let registry = instances, initialReplies = true, socket, connections = 0;
 const requests = [], errors = [], prefix = '/graph';
@@ -94,11 +96,12 @@ backend.on('connection', (client, req) => {
     const hud = () => evaluate("document.querySelector('.gv-hud')?.innerText.replace(/\\s+/g, ' ') || ''");
     await until(async () => (await hud()).includes('p95 – · p99 – ms · waiting for timing samples'));
     startupGraphReady = true;
-    await until(async () => await count() === 2);
+    await until(async () => await count() === nodes('old').length);
     await until(() => findRequest(0, 'a', 'mixer.status demo'));
     timingReady = true;
     await until(async () => /Program compose mean 2.0\s*· p95 3.0 · p99 4.0 \/ 40.0 ms/.test(await hud())).catch(async error => { throw new Error(await hud(), {cause: error}); });
-    assert.match(await hud(), /Queue traffic 35 frames\/s/);
+    assert.match(await hud(), /Program 24\.8 fps/);
+    assert.match(await hud(), /Queue traffic 60 frames\/s/);
     // Select a node from the Nodes page: the row opens it in the graph.
     await evaluate(`location.hash = 'nodes'`);
     await until(async () => await evaluate(`!!document.querySelector('tr[data-node="shared"]')`));
@@ -148,7 +151,7 @@ backend.on('connection', (client, req) => {
     await until(() => findRequest(from, 'b', 'nodes.json'));
     assert.equal(await count(), 1, 'restart cleared the graph before the new one arrived');
     reply(findRequest(from, 'b', 'nodes.json'), nodes('old'));
-    await until(async () => await count() === 2);
+    await until(async () => await count() === nodes('old').length);
     // Missing deep link stays pending; registration later selects that ID.
     registry = [instances[0]];
     from = requests.length;
