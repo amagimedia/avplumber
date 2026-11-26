@@ -1254,6 +1254,51 @@
         "title": "Scenes",
         "type": "object"
       },
+      "SourceSet": {
+        "additionalProperties": false,
+        "description": "Repoint a wired file / live video (or NDI) source: stop its group safely, set URL and loop,\nrestart. Browser, raw, MXL and VMM pads refuse the command.",
+        "properties": {
+          "loop": {
+            "title": "Loop",
+            "type": "boolean"
+          },
+          "url": {
+            "minLength": 1,
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "loop"
+        ],
+        "title": "SourceSet",
+        "type": "object"
+      },
+      "SourceSetResult": {
+        "additionalProperties": true,
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "loop": {
+            "title": "Loop",
+            "type": "boolean"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "url",
+          "loop"
+        ],
+        "title": "SourceSetResult",
+        "type": "object"
+      },
       "Status": {
         "additionalProperties": true,
         "properties": {
@@ -4339,6 +4384,144 @@
           }
         ],
         "summary": "Settings",
+        "tags": [
+          "mixer"
+        ]
+      }
+    },
+    "/api/v1/mixer/sources/{source_id}": {
+      "put": {
+        "description": "Change the URL and loop of an existing show source pad without EOS killing the mixer.",
+        "operationId": "mixer_set_source",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "source_id",
+            "required": true,
+            "schema": {
+              "title": "Source Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SourceSet"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceSetResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unauthorized`: the gateway requires a bearer token and the request has none, or another one"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`cross_origin`: a browser sent the request for another site's page"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`not_available`: this show or engine has no such command (e.g. keys in a show without a keyer)"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`engine_rejected`: the engine refused the command, `message` is its reason; `conflict`: the resource changed since the revision the request names"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`invalid_request`: the request does not match the schema, `details` lists the fields"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`internal_error`: the gateway failed; its log has the cause"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`bad_engine_reply`: the engine's reply is not JSON, or lacks a field this route's schema promises"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`engine_unreachable`: no control connection to the engine; `engine_not_ready`: the engine is starting and does not take this command yet"
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`engine_timeout`: the engine did not answer in time; the command may still have run"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Set Source",
         "tags": [
           "mixer"
         ]

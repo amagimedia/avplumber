@@ -166,12 +166,13 @@ the OpenAPI document; [mixer.md](mixer.md) describes what the commands do.
 | `PUT /mixer/aux/{bus}/scenes` | `mixer.aux` |
 | `PUT /mixer/aux/{bus}/layout` | `mixer.aux_layout` |
 | `PUT /mixer/aux/{bus}/page` | `mixer.aux_page` |
+| `PUT /mixer/sources/{id}` | `mixer.source.set` |
 | `GET`, `PATCH /mixer/audio/gains` | `mixer.audio_gain_status`, `mixer.audio_gain` |
 | `GET /mixer/audio/processors` | `mixer.audio_processor_status` |
 | `PATCH /mixer/audio/processors/{output}/{id}` | `mixer.audio_processor` |
 
 `mixer.status`, `mixer.scenes` and the takes are the engine's; the key, fade to
-black, AUX, audio and settings commands are registered by `pyplumber.mixer`, so
+black, AUX, source, audio and settings commands are registered by `pyplumber.mixer`, so
 a mixer built without it answers those routes with 404 `not_available`.
 
 While a take is on its way to Program (`transition` in the status is not

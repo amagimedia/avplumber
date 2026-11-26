@@ -415,8 +415,27 @@ thread priority), and `gui.web` (HTTP and CLI). Existing public imports from
 
 Programs other than the control page drive the mixer through the optional
 [REST API](rest_api.md): `pyplumber.mixer.rest.mixer_router(bridge)` serves the
-takes, keys, AUX buses and audio as typed, OpenAPI-described routes over the same
+takes, keys, AUX buses, sources and audio as typed, OpenAPI-described routes over the same
 `MixerBridge`.
+
+### Source repoint (`mixer.source.set`)
+
+Change the URL and loop of an existing show source pad without tearing down the
+mixer. The command stops the source's input group from its terminal nodes, waits,
+clears the group's own queues (so a leftover EOS cannot end the chain or the
+nodes behind the compositors), sets `url` / `loop` / `loop_continuous_ts` on the
+input node, resets the source's realtime team when one is wired, resumes a pause
+team when one is wired, and starts the group again.
+
+```text
+mixer.source.set {"mixer":"mixer","id":"<sourceId>","url":"…","loop":true}
+```
+
+Address sources by show source id (resolved to `input_<index>` the way
+`build_application` names them). Supported kinds are `video` and `ndi` (chains
+built by `build_input`). Browser, raw (`v210` / `nv12` / `p010`), MXL and VMM
+pads answer with a clear error. REST: `PUT /mixer/sources/{id}` with
+`{"url","loop"}`.
 
 ## Profiling
 

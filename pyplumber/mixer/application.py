@@ -27,6 +27,7 @@ from .dmabuf_inputs import (BrowserStartupUnsettled, dmabuf_cuda_input_nodes, op
                             refresh_windows, rest_request, wait_for_sockets)
 from .dsk import DownstreamKeyer, register_dsk_commands
 from .inputs import build_input, build_v210_input, build_raw420_input
+from .source_control import SourceController, register_source_commands, source_pads
 from .janus import (DEFAULT_KEYFRAME_MIN_INTERVAL_MS, JANUS_KEYFRAME_NODE, JanusVideoConfig,
                     RtcpFeedbackGroup, add_nodes, build_janus_output, dpb_options, release_commands)
 from ..transform import transform_output, transform_params
@@ -1298,6 +1299,8 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
         return json.dumps({"outputs": overlay_on}) + "\n"
 
     avp.registerControlCommand("mixer.debug_overlay", debug_overlay, True)
+    register_source_commands(avp, SourceController(
+        avp, source_pads(cfg.sources, external=set(external)), mixer=MIXER_NAME))
     held = []
     # Purge idle imports left by the capture pool's start-up churn.
     importers = tuple(f"input_{index}_to_cuda" for index in browsers)

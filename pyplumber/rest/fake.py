@@ -32,6 +32,9 @@ class FakeEngine:
         layouts = [{"preset": "pgm_pvw_grid"}, {"preset": "source_pages", "page": 0}]
         self.aux = {"id": "mv", "revision": uuid.uuid4().hex, "layout": layouts[0], "scenes": self.scenes[:2], "layouts": layouts}
         self.gains = {source: 0.0 for source in audio_sources}
+        # Show source pads a client may repoint: scenes double as source ids in this fake.
+        self.sources = {scene: {"id": scene, "url": f"fake://{scene}", "loop": False, "kind": "video"}
+                        for scene in self.scenes}
         self.processor = {"output": "program", "id": "duck", "type": "ducker", "enabled": True, "threshold_db": -40.0,
                           "depth_db": -20.0, "attack_ms": 10.0, "hold_ms": 300.0, "release_ms": 800.0, "gain_db": 0.0}
         self._lock = threading.Lock()
@@ -61,6 +64,7 @@ class FakeEngine:
             "mixer.audio_gain_status": lambda _arg: self._gains(),
             "mixer.audio_processor": lambda arg: self._audio_processor(json.loads(arg)),
             "mixer.audio_processor_status": lambda _arg: [self.processor],
+            "mixer.source.set": lambda arg: self._source_set(json.loads(arg)),
         }
 
     def command(self, line: str, timeout: float | None = None) -> str | None:
@@ -196,3 +200,18 @@ class FakeEngine:
             raise _Refused("audio_processor: unknown output or processor id")
         self.processor.update({key: value for key, value in request.items() if key not in ("output", "id")})
         return [self.processor]
+
+    # --- sources ---
+
+    def _source_set(self, request):
+        self._for_mixer(request.get("mixer"), lambda: None)
+        source = self.sources.get(request.get("id"))
+        if source is None:
+            raise _Refused(f"source.set: unknown source id {request.get('id')!r}")
+        if source["kind"] not in ("video", "ndi"):
+            raise _Refused(f"source.set: source {source['id']!r} kind {source['kind']!r} is unsupported")
+        url, loop = request.get("url"), request.get("loop")
+        if not isinstance(url, str) or not url or not isinstance(loop, bool):
+            raise _Refused("source.set needs a non-empty url and a boolean loop")
+        source.update(url=url, loop=loop)
+        return {"id": source["id"], "url": url, "loop": loop}

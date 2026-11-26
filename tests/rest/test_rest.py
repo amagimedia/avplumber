@@ -73,6 +73,8 @@ def spaced(command, **payload):
     ("PUT", "/mixer/ftb", {"toggle": True}, 200, spaced("ftb", toggle=True)),
     ("GET", "/mixer/aux", None, 200, "mixer.aux_status"),
     ("PUT", "/mixer/aux/mv/layout", {"layout": {"preset": "source_pages"}}, 200, spaced("aux_layout", layout={"preset": "source_pages"}, bus="mv")),
+    ("PUT", "/mixer/sources/cam1", {"url": "file:///clip.mp4", "loop": True},
+     200, spaced("source.set", url="file:///clip.mp4", loop=True, id="cam1", mixer="mixer")),
     ("GET", "/mixer/audio/gains", None, 200, "mixer.audio_gain_status"),
     ("PATCH", "/mixer/audio/gains", {"gains": {"cam1": -6, "cam2": 3.5}}, 200, spaced("audio_gain", gains={"cam1": -6.0, "cam2": 3.5})),
     ("GET", "/mixer/audio/processors", None, 200, "mixer.audio_processor_status"),
@@ -91,6 +93,14 @@ def test_take_reaches_program_and_swaps_preview(api):
     status = api.get("/mixer/status").json()
     assert (status["pgm_scene"], status["pvw_scene"]) == ("cam3", "cam1")
     assert status["lever"] == {"position": 0.0, "origin": 0.0, "engaged": False}   # fields the model does not name pass through
+
+
+def test_source_set_repoints_a_wired_pad(api, engine):
+    reply = api.put("/mixer/sources/cam2", json={"url": "file:///next.mp4", "loop": False}).json()
+    assert reply == {"id": "cam2", "url": "file:///next.mp4", "loop": False}
+    assert engine.sources["cam2"]["url"] == "file:///next.mp4"
+    refused = api.put("/mixer/sources/nowhere", json={"url": "file:///x", "loop": True})
+    assert refused.status_code == 409 and refused.json()["error"]["code"] == "engine_rejected"
 
 
 def test_key_and_aux_replies_are_the_mixers(api):
@@ -135,6 +145,9 @@ def test_key_and_aux_replies_are_the_mixers(api):
     ("PUT", "/mixer/aux/mv/layout", {"layout": "source_pages"}),
     ("PUT", "/mixer/aux/mv/page", {}),
     ("PUT", "/mixer/aux/mv/page", {"page": 1, "step": 1}),
+    ("PUT", "/mixer/sources/cam1", {}),
+    ("PUT", "/mixer/sources/cam1", {"url": "", "loop": True}),
+    ("PUT", "/mixer/sources/cam1", {"url": "file:///a.mp4", "loop": 1}),
     ("PATCH", "/mixer/audio/gains", {"gains": {}}),
     ("PATCH", "/mixer/audio/gains", {"gains": {"cam1": 11}}),
     ("PATCH", "/mixer/audio/processors/program/duck", {}),

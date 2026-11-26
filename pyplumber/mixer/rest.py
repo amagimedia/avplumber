@@ -264,6 +264,21 @@ class AuxPage(Request):
         return self
 
 
+# --- Sources ---
+
+class SourceSet(Request):
+    """Repoint a wired file / live video (or NDI) source: stop its group safely, set URL and loop,
+    restart. Browser, raw, MXL and VMM pads refuse the command."""
+    url: Annotated[str, Field(min_length=1)]
+    loop: bool
+
+
+class SourceSetResult(Reply):
+    id: str
+    url: str
+    loop: bool
+
+
 # --- Audio ---
 
 GainDb = Annotated[float, Field(ge=DB_MIN, le=DB_MAX)]
@@ -433,6 +448,13 @@ def mixer_router(bridge: MixerBridge, *, on_aux_change: Callable[[str, dict], No
     def turn_aux_page(bus: str, request: AuxPage):
         """Show a page of a bus whose layout pages through the sources."""
         return aux("aux_page", bus, request)
+
+    # --- Sources ---
+
+    @router.put("/sources/{source_id}", response_model=SourceSetResult)
+    def set_source(source_id: str, request: SourceSet):
+        """Change the URL and loop of an existing show source pad without EOS killing the mixer."""
+        return send("source.set", request, id=source_id, mixer=bridge.mixer)
 
     # --- Audio ---
 
