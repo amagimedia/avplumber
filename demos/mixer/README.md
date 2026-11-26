@@ -11,6 +11,12 @@ Cut/Fade/media wipes, downstream keys and AUX monitors. Video only.
 [HTML cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/) ·
 [Configuration](docs/config.md) · [Run manually](docs/guide.md)
 
+### On a desktop
+
+1. Start the demo with `./demos/mixer/desktop.sh` from the checkout. Open [Setup](http://127.0.0.1:7681/setup/) to watch the first build’s media preparation. To change the show, choose its size, sources and outputs, then select **Apply setup**. Applying pauses output while the mixer prepares and restarts.
+2. When Setup says **Mixer ready**, open the [main mixer controls](http://127.0.0.1:7681/). Select a scene on Preview, then use **Cut** or **Fade** to take it to Program. Open [Outputs](http://127.0.0.1:7681/wall) to see the output feeds together.
+3. Open **Graph** from the controls to inspect the live nodes and queues. The bottom of the graph shows aggregate frame traffic across queues (one frame can cross several queues) and the Program compositor’s draw time in milliseconds. Compare the mean, p95 and p99 with the frame period. Timing appears once the compositor publishes its first samples. [Live graph](http://127.0.0.1:7681/graph/)
+
 Captured 2026-10-28 on the 192-input develop show: 105 NVDEC videos, 36 browser scene
 sources, 47 raw NV12 feeds and four browser keys, with 256 scenes and 24 encoded outputs
 at 1920×1080p30 SDR on one NVIDIA L4. All four keys are enabled.

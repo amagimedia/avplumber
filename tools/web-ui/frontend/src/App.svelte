@@ -182,6 +182,7 @@
     instanceGeneration += 1;
     for (const request of pending.values()) request.reject(new Error('Instance changed'));
     pending.clear();
+    compose = composePrev = null;
     queuesFresh = false;
     queuesObservedAt = 0;
     queuesInstance = null;
@@ -206,6 +207,7 @@
     };
     ws.onclose = () => {
       wsConnected = false;
+      invalidateInstanceRequests();
       setTimeout(connectWs, 2000);
     };
     ws.onerror = () => {
@@ -324,7 +326,8 @@
   }
 
   function refreshNodes() {
-    sendCommand('nodes.json', 'nodes.json').catch(() => {});
+    if (![...pending.values()].some(request => request.kind === 'nodes.json'))
+      sendCommand('nodes.json', 'nodes.json').catch(() => {});
   }
   function refreshQueues() {
     sendCommand('queues.json', 'queues.json').catch(() => {});
@@ -353,6 +356,8 @@
       const status = JSON.parse(resp.body || '{}'), slot = status.pgm_slot, draw = status.playout?.[slot]?.timing?.draw;
       if (!draw?.count) { compose = null; return; }
       const now = { slot, count: draw.count, sum: draw.mean_ms * draw.count };
+      // Counters publish every 60 frames. Two polls can observe the same snapshot.
+      if (compose && composePrev?.slot === slot && composePrev.count === now.count) return;
       const prev = composePrev?.slot === slot && now.count > composePrev.count ? composePrev : null;  // not across a cut or a counter reset
       compose = { ms: prev ? (now.sum - prev.sum) / (now.count - prev.count) : draw.mean_ms,
                   p95Ms: draw.p95_ms ?? null, p99Ms: draw.p99_ms ?? null, recent: draw.recent ?? 0,
@@ -436,7 +441,11 @@
       if (!autoRefreshNodeObjects) return;
       refreshNodeObjects();
     }, nodeObjectsRefreshMs);
-    const tCompose = setInterval(refreshCompose, 2000);
+    const tCompose = setInterval(() => {
+      // A desktop tab can connect before the initial graph is available.
+      if (wsConnected && currentInstanceId && !nodes.length) refreshNodes();
+      refreshCompose();
+    }, 2000);
 
     const tISOs = setInterval(() => {
       if (!autoRefreshISOs) return;
@@ -586,7 +595,8 @@
     queueStatsFresh,
     selected,
     setSelected,
-    compose,
+    compose: wsConnected ? compose : null,
+    mixerName,
 
     objectNamesByType,
     nodeObjects,

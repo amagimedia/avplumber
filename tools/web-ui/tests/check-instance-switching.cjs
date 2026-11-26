@@ -9,9 +9,11 @@ const { WebSocketServer } = require('../node_modules/ws');
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const root = path.resolve(__dirname, '../frontend/dist');
 const instances = ['a', 'b'].map(id => ({ id, name: id, host: '127.0.0.1', port: 1 }));
-const nodes = source => [{ name: 'shared', type: 'input', params: { source } },
-  ...(source === 'old' ? [{ name: 'old_extra', type: 'null', params: {} }] : [])];
-const queue = source => [{ name: `${source}_queue`, type: 'video', occupied: 1, capacity: 3 }];
+const nodes = source => [{ name: 'shared', type: 'input', params: { source, dst: source + '_queue' } },
+  ...(source === 'old' ? [{ name: 'old_extra', type: 'mixer_compositor', params: { mixer: 'demo', src: 'old_queue' } }] : [])];
+const queue = source => [{ name: `${source}_queue`, type: 'av::VideoFrame', occupied: 1, capacity: 3, pps: 25 },
+  {name: 'browser_import', type: 'EglImageFrame', pps: 10}, {name: 'audio', type: 'av::AudioSamples', pps: 50}];
+let startupGraphReady = false, timingReady = false;
 let registry = instances, initialReplies = true, socket, connections = 0;
 const requests = [], errors = [], prefix = '/graph';
 const server = http.createServer((req, res) => {
@@ -40,7 +42,9 @@ backend.on('connection', (client, req) => {
     const request = JSON.parse(data);
     requests.push(request);
     if (initialReplies && request.instanceId === 'a') {
-      reply(request, request.command === 'nodes.json' ? nodes('old') :
+      reply(request, request.command === 'nodes.json' ? (startupGraphReady ? nodes('old') : []) :
+        request.command === 'mixer.status demo' ? { pgm_slot: 'A', playout: { A: { timing: { period_ms: 40,
+          draw: { count: timingReady ? 60 : 0, mean_ms: 2, p95_ms: 3, p99_ms: 4, max_ms: 5, recent: 60 } } } } } :
         request.command === 'queues.json' ? queue('old') : []);
     }
   });
@@ -86,7 +90,14 @@ backend.on('connection', (client, req) => {
     const selectedEmpty = () => evaluate(`document.querySelector('main').dataset.selected === ''`);
     const findRequest = (from, instance, command) => requests.slice(from).find(r => r.instanceId === instance && r.command === command);
     await call('Runtime.enable');
+    await until(() => findRequest(0, 'a', 'nodes.json'));
+    startupGraphReady = true;
     await until(async () => await count() === 2);
+    const hud = () => evaluate("document.querySelector('.gv-hud')?.innerText.replace(/\\s+/g, ' ') || ''");
+    await until(async () => (await hud()).includes('waiting for timing samples'));
+    timingReady = true;
+    await until(async () => /Program compose mean 2.0\s*· p95 3.0 · p99 4.0 \/ 40.0 ms/.test(await hud())).catch(async error => { throw new Error(await hud(), {cause: error}); });
+    assert.match(await hud(), /Queue traffic 35 frames\/s/);
     // Select a node from the Nodes page: the row opens it in the graph.
     await evaluate(`location.hash = 'nodes'`);
     await until(async () => await evaluate(`!!document.querySelector('tr[data-node="shared"]')`));
