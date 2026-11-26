@@ -36,14 +36,23 @@ protected:
     }
     void createResampler() {
         av::Dictionary opts;
-        //av_dict_set_int(opts.rawPtr(), "async", comp_samp_, 0);
-        opts["async"].set(std::to_string(comp_samp_));
+        // comp_samp_ != 0 selects the adaptive path: async=1 enables the timestamp
+        // machinery, but soft stretch/squeeze stays disabled unless max_soft_comp is
+        // set (the default is 0). Without these four options swr_next_pts only does a
+        // hard fill/trim above min_hard_comp, so ordinary drift accumulates.
+        opts["async"].set(comp_samp_ != 0 ? "1" : "0");
+        if (comp_samp_ != 0) {
+            opts["min_comp"].set("0.001");          // start correcting above 1 ms
+            opts["min_hard_comp"].set("1.0");       // only jump for a >= 1 s error
+            opts["comp_duration"].set("1.0");       // spread over one second
+            opts["max_soft_comp"].set("0.01");      // at most 10 ms per second
+        }
         opts["dither_method"].set("triangular");
-        //opts["min_comp"].set("0.001");
-        //opts["min_hard_comp"].set("1.0");
-        //opts["comp_duration"].set("1.0");
-        //opts["max_soft_comp"].set("10000.0");
         logstream << "Creating resampler with async=" << opts["async"].value();
+        if (comp_samp_ != 0) {
+            logstream << " (max_soft_comp=" << opts["max_soft_comp"].value()
+                      << ", comp_duration=" << opts["comp_duration"].value() << ")";
+        }
         if (inside_resampler_.timestamp() != 0) {
             logstream << "Discarding " << inside_resampler_ << " = " << inside_resampler_.seconds() << "s inside resampler";
         }
