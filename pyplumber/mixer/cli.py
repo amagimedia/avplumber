@@ -10,13 +10,14 @@ from __future__ import annotations
 import argparse
 from contextlib import ExitStack
 import logging
+import os
 import time
 from dataclasses import dataclass
 from fractions import Fraction
 
 from pyplumber.jsonlog import configure_logging
 from pyplumber.mixer.application import (
-    DEFAULT_FPS, HWACCEL, ROUTER_GROUP, JANUS_DEFAULT_HOST, JANUS_DEFAULT_VIDEO_PORT, JANUS_DEFAULT_VIDEO_PT,
+    DEFAULT_FPS, HWACCEL, OUTPUT_GROUP, ROUTER_GROUP, JANUS_DEFAULT_HOST, JANUS_DEFAULT_VIDEO_PORT, JANUS_DEFAULT_VIDEO_PT,
     JANUS_DEFAULT_VIDEO_SSRC, JANUS_DEFAULT_VIDEO_BITRATE_KBPS,
     MixerOptions, MixerApplication, load_avp_api, run_application, _input_group, _pacing_loop, _init_avp, _make_builder, _flag_renditions,
     _build_renditions, _application, build_application as build_config_application,
@@ -202,7 +203,12 @@ def _build(options: GraphOptions, api, on_error: ExitStack) -> MixerApplication:
                                       color=options.input_color)
     _define_scenes(mixer, len(input_edges), routed_inputs)
     mixer.set_initial_scene("fullscreen_0", slot="A")
-    listener = _build_renditions(avp, api, options, _flag_renditions(options, *canvas), mixer.build(),
+    program = mixer.build()
+    if options.dmabuf_monitor_dir:
+        from .dmabuf_outputs import tap_monitor
+        program = tap_monitor(avp, api, mixer.backend, options.dmabuf_monitor_dir, "program", program,
+                              mixer.color, options.working_format, OUTPUT_GROUP, HWACCEL)
+    listener = _build_renditions(avp, api, options, _flag_renditions(options, *canvas), program,
                                  canvas=canvas, working_format=options.working_format, backend=mixer.backend)
     return _application(avp, mixer, options, input_edges, listener, routed_inputs=routed_inputs,
                         compositor_inputs=() if routed_inputs else tuple((i,) for i in range(len(input_edges))),
@@ -238,6 +244,8 @@ def parse_args(argv: list[str] | None = None) -> GraphOptions:
         f"(default: {mixer_config.DEFAULT_MAX_COMPOSITOR_LAYERS})")
     add("--loop-inputs", action="store_true")
     add("--remote-control-port", type=int, default=7777)
+    add("--dmabuf-monitor-dir", default=os.environ.get("MIXER_DMABUF_MONITOR_DIR", ""), metavar="DIR",
+        help="Publish local Program and configured AUX GPU textures in this existing socket directory")
     add("--dmabuf-socket-dir", default="/tmp/dma-page",
         help="dma-browser socket directory for dmabuf://<window-id> inputs")
     add("--dmabuf-size", default="1920x1080", metavar="WxH",

@@ -104,9 +104,16 @@ function tile(o) {
   screen.className = "screen";
   if (o.unplayable) screen.append(Object.assign(document.createElement("p"), {textContent: "This browser cannot play H.265"}));
   else {
-    const frame = Object.assign(document.createElement("iframe"), {src: o.url, title: o.label, tabIndex: -1});
-    frame.setAttribute("allow", "autoplay");
-    frame.style.setProperty("--chrome", `${o.chrome}px`);
+    const frame = monitorSurface();
+    frame.title = o.label;
+    selectMonitor(frame, o);
+    if (localMonitors) {
+      const status = document.createElement("small");
+      const showStatus = () => { status.textContent = frame.dataset.status || "Waiting for local video"; };
+      new MutationObserver(showStatus).observe(frame, {attributes: true, attributeFilter: ["data-status"]});
+      showStatus();
+      cap.append(status);
+    } else frame.style.setProperty("--chrome", `${o.chrome}px`);
     screen.append(frame);
     if (o.audio) cap.append(muteButton(frame));
   }

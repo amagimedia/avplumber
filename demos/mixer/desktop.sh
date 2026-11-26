@@ -8,12 +8,19 @@ export MIXER_INSTANCE_TYPE=geforce
 export WITH_MXL="${WITH_MXL:-0}"
 export MIXER_STACK_ENV_FILE=/dev/null
 export MIXER_MEDIA_DIR="${MIXER_MEDIA_DIR:-$repo/media/desktop}"
+# The host UID owns the directory. The mixer container creates the socket files.
+export MIXER_DMABUF_MONITOR_DIR=/media/.desktop-monitors
+export MIXER_MONITOR_DIR="$MIXER_MEDIA_DIR/.desktop-monitors"
 export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-avplumber-mixer-desktop}"
 export MIXER_IMAGE_PREFIX="${MIXER_IMAGE_PREFIX:-avplumber-mixer-desktop}"
 # The page has no password: only this machine reaches it unless MIXER_PUBLIC_BIND=0.0.0.0.
 export MIXER_PUBLIC_BIND="${MIXER_PUBLIC_BIND:-127.0.0.1}"
 
 fail() { echo "Desktop mixer: $*" >&2; exit 1; }
+
+source "$repo/demos/mixer/desktop/session.sh"
+export MIXER_DESKTOP_GUI_COMPOSE=1
+export MIXER_GUI_SECCOMP="$repo/demos/mixer/desktop/seccomp/chromium.json"
 
 check_host() {
     # Driver R615+, NVDEC/NVENC, EGL/GBM, modeset, Docker, Compose and the NVIDIA runtime, each with its fix.
@@ -49,14 +56,32 @@ check_host() {
 }
 
 case "${1:-}" in
+    app)
+        check_host
+        configure_gui on
+        mkdir -p -m 700 "$MIXER_MONITOR_DIR"
+        "$stack" build desktop-gui
+        exec "$stack" up -d --no-deps desktop-gui
+        ;;
     check) check_host; "$stack" config --quiet ;;
     smoke) check_host; exec "$stack" "$@" ;;
     "")
         check_host
+        mkdir -p -m 700 "$MIXER_MONITOR_DIR"
+        if configure_gui "${MIXER_DESKTOP_UI:-auto}"; then
+            export COMPOSE_PROFILES="${COMPOSE_PROFILES:+$COMPOSE_PROFILES,}desktop-gui"
+            echo "Opening the mixer on the local $MIXER_GUI_PLATFORM desktop."
+        fi
         "$stack" build
         "$stack" up -d --no-build
+        if [[ -n ${MIXER_GUI_PLATFORM:-} && ${COMPOSE_PROFILES:-} == *desktop-gui* ]]; then
+            echo "Use Mixer → Setup for settings and Window → Processing Graph for live timing."
+        else
+            echo "To attach the desktop app later, run ./demos/mixer/desktop.sh app from a graphical login."
+        fi
         echo "Open http://127.0.0.1:${MIXER_PUBLIC_PORT:-7681}/setup/ for media preparation and mixer status."
         ;;
-    up|start|restart|run) check_host; exec "$stack" "$@" ;;
+    up|start|restart|run) check_host; mkdir -p -m 700 "$MIXER_MONITOR_DIR"; exec "$stack" "$@" ;;
+    down|stop) exec "$stack" --profile desktop-gui "$@" ;;
     *) exec "$stack" "$@" ;;
 esac

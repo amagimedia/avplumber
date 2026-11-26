@@ -1,5 +1,6 @@
 #include "../node_common.hpp"
 #include "CudaVmmFrames.hpp"
+#include "UnixPacketSocket.hpp"
 #include "../../cuda.hpp"
 
 extern "C" {
@@ -32,22 +33,7 @@ constexpr size_t max_message = 8192;
 constexpr size_t max_slots = 32;
 constexpr size_t max_slot_bytes = 256 * 1024 * 1024;
 
-class Fd {
-    int fd_ = -1;
-
-public:
-    Fd() = default;
-    explicit Fd(int fd) : fd_(fd) {}
-    Fd(Fd &&other) noexcept : fd_(std::exchange(other.fd_, -1)) {}
-    Fd &operator=(Fd &&other) noexcept {
-        Fd old(std::move(*this));
-        fd_ = std::exchange(other.fd_, -1);
-        return *this;
-    }
-    ~Fd() { if (fd_ >= 0) close(fd_); }
-    int get() const { return fd_; }
-    explicit operator bool() const { return fd_ >= 0; }
-};
+using namespace avp::ipc;
 
 AVCUDADeviceContext *cudaDevice(HWAccelDevice &device) {
     const auto *context = reinterpret_cast<const AVHWDeviceContext *>(device.deviceContext()->data);
@@ -131,21 +117,6 @@ struct Layout {
         return result;
     }
 };
-
-sockaddr_un socketAddress(const std::string &path) {
-    sockaddr_un address{};
-    address.sun_family = AF_UNIX;
-    if (path.empty() || path.front() != '/' || path.size() >= sizeof(address.sun_path))
-        throw Error("cuda_ipc: socket must be a short absolute path");
-    std::memcpy(address.sun_path, path.c_str(), path.size() + 1);
-    return address;
-}
-
-Fd endpoint() {
-    Fd result(socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK, 0));
-    if (!result) throw Error("cuda_ipc: cannot create Unix socket");
-    return result;
-}
 
 struct Message {
     Parameters body;
@@ -364,15 +335,12 @@ using namespace avp::vmm;
 class CudaIpcSink : public NodeSingleInput<av::VideoFrame>, public ReportsFinishByFlag, public IReturnsObjects {
     std::shared_ptr<HWAccelDevice> device_;
     DeviceUuid uuid_;
-    std::string path_;
-    Fd lock_;
-    Fd listener_;
+    PacketListener listener_;
     Fd peer_;
     std::shared_ptr<ExportGeneration> pool_;
     std::vector<std::pair<uint64_t, av::VideoFrame>> outstanding_;
     uint64_t generation_ = 0, sequence_ = 0;
     std::atomic<uint64_t> published_{0}, dropped_{0}, released_{0}, disconnects_{0};
-    bool bound_ = false;
 
     void retire() {
         if (peer_) ++disconnects_;
@@ -436,7 +404,7 @@ class CudaIpcSink : public NodeSingleInput<av::VideoFrame>, public ReportsFinish
     }
 
     void pollPeer() {
-        if (!peer_) peer_ = Fd(accept4(listener_.get(), nullptr, nullptr, SOCK_CLOEXEC | SOCK_NONBLOCK));
+        if (!peer_) peer_ = listener_.acceptPeer();
         if (!peer_) return;
         for (size_t i = 0; i < max_slots; ++i) {
             auto msg = receive(peer_);
@@ -455,31 +423,12 @@ class CudaIpcSink : public NodeSingleInput<av::VideoFrame>, public ReportsFinish
 public:
     CudaIpcSink(std::unique_ptr<SourceType> source, std::shared_ptr<HWAccelDevice> device, std::string path)
         : NodeSingleInput(std::move(source)), device_(std::move(device)),
-          uuid_(deviceUuid(cudaDevice(*device_)->cuda_ctx)), path_(std::move(path)), listener_(endpoint()) {
-        const auto address = socketAddress(path_);
-        lock_ = Fd(open((path_ + ".lock").c_str(), O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600));
-        if (!lock_ || flock(lock_.get(), LOCK_EX | LOCK_NB) != 0)
-            throw Error("cuda_ipc_sink: socket is already owned: " + path_);
-        struct stat existing{};
-        if (lstat(path_.c_str(), &existing) == 0 && S_ISSOCK(existing.st_mode)) {
-            auto probe = endpoint();
-            if (connect(probe.get(), reinterpret_cast<const sockaddr *>(&address), sizeof(address)) < 0 &&
-                errno == ECONNREFUSED)
-                unlink(path_.c_str());
-        }
-        if (bind(listener_.get(), reinterpret_cast<const sockaddr *>(&address), sizeof(address)) != 0)
-            throw Error("cuda_ipc_sink: bind " + path_ + ": " + std::strerror(errno));
-        bound_ = true;
-        if (listen(listener_.get(), 1) != 0) {
-            unlink(path_.c_str());
-            throw Error("cuda_ipc_sink: listen failed");
-        }
+          uuid_(deviceUuid(cudaDevice(*device_)->cuda_ctx)), listener_(std::move(path)) {
         auto_eof_ = false;
     }
 
     ~CudaIpcSink() override {
         retire();
-        if (bound_) unlink(path_.c_str());
     }
 
     void process() override {

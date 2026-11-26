@@ -62,6 +62,10 @@ if [[ $1 == up && $MIXER_INSTANCE_TYPE == nvidia_l4_cuarray ]] && command -v nvi
             "'sudo nvidia-smi compute-policy --set-timeslice=3' (README.md)" >&2
     fi
 fi
+desktop_compose=()
+if [[ ${MIXER_DESKTOP_GUI_COMPOSE:-0} == 1 ]]; then
+    desktop_compose=(-f "$repo/demos/mixer/desktop/compose.yaml")
+fi
 ndi_compose=()
 case "${ENABLE_NDI:-0}" in
     0) ;;
@@ -74,4 +78,4 @@ if [[ $1 == smoke ]]; then
         --entrypoint sh mixer /smoke/smoke_portable_mixer.sh
 fi
 exec docker compose --env-file /dev/null --project-directory "$repo/docker-compose/mixer" \
-    -f "$repo/docker-compose/mixer/compose.yaml" -f "$here/compose.yaml" "${ndi_compose[@]}" "$@"
+    -f "$repo/docker-compose/mixer/compose.yaml" -f "$here/compose.yaml" "${ndi_compose[@]}" "${desktop_compose[@]}" "$@"

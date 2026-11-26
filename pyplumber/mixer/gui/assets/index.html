@@ -486,7 +486,7 @@
   <div class="tools">
     <span class="seg small" id="viewer-count" role="group" aria-label="Number of viewers"><button type="button" data-n="1">1</button><button type="button" data-n="2">2</button></span>
     <span class="keyhint" id="hint" tabindex="0" aria-label="Keyboard shortcuts">⌨</span>
-    <nav class="links"><a href="/wall" target="_blank" rel="noopener" title="Every output side by side in a new tab">Outputs ↗</a><a href="/levels" target="_blank" rel="noopener" title="Per-source audio levels in a new tab">Levels ↗</a><a id="graph-link" target="_blank" rel="noopener" title="The processing graph in a new tab" hidden>Graph ↗</a><a id="setup-link" href="/setup/" hidden>Setup</a></nav>
+    <nav class="links"><a href="/wall" target="_blank" rel="noopener" title="Every output side by side">Outputs ↗</a><a href="/levels" target="_blank" rel="noopener" title="Per-source audio levels">Levels ↗</a><a id="graph-link" target="_blank" rel="noopener" title="The processing graph" hidden>Graph ↗</a><a id="setup-link" href="/setup/" hidden>Setup</a></nav>
   </div>
 </header>
 
@@ -2129,10 +2129,8 @@ function addViewer(out) {
   v.close.onclick = () => { viewersTouched = true; closedOut = null; viewers.splice(viewers.indexOf(v), 1); v.el.remove(); saveViewers(); redraw(); };
   v.head.append(v.tally, v.dd.root, el("span", "edit-mark", "· slots"), v.layouts.root, v.pager, el("span", "sp"), v.mute, v.open, v.close);
   v.screen = el("div", "screen");
-  v.frame = el("iframe");
-  v.frame.setAttribute("allow", "autoplay; fullscreen; picture-in-picture");
-  v.frame.allowFullscreen = true;
-  v.frame.tabIndex = -1;   // like the click layer: Tab would reach the player's controls and end the shortcuts
+  v.frame = monitorSurface();
+  if (!localMonitors) v.frame.allowFullscreen = true;
   v.ovl = el("div", "ovl");
   v.fit = el("div", "fit");
   v.fit.append(v.frame, v.ovl);
@@ -2169,7 +2167,7 @@ function refreshViewer(v, options) {
   v.dd.setOptions(options);
   v.dd.set(opt.value);
   v.tally.style.setProperty("--tally", opt.dot);
-  v.frame.style.setProperty("--chrome", `${opt.chrome}px`);
+  if (!localMonitors) v.frame.style.setProperty("--chrome", `${opt.chrome}px`);
   v.frame.title = opt.label;
   v.screen.setAttribute("aria-label", `${opt.label}: full screen`);
   v.screen.style.setProperty("--ar", `${size[0]} / ${size[1]}`);
@@ -2184,16 +2182,16 @@ function refreshViewer(v, options) {
   // A viewer hidden for lack of room drops its stream.
   // Only the program output that carries the show's audio (settings program_outputs) offers the mute.
   v.mute.hidden = !opt.audio;
-  const src = !v.el.hidden && !opt.unplayable && (state || isProgramValue(v.out)) ? opt.url : "";
+  const src = !v.el.hidden && !opt.unplayable && (state || isProgramValue(v.out)) ? (localMonitors ? opt.value : opt.url) : "";
   if (v.src !== src) {
-    v.src = src; v.stats = null; v.frame.src = src || "about:blank"; v.frame.hidden = !src;   // about:blank is white
+    v.src = src; v.stats = null; selectMonitor(v.frame, src ? opt : null); v.frame.hidden = !src;   // about:blank is white
     renderStream(v);   // a new source drops the previous one's stats
     // A new src reloads the iframe, resetting the player's <video> to its HTML-default muted="true";
     // re-send the last choice once that fresh document is up.
-    if (src) v.frame.addEventListener("load", () => v.setMuted(v.muted), {once: true});
+    if (!localMonitors && src) v.frame.addEventListener("load", () => v.setMuted(v.muted), {once: true});
   }
-  v.open.href = opt.url;
-  v.open.hidden = !src;
+  if (!localMonitors) v.open.href = opt.url;
+  v.open.hidden = localMonitors || !src;
 }
 // A bus that offers more than one layout gets a menu of them in its viewer's header.
 function renderLayouts(v, aux) {
@@ -2374,6 +2372,10 @@ function showStat(m, value, unit, coloured) {
   if (coloured) b.className = LEVEL_CLASS[streamLevel(n)] || "";
 }
 function renderStream(v) {
+  if (localMonitors) {
+    v.statsRow.textContent = v.frame.dataset.status || "Waiting for local video";
+    return;
+  }
   const data = fresh(v.stats);
   const status = !data ? "No stats from its player in the last 3 s" : typeof data.status === "string" ? data.status : "";
   showStat(v.meters.rtt, data?.rtt_ms, "ms", true);

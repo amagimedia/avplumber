@@ -140,6 +140,7 @@ class MixerOptions:
     build_audio_mixer: bool = True
     cuda_ipc_inputs: tuple[tuple[str, str], ...] = ()
     cuda_ipc_output: str = ""
+    dmabuf_monitor_dir: str = ""
     cuda_ipc_slots: int = 12
 
     def __post_init__(self):
@@ -673,6 +674,7 @@ def load_avp_api():
         Input,
         InputRec,
         IpcDmabufSource,
+        IpcDmabufSink,
         MixerCompositor,
         MixerKeyer,
         MixerDelivery,
@@ -714,6 +716,7 @@ def load_avp_api():
         Input=Input,
         InputRec=InputRec,
         IpcDmabufSource=IpcDmabufSource,
+        IpcDmabufSink=IpcDmabufSink,
         MixerCompositor=MixerCompositor,
         MixerKeyer=MixerKeyer,
         MixerDelivery=MixerDelivery,
@@ -1256,6 +1259,16 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
             "group": OUTPUT_GROUP,
         }))
         feeds["dirty"] = tapped
+    if options.dmabuf_monitor_dir:
+        from .dmabuf_outputs import tap_monitor
+        for feed in ("dirty", "clean"):
+            if feed == "clean" and not (keyer and any(r.feed == "clean" for r in renditions)):
+                continue
+            edge = feeds[feed]
+            tapped = tap_monitor(avp, api, mixer.backend, options.dmabuf_monitor_dir,
+                                 "program" if feed == "dirty" else "clean", edge, cfg.out_color,
+                                 cfg.working_format, OUTPUT_GROUP, HWACCEL)
+            feeds = {name: tapped if src == edge else src for name, src in feeds.items()}
     if aux:
         for bus in aux:
             bus.build(options)

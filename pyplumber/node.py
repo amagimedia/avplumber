@@ -188,6 +188,10 @@ class IpcDmabufSource(InternalNode):
     TYPE = "ipc_dmabuf_source"
 
 
+class IpcDmabufSink(InternalNode):
+    TYPE = "ipc_dmabuf_sink"
+
+
 class DrmPrimeToCuda(InternalNode):
     TYPE = "drm_prime_to_cuda"
 

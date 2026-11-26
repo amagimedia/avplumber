@@ -6,6 +6,19 @@ const canvasText = (c) => `${c.width}×${c.height}p${c.fps}`;
 const formatName = (c) => ({nv12: "SDR 4:2:0", nv16: "SDR 4:2:2", p010le: "HDR 4:2:0", p210le: "HDR 4:2:2"})[c.working_format] || "HDR";
 const formatText = (c) => c ? `${canvasText(c)} ${formatName(c)}` : "";
 
+// The host app's preload installs this flag before the shared pages run.
+const localMonitors = globalThis.mixerDesktop === true;
+function monitorSurface() {
+  const frame = document.createElement(localMonitors ? "canvas" : "iframe");
+  frame.tabIndex = -1;
+  if (localMonitors) frame.style.cssText = "width:100%;height:100%;object-fit:contain";
+  else frame.setAttribute("allow", "autoplay; fullscreen; picture-in-picture");
+  return frame;
+}
+function selectMonitor(frame, option) {
+  if (localMonitors) frame.dataset.feed = option?.feed || "";
+  else frame.src = option?.url || "about:blank";
+}
 const query = new URLSearchParams(location.search);
 // Where the player is, for every output's URL: the backend's --preview-base (a path on this origin,
 // such as /preview/ behind a reverse proxy, or a URL), else port 8080 of this host. ?preview_port=
@@ -52,6 +65,8 @@ function playerUrl(output, codec, codecs) {
 // Older settings publish only codecs and conventionally assign H.265 to HDR.
 const RANGE_OF_CODEC = {h264: "SDR", h265: "HDR"};
 function programOptions(s, keys) {
+  if (localMonitors) return [{value: "program", group: "Program", program: true, feed: "program", preferred: true,
+    label: keys ? "Program dirty" : "Program", dot: "var(--pgm)", meta: formatText(s.canvas)}];
   if (s.program_outputs?.length) {
     const outputs = s.program_outputs, name = keys ? "Program dirty" : "Program";
     const preferred = outputs.find(o => o.codec === query.get("codec") && playable(o.codec)) ||
@@ -81,7 +96,7 @@ function programOptions(s, keys) {
   }));
 }
 // A preview output, the clean feed or an aux bus: an H.264 or H.265 mountpoint of its own.
-const previewOption = (o) => ({value: o.bus, label: o.label || o.bus, url: playerUrl(o), chrome: 49, unplayable: !playable(o.codec), audio: !!o.audio});
+const previewOption = (o) => localMonitors ? {value: o.bus, feed: o.layout ? "aux_" + o.bus : "clean", label: o.label || o.bus} : ({value: o.bus, label: o.label || o.bus, url: playerUrl(o), chrome: 49, unplayable: !playable(o.codec), audio: !!o.audio});
 // Canvas pixels of an output: an aux bus reports its own, the program has the mixer's.
 function canvasSize(s, aux) {
   const c = s.canvas;

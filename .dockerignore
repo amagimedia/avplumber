@@ -26,6 +26,7 @@ deps/cpr/build/
 deps/cpr/nuget/build/
 deps/avcpp/build/
 deps/concurrentqueue/build/
+demos/mixer/desktop/
 deps/dma-browser/node_modules/
 deps/dma-browser/dist/
 deps/dma-browser/addons/fdpass/build/

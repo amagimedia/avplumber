@@ -1,0 +1,38 @@
+services:
+  desktop-gui:
+    profiles: [desktop-gui]
+    image: ${MIXER_IMAGE_PREFIX:-avplumber-mixer-desktop}-gui:${MIXER_RELEASE}
+    build:
+      context: ../../demos/mixer/desktop
+      additional_contexts:
+        browser-runtime: service:dma-browser
+        source-tree: ../..
+    init: true
+    # Chromium needs clone/setns/unshare to create its sandbox inside Docker.
+    # Upstream: microsoft/playwright v1.60.0, utils/docker/seccomp_profile.json.
+    security_opt:
+      - seccomp=${MIXER_GUI_SECCOMP:-../../demos/mixer/desktop/seccomp/chromium.json}
+    network_mode: host
+    gpus: all
+    runtime: nvidia
+    devices:
+      - ${WLR_RENDER_DRM_DEVICE:-/dev/dri/renderD128}:${WLR_RENDER_DRM_DEVICE:-/dev/dri/renderD128}
+    group_add: ["${MIXER_GUI_RENDER_GID:-65534}"]
+    user: "${MIXER_GUI_UID:-1000}:${MIXER_GUI_GID:-1000}"
+    hostname: ${MIXER_GUI_HOSTNAME:-mixer-desktop}
+    shm_size: 256mb
+    environment:
+      HOME: /home/mixer
+      XDG_RUNTIME_DIR: /tmp/mixer-runtime
+      NVIDIA_DRIVER_CAPABILITIES: graphics,display,utility,compute
+      MIXER_PUBLIC_PORT: ${MIXER_PUBLIC_PORT:-7681}
+      MIXER_MONITOR_DIR: /monitors
+      MIXER_GUI_PLATFORM: ${MIXER_GUI_PLATFORM:-wayland}
+      WAYLAND_DISPLAY: ${MIXER_GUI_WAYLAND:-}
+      DISPLAY: ${MIXER_GUI_XDISPLAY:-}
+      XAUTHORITY: /tmp/mixer-display-auth
+    volumes:
+      - ${MIXER_GUI_PROFILE:-./.desktop-profile}:/home/mixer:rw,z
+      - ${MIXER_MONITOR_DIR:-./.desktop-monitors}:/monitors:ro,z
+      - ${MIXER_GUI_DISPLAY_SOURCE:-/dev/null}:${MIXER_GUI_DISPLAY_TARGET:-/tmp/mixer-wayland}:ro
+      - ${MIXER_GUI_AUTH:-/dev/null}:/tmp/mixer-display-auth:ro

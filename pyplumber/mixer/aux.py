@@ -11,6 +11,7 @@ from ..node import InternalNode
 from .aux_layout import (base_composition, base_sources, check_assignments, count, draws_program, layout_cells,
                          page_count, page_grid, parse_layout, pvw_layouts, pvw_sources)
 from .config import ConfigError, rate_number, rate_pair
+from .color import Color
 from . import thumbnail
 
 
@@ -144,6 +145,11 @@ class AuxBus:
                 "graph": self.mixer.backend.conversion("sdr", storage, source=self.cfg.out_color,
                                           source_format=self.cfg.working_format, tonemap=r.tonemap or "clip"),
             }))
+        if getattr(options, "dmabuf_monitor_dir", ""):
+            from .dmabuf_outputs import tap_monitor
+            converted = tap_monitor(self.avp, self.api, self.mixer.backend, options.dmabuf_monitor_dir,
+                                    "aux_" + self.bus.id, converted, Color.parse("sdr"),
+                                    storage, self.group, self.hwaccel)
         if r.target == "mxl":
             from .application import _build_record_output
             _build_record_output(self.avp, self.api, converted, r, codec=r.codec, enc_format=storage, color={},

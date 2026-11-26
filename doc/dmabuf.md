@@ -35,3 +35,24 @@ The mixer samples each imported capture buffer in place; it does not copy it aga
 
 [Runnable mixer](../demos/mixer/README.md) ·
 [HTML cookbook](https://amagimedia.github.io/avplumber/demos/mixer/docs/cookbook/)
+
+## Publishing a CUDA output
+
+`ipc_dmabuf_sink` accepts a CUDA video edge and serves one local client on a Unix
+`SOCK_SEQPACKET` socket. Use an absolute socket path in an existing directory.
+
+```json
+{"type":"ipc_dmabuf_sink","src":"program_sdr","socket":"/tmp/mixer-monitors/program.sock","pool_size":4}
+```
+
+The node converts SDR NV12 or NV16 to a pooled RGBA EGL image on the GPU. It exports
+one DMA-BUF descriptor per frame with the 48-byte `TexInfo` header used by the HTML
+input. The header describes the actual format, pitch, modifier and plane offset.
+Send the 16-byte frame release acknowledgement from `dmabuf_ack.h` after the last
+GPU reader finishes. A full pool drops viewer frames. Disconnecting retires the
+pool. The default socket mode is 0600.
+
+An optional `subscription` names a `one_to_many` subscribed output. The sink
+enables that output while a receiver is connected, so an upstream monitor colour
+conversion can idle between viewers. The desktop mixer uses this for Program
+after keys and transitions, the configured clean feed and each AUX bus.

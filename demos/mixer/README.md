@@ -13,9 +13,14 @@ Cut/Fade/media wipes, downstream keys and AUX monitors. Video only.
 
 ### On a desktop
 
-1. Start the demo with `./demos/mixer/desktop.sh` from the checkout. Open [Setup](http://127.0.0.1:7681/setup/) to watch the first build’s media preparation. To change the show, choose its size, sources and outputs, then select **Apply setup**. Applying pauses output while the mixer prepares and restarts.
-2. When Setup says **Mixer ready**, open the [main mixer controls](http://127.0.0.1:7681/). Select a scene on Preview, then use **Cut** or **Fade** to take it to Program. Open [Outputs](http://127.0.0.1:7681/wall) to see the output feeds together.
-3. Open **Graph** from the controls to inspect the live nodes and queues. The bottom of the graph shows aggregate frame traffic across queues (one frame can cross several queues) and the Program compositor’s draw time in milliseconds. Compare the mean, p95 and p99 with the frame period. Timing appears once the compositor publishes its first samples. [Live graph](http://127.0.0.1:7681/graph/)
+1. Run `./demos/mixer/desktop.sh` from the checkout as your normal user. On a local Linux graphical login with an NVIDIA GPU, the launcher builds and opens the **Mixer** desktop app. First startup opens **Setup** while the demo prepares media. A running show opens directly in **Mixer**.
+2. In **Setup**, choose the sources, canvas and outputs. **Apply setup** pauses output while the mixer prepares the show and restarts. When the status says **Mixer ready**, choose **Open mixer controls**. Select a scene on Preview, then press **C** for Cut or **Space** for the selected transition. The keyboard legend at the top of Mixer lists the other shortcuts.
+3. Open **Graph** from Mixer to inspect the live nodes and queues in a separate window. Its bottom bar shows delivered Program fps, total frame traffic across the queues and the Program compositor’s mean, p95 and p99 draw times once frames are flowing. Compare the draw time with one frame period. **Setup** and **Graph** each reopen their existing window, preserving your settings edits and graph position.
+4. Open **Outputs** for the output wall. In the desktop app, Program and the configured monitoring buses use local GPU textures. Choose the Preview bus to see the scene queued for the next transition. The monitors show SDR video, including for an HDR show. Audio meters and mixer controls remain available. Quitting the GUI leaves the show running. Run `./demos/mixer/desktop.sh app` to reopen it.
+
+**Desktop detection.** Automatic launch requires an active, local graphical login and a usable Wayland or X11 socket. A headless or SSH launch builds the show services only. Set `MIXER_DESKTOP_UI=off` to select this explicitly, or `MIXER_DESKTOP_UI=on` to request the GUI from a graphical session the launcher cannot identify. The headless HTML input service still uses Electron to render pages. The optional GUI container reuses that runtime. The host needs Docker Compose with BuildKit and the NVIDIA Container Toolkit.
+
+**Browser access.** For a headless show, or to operate from the browser, open [Setup](http://127.0.0.1:7681/setup/), then [Mixer](http://127.0.0.1:7681/). Mixer links to [Graph](http://127.0.0.1:7681/graph/) and [Outputs](http://127.0.0.1:7681/wall). Browser players use the configured Janus feeds.
 
 Captured 2026-10-28 on the 192-input develop show: 105 NVDEC videos, 36 browser scene
 sources, 47 raw NV12 feeds and four browser keys, with 256 scenes and 24 encoded outputs

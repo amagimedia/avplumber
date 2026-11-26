@@ -3,7 +3,7 @@
 
 #include "../node_common.hpp"
 #include "../../cuda.hpp"
-#include "../../hwaccel/EglImageFrame.hpp"
+#include "CudaEglFrameRenderer.hpp"
 #include "../../hwaccel/CudaEglImagePool.hpp"
 #include "../../hwaccel/EglImagePoolToken.hpp"
 
@@ -27,29 +27,15 @@
 // PTX blob for the conversion kernels (generated at build time)
 #include "../../../objs/src/nodes/hwaccel/yuv_to_rgba_surface.ptx.h"
 
-static int check_cu(CUresult err, const char *func)
-{
-	if (err == CUDA_SUCCESS) return 0;
-	const char *err_name = nullptr;
-	const char *err_string = nullptr;
-	if (cuGetErrorName && cuGetErrorString) {
-		cuGetErrorName(err, &err_name);
-		cuGetErrorString(err, &err_string);
-	}
-	logstream << "cuda function: " << func << " failed: " << (err_name ? err_name : "?") << ": " << (err_string ? err_string : "?");
-	return -1;
-}
-#define CHECK_CU(x) check_cu((x), #x)
-
-class CudaToEglImage: public NodeSISO<av::VideoFrame, EglImageFrame> {
-protected:
+struct CudaEglFrameRenderer::Impl {
 	// External shared pool
 	std::shared_ptr<CudaEglImagePool> pool_;
-	std::string pool_id_;
 	int pool_size_ = 60; // default; can be overridden by params
 	int pool_max_size_ = 0; // 0 => disabled; if >0, pool may grow up to this size on demand
 	int pool_grow_step_ = 8; // when growing, add this many entries (or less to reach max)
-	bool enable_sync_ = false; // whether to call cuCtxSynchronize after kernel launch
+	Sync sync_ = Sync::Async;
+	CUstream stream_ = nullptr;
+	CUevent input_ready_ = nullptr;
 
 	// CUDA
 	CUcontext cu_ctx_ = nullptr; // adopted from incoming frame
@@ -177,18 +163,28 @@ protected:
 			logstream << "cuda_to_egl_image: cuCtxSetCurrent failed in run_conversion_to_texture";
 			return false;
 		}
-		if (CHECK_CU(cuGraphicsMapResources(1, &cu_tex_res, 0))) {
+		// The bundled driver declarations omit CU_STREAM_NON_BLOCKING (0x1).
+		if (sync_ == Sync::PrivateStream) {
+			if (!stream_ && CHECK_CU(cuStreamCreate(&stream_, 0x1))) return false;
+			if (!input_ready_ && CHECK_CU(cuEventCreate(&input_ready_, CU_EVENT_DISABLE_TIMING))) return false;
+			// FFmpeg may have returned the input with work queued on its device stream.
+			const auto *frames = reinterpret_cast<const AVHWFramesContext *>(frm.raw()->hw_frames_ctx->data);
+			const auto *device = static_cast<const AVCUDADeviceContext *>(frames->device_ctx->hwctx);
+			if (CHECK_CU(cuEventRecord(input_ready_, device->stream)) ||
+			    CHECK_CU(cuStreamWaitEvent(stream_, input_ready_, 0))) return false;
+		}
+		if (CHECK_CU(cuGraphicsMapResources(1, &cu_tex_res, stream_))) {
 			logstream << "cuda_to_egl_image: cuGraphicsMapResources failed";
 			return false;
 		}
 		CUarray cu_arr = nullptr;
 		if (CHECK_CU(cuGraphicsSubResourceGetMappedArray(&cu_arr, cu_tex_res, 0, 0))) {
-			CHECK_CU(cuGraphicsUnmapResources(1, &cu_tex_res, 0));
+			CHECK_CU(cuGraphicsUnmapResources(1, &cu_tex_res, stream_));
 			logstream << "cuda_to_egl_image: cuGraphicsSubResourceGetMappedArray failed";
 			return false;
 		}
 		if (!cuSurfObjectCreate || !cuSurfObjectDestroy) {
-			CHECK_CU(cuGraphicsUnmapResources(1, &cu_tex_res, 0));
+			CHECK_CU(cuGraphicsUnmapResources(1, &cu_tex_res, stream_));
 			logstream << "cuda_to_egl_image: surface object functions not available";
 			return false;
 		}
@@ -197,7 +193,7 @@ protected:
 		rdesc.res.array.hArray = cu_arr;
 		CUsurfObject surf = 0;
 		if (CHECK_CU(cuSurfObjectCreate(&surf, &rdesc))) {
-			CHECK_CU(cuGraphicsUnmapResources(1, &cu_tex_res, 0));
+			CHECK_CU(cuGraphicsUnmapResources(1, &cu_tex_res, stream_));
 			logstream << "cuda_to_egl_image: cuSurfObjectCreate failed";
 			return false;
 		}
@@ -210,7 +206,7 @@ protected:
 		if (!ensure_kernel_loaded()) {
 			logstream << "cuda_to_egl_image: ensure_kernel_loaded failed";
 			cuSurfObjectDestroy(surf);
-			CHECK_CU(cuGraphicsUnmapResources(1, &cu_tex_res, 0));
+			CHECK_CU(cuGraphicsUnmapResources(1, &cu_tex_res, stream_));
 			return false;
 		}
 		void* args[] = {
@@ -245,38 +241,29 @@ protected:
 		if (CHECK_CU(cuLaunchKernel(kfun,
 		                            gridX, gridY, 1,
 		                            blockX, blockY, 1,
-		                            0, 0, args, nullptr))) {
+		                            0, stream_, args, nullptr))) {
 			logstream << "cuda_to_egl_image: cuLaunchKernel failed";
 			cuSurfObjectDestroy(surf);
-			CHECK_CU(cuGraphicsUnmapResources(1, &cu_tex_res, 0));
+			CHECK_CU(cuGraphicsUnmapResources(1, &cu_tex_res, stream_));
 			return false;
 		}
 		// Ensure all writes to the surface are visible before releasing the resource
-		if (enable_sync_ && CHECK_CU(cuCtxSynchronize())) {
+		if (sync_ == Sync::Context && CHECK_CU(cuCtxSynchronize())) {
 			logstream << "cuda_to_egl_image: cuCtxSynchronize failed after cuLaunchKernel";
 			cuSurfObjectDestroy(surf);
-			CHECK_CU(cuGraphicsUnmapResources(1, &cu_tex_res, 0));
+			CHECK_CU(cuGraphicsUnmapResources(1, &cu_tex_res, stream_));
 			return false;
 		}
+		// An external DMA-BUF reader cannot see CUDA stream dependencies.
+		bool ok = !CHECK_CU(cuGraphicsUnmapResources(1, &cu_tex_res, stream_));
+		if (stream_ && CHECK_CU(cuStreamSynchronize(stream_))) ok = false;
 		cuSurfObjectDestroy(surf);
-		CHECK_CU(cuGraphicsUnmapResources(1, &cu_tex_res, 0));
-		return true;
+		return ok;
 	}
-public:
-	using NodeSISO<av::VideoFrame, EglImageFrame>::NodeSISO;
-	virtual void process()
-	{
-		// Block until an input frame is available, but keep it in the queue
-		// until we successfully publish the output (use peek/pop pattern).
-		av::VideoFrame *pfrm = this->source_->peek();
-		if (pfrm == nullptr) {
-			return;
-		}
-		av::VideoFrame &frm = *pfrm;
+    Result render(av::VideoFrame &frm, EglImageFrame &out) {
 		if (!frm) {
 			logstream << "cuda_to_egl_image: frame is invalid/null, discarding";
-			this->source_->pop(); // discard
-			return;
+			return Result::Invalid;
 		}
 		// Adopt CUDA context from frame (once)
 		if (!cu_ctx_) {
@@ -293,14 +280,12 @@ public:
 			}
 			if (!cu_ctx_) {
 				logstream << "cuda_to_egl_image: cannot adopt CUDA context from frame";
-				this->source_->pop();
-				return;
+				return Result::Invalid;
 			}
 			// Make the adopted context current for this node's thread
 			if (CHECK_CU(cuCtxSetCurrent(cu_ctx_))) {
 				logstream << "cuda_to_egl_image: cuCtxSetCurrent failed during context adoption";
-				this->source_->pop();
-				return;
+				return Result::Invalid;
 			}
 		}
 		int W = frm.width();
@@ -310,13 +295,11 @@ public:
 		      || swfmt == AV_PIX_FMT_RGBA || swfmt == AV_PIX_FMT_BGRA || swfmt == AV_PIX_FMT_ARGB || swfmt == AV_PIX_FMT_ABGR
 		      || swfmt == AV_PIX_FMT_RGB0 || swfmt == AV_PIX_FMT_BGR0 || swfmt == AV_PIX_FMT_0RGB || swfmt == AV_PIX_FMT_0BGR)) {
 			logstream << "cuda_to_egl_image: unsupported SW pixel format " << swfmt;
-			this->source_->pop();
-			return;
+			return Result::Invalid;
 		}
 		if (!ensure_pool(W, H)) {
 			logstream << "cuda_to_egl_image: ensure_pool failed";
-			this->source_->pop();
-			return;
+			return Result::Invalid;
 		}
 		auto opt_idx = pool_->acquire();
 		if (!opt_idx && pool_max_size_ > 0) {
@@ -324,8 +307,7 @@ public:
 		}
 		if (!opt_idx) {
 			// No available EGL image in the pool yet; keep the input frame and retry shortly
-			wallclock.sleepms(1);
-			return;
+			return Result::Busy;
 		}
 		const size_t idx = *opt_idx;
 		auto &entry = pool_->entry(idx);
@@ -333,8 +315,7 @@ public:
 		if (!ensure_kernel_loaded()) {
 			logstream << "cuda_to_egl_image: ensure_kernel_loaded failed";
 			pool_->release(idx);
-			this->source_->pop();
-			return;
+			return Result::Invalid;
 		}
 		if (!run_conversion_to_texture(frm, swfmt, entry.cu_tex_res, W, H)) {
 			// One recovery attempt: restart can leave CUDA/GL interop state stale for a frame.
@@ -345,8 +326,7 @@ public:
 			} else {
 				logstream << "cuda_to_egl_image: run_conversion_to_texture failed, releasing pool entry";
 				pool_->release(idx);
-				this->source_->pop();
-				return;
+				return Result::Invalid;
 			}
 		}
 		// Create a token (owned by shared_ptr) to release the entry back to pool
@@ -357,17 +337,51 @@ public:
 		});
 		// Holder owns the token; token captures pool_, so pool stays alive
 		std::shared_ptr<void> holder = token_sp;
-		EglImageFrame out(entry.egl_image, W, H, frm.pts(), frm.timeBase(), holder);
+		out = EglImageFrame(entry.egl_image, W, H, frm.pts(), frm.timeBase(), holder);
 		out.copyMetadata(frm);
-		// Blocking put: wait for space in sink, then remove input from source
-		this->sink_->put(out, false);
-		this->source_->pop();
-	}
-	CudaToEglImage(std::unique_ptr<typename NodeSISO<av::VideoFrame, EglImageFrame>::SourceType> &&source, std::unique_ptr<typename NodeSISO<av::VideoFrame, EglImageFrame>::SinkType> &&sink, std::shared_ptr<CudaEglImagePool> pool, std::string pool_id, int pool_size, bool enable_sync)
-		: NodeSISO<av::VideoFrame, EglImageFrame>(std::move(source), std::move(sink)), pool_(std::move(pool)), pool_id_(std::move(pool_id)), pool_size_(pool_size), enable_sync_(enable_sync)
-	{
-	}
-	~CudaToEglImage() override = default;
+        return Result::Ready;
+    }
+};
+CudaEglFrameRenderer::CudaEglFrameRenderer(std::shared_ptr<CudaEglImagePool> pool, int size, int max_size, int step, Sync sync)
+    : impl_(std::make_unique<Impl>()) {
+    impl_->pool_ = std::move(pool);
+    impl_->pool_size_ = size;
+    impl_->pool_max_size_ = max_size;
+    impl_->pool_grow_step_ = step;
+    impl_->sync_ = sync;
+}
+CudaEglFrameRenderer::~CudaEglFrameRenderer() {
+    if ((impl_->cu_module_ || impl_->stream_) && cuCtxPushCurrent(impl_->cu_ctx_) == CUDA_SUCCESS) {
+        if (impl_->input_ready_) cuEventDestroy(impl_->input_ready_);
+        if (impl_->stream_) cuStreamDestroy(impl_->stream_);
+        if (impl_->cu_module_) cuModuleUnload(impl_->cu_module_);
+        CUcontext popped;
+        cuCtxPopCurrent(&popped);
+    }
+}
+CudaEglFrameRenderer::Result CudaEglFrameRenderer::render(av::VideoFrame &frame, EglImageFrame &out) {
+    return impl_->render(frame, out);
+}
+
+class CudaToEglImage: public NodeSISO<av::VideoFrame, EglImageFrame> {
+    CudaEglFrameRenderer renderer_;
+public:
+    CudaToEglImage(std::unique_ptr<SourceType> source, std::unique_ptr<SinkType> sink,
+                   std::shared_ptr<CudaEglImagePool> pool, int size, int max_size, int grow_step, bool sync)
+        : NodeSISO(std::move(source), std::move(sink)), renderer_(std::move(pool), size, max_size, grow_step,
+            sync ? CudaEglFrameRenderer::Sync::Context : CudaEglFrameRenderer::Sync::Async) {}
+    void process() override {
+        auto *frame = source_->peek();
+        if (!frame) return;
+        EglImageFrame out;
+        const auto result = renderer_.render(*frame, out);
+        if (result == CudaEglFrameRenderer::Result::Busy) {
+            wallclock.sleepms(1);
+            return;
+        }
+        if (result == CudaEglFrameRenderer::Result::Ready) sink_->put(out, false);
+        source_->pop();
+    }
 	static std::shared_ptr<CudaToEglImage> create(NodeCreationInfo &nci)
 	{
 		if (global_cuda.has_errors) {
@@ -383,10 +397,7 @@ public:
 		int pool_grow_step = params.count("pool_grow_step") ? (int)params["pool_grow_step"] : 8;
 		bool enable_sync = params.count("sync") ? (bool)params["sync"] : false;
 		auto pool = InstanceSharedObjects<CudaEglImagePool>::get(nci.instance, pool_id);
-		auto node = std::make_shared<CudaToEglImage>(make_unique<EdgeSource<av::VideoFrame>>(src), make_unique<EdgeSink<EglImageFrame>>(dst), pool, pool_id, pool_size, enable_sync);
-		node->pool_max_size_ = pool_max_size;
-		node->pool_grow_step_ = pool_grow_step;
-		return node;
+		return std::make_shared<CudaToEglImage>(make_unique<EdgeSource<av::VideoFrame>>(src), make_unique<EdgeSink<EglImageFrame>>(dst), pool, pool_size, pool_max_size, pool_grow_step, enable_sync);
 	}
 };
 

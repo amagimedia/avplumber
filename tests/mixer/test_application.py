@@ -28,6 +28,18 @@ def show(storage="cuda", **source_changes):
     })
 
 
+def test_local_monitor_taps_program_before_encoding(tmp_path):
+    app = build_application(show(), MixerOptions(dmabuf_monitor_dir=str(tmp_path)), api=fake_api())
+    nodes = {n.parameters["name"]: n.parameters for n in app.avp.nodes}
+    tap, sink = nodes["monitor_program_tap"], nodes["monitor_program"]
+    assert tap["src"] == "program_measured" and tap["outputs"] == 1
+    primary, monitor = tap["dst"]
+    assert tap["subscribed_outputs"] == {monitor: monitor}
+    assert sink["subscription"] == monitor and sink["socket"] == str(tmp_path / "program.sock")
+    assert any(n.get("src") == primary for n in nodes.values())
+    assert sink["type"] == "ipc_dmabuf_sink"
+
+
 def test_processed_cuda_ipc_input_uses_final_edge_for_optional_startup(native_boundary):
     options = MixerOptions(cuda_ipc_inputs=(("cam", "/tmp/playout.sock"),))
     app = build_application(show(), options, api=fake_api(),
