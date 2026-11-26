@@ -87,6 +87,21 @@ def test_stop_group_stops_terminals_first_then_clears_internal_edges():
     assert all(edge.cleared == 1 for edge in avp._edges.values())
 
 
+@pytest.mark.parametrize("stdout, expect", [("12.5\n", 12_500), ("N/A\n", None), ("", None)])
+def test_probe_gives_ffprobe_the_url_as_its_input_never_as_an_option(monkeypatch, stdout, expect):
+    from pyplumber.mixer import source_control
+    runs = []
+
+    def run(argv, **_kwargs):
+        runs.append(argv)
+        return SimpleNamespace(stdout=stdout)
+
+    monkeypatch.setattr(source_control.shutil, "which", lambda _name: "/usr/bin/ffprobe")
+    monkeypatch.setattr(source_control.subprocess, "run", run)
+    assert source_control.probe_duration_ms("-protocol_whitelist") == expect
+    assert runs[0][0] == "/usr/bin/ffprobe" and runs[0][-2:] == ["-i", "-protocol_whitelist"]
+
+
 def _pad(**over):
     base = dict(id="cam1", index=0, kind="video", group="input_0", input_node="input_0",
                 sync_team="input_0_av_sync", pause_team="input_0_pause")

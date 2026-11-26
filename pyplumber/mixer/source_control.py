@@ -112,8 +112,9 @@ def probe_duration_ms(url: str, *, timeout: float = 20.0) -> Optional[int]:
     if not ffprobe:
         return None
     try:
+        # After -i: a client names the URL, and one starting with "-" would be read as an option.
         out = subprocess.run(
-            [ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", url],
+            [ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", "-i", url],
             capture_output=True, text=True, timeout=timeout)
         text = out.stdout.strip()
         if not text or text.upper() == "N/A":
