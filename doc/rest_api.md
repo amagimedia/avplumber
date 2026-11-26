@@ -144,6 +144,13 @@ stay on the control port.
 Node and object names are limited to `[A-Za-z0-9_.@:-]`, 1 to 128 characters,
 because they are written into a control-protocol line.
 
+Read-only is not harmless. `GET /engine/nodes` and `GET /engine/nodes/{name}`
+return each node's parameters as the graph was built with them, unmasked:
+an input's or output's URL with its stream key, SRT passphrase or
+`user:password@`, and its `options`. Whoever may call the gateway reads them,
+as whoever reaches the control port does. A gateway bound to another address
+than loopback without a token gives them to that network.
+
 ## Mixer
 
 `pyplumber.mixer.rest.mixer_router(bridge)`. The request and reply fields are in

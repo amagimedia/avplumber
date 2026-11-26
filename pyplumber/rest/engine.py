@@ -2,6 +2,9 @@
 
 Nothing here changes the graph. `node.add`, `node.object.set`, `group.*` and the like reach files
 and URLs the engine's host can open; they stay on the control port, which is loopback by default.
+
+Node parameters are returned as they are, with the stream keys and passphrases their URLs hold:
+a secret of the show is readable by whoever may call.
 """
 
 from __future__ import annotations
@@ -66,11 +69,14 @@ def engine_router(client: ControlClient, starting: Starting | None = None) -> AP
 
     @router.get("/nodes", response_model=Nodes)
     def nodes():
-        """Every node with its type, whether it is running, and its parameters."""
+        """Every node with its type, whether it is running, and its parameters.
+
+        The parameters are unmasked: a URL comes with its stream key, passphrase or password."""
         return {"nodes": ask("nodes.json", "[]")}
 
     @router.get("/nodes/{name}", response_model=NodeParams)
     def node(name: Name):
+        """One node's parameters, unmasked like those of `GET /engine/nodes`."""
         return {"name": name, "params": ask(f"node.param.get {name}", "{}")}
 
     @router.get("/nodes/{name}/objects/{object_name}", response_model=NodeObject)

@@ -1747,7 +1747,7 @@
   "paths": {
     "/api/v1/engine/nodes": {
       "get": {
-        "description": "Every node with its type, whether it is running, and its parameters.",
+        "description": "Every node with its type, whether it is running, and its parameters.\n\nThe parameters are unmasked: a URL comes with its stream key, passphrase or password.",
         "operationId": "engine_nodes",
         "responses": {
           "200": {
@@ -1864,6 +1864,7 @@
     },
     "/api/v1/engine/nodes/{name}": {
       "get": {
+        "description": "One node's parameters, unmasked like those of `GET /engine/nodes`.",
         "operationId": "engine_node",
         "parameters": [
           {
