@@ -452,7 +452,10 @@ instead of monkeypatching `build_input`.
 ### Playout (`mixer.source.prepare` / `media` / `resume_at`)
 
 Need `playback_control` and a `video` source; an `ndi` source answers with an
-error (it takes `mixer.source.set` only). Address sources by show source id.
+error (it takes `mixer.source.set` only). They also need the control port
+(`MixerOptions.remote_control_port`, set by default): pause and seek are sent
+through it, because the retry below acts on the engine's refusal and the Python
+binding only logs one. Address sources by show source id.
 
 ```text
 mixer.source.prepare {"mixer":"mixer","id":"<sourceId>","url":"…","loop":false,"cue_in_ms":0}

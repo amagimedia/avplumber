@@ -6,16 +6,17 @@ compositors. Terminal nodes stop first so the frame stays inside, then every nod
 group's own edges are cleared before params change and the group starts again.
 
 ``mixer.source.media`` / ``prepare`` / ``resume_at`` need ``MixerOptions.playback_control`` so each
-file source's pad has a pause team and a sync team. Pause and seek retry while the chain has no frame yet
-("Can not determine current time"); that path uses a raising control runner (loopback TCP when a
-``control_port`` is set, else an injected ``run_command``). Playhead position is not reported by
-the engine — clients keep their own estimate.
+video source's pad has a pause team and a sync team. Pause and seek retry while the chain has no
+frame yet ("Can not determine current time"); to see that refusal their lines go through a runner
+that raises (``control_command`` on the instance's control port, or an injected ``run_command``).
+Playhead position is not reported by the engine — clients keep their own estimate.
 """
 from __future__ import annotations
 
+import asyncio
+import functools
 import json
 import shutil
-import socket
 import subprocess
 import threading
 import time
@@ -23,6 +24,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 from .config import ConfigError
+from .control import AvpConnection, AvpProtocolError
 
 # Chains built by ``build_input`` (file / live video and NDI). Browser, raw, MXL and VMM pads need
 # other primitives (navigate, unpack params, IPC) and refuse ``mixer.source.set``.
@@ -31,7 +33,9 @@ SETTABLE_KINDS = frozenset({"video", "ndi"})
 # input node, which waits on no pause team and has no position to seek to.
 PLAYBACK_KINDS = frozenset({"video"})
 MEDIA_ACTIONS = frozenset({"play", "pause", "seek", "stop", "restart"})
-# Pause / seek need a shown frame; just after group.start there may be none yet.
+# Pause / seek need a shown frame; just after group.start there may be none yet. The control
+# protocol has no error codes: this text, from RealTimeTeam (src/RealTimeTeam.hpp), is the only
+# sign of that refusal, so a change of its wording there must be made here too.
 _CURRENT_TIME_ERR = "Can not determine current time"
 
 
@@ -124,31 +128,26 @@ def probe_duration_ms(url: str, *, timeout: float = 20.0) -> Optional[int]:
         return None
 
 
-def _tcp_command(port: int, text: str, *, host: str = "127.0.0.1", timeout: float = 10.0) -> Optional[str]:
-    """One raising exchange on the control port (``executeCommandsFromString`` only logs failures)."""
-    conn = socket.create_connection((host, port), timeout=timeout)
+def control_command(port: int, text: str, *, timeout: float = 10.0) -> Optional[str]:
+    """One exchange on this instance's own control port, for a line whose refusal the caller
+    acts on: ``executeCommandsFromString`` only logs it. A refusal raises RuntimeError with the
+    command's name and the engine's status line.
+
+    A control command's handler may call it: the server runs every connection on a thread of
+    its own, and the mixer enables it on the default address, loopback. Not for a thread that
+    runs an event loop."""
+    async def exchange():
+        connection = AvpConnection("127.0.0.1", port)
+        await asyncio.wait_for(connection.connect(), timeout)
+        try:
+            return await connection.command(text, timeout)
+        finally:
+            await connection.disconnect()
+
     try:
-        stream = conn.makefile("rw", encoding="utf-8", newline="\n")
-        greeting = stream.readline()
-        if not greeting.startswith("100"):
-            raise RuntimeError(f"avplumber control: unexpected greeting {greeting.strip()!r}")
-        stream.write(text + "\n")
-        stream.flush()
-        head = stream.readline()
-        if not head:
-            raise ConnectionError("avplumber closed the control connection")
-        code = int(head.split(" ", 1)[0])
-        body = None
-        if code == 201:
-            lines = []
-            while (line := stream.readline()) not in ("\n", "\r\n", ""):
-                lines.append(line)
-            body = "".join(lines)
-        if not 200 <= code < 300:
-            raise RuntimeError(f"{text.split(' ', 1)[0]}: {head.strip()}")
-        return body
-    finally:
-        conn.close()
+        return asyncio.run(exchange())
+    except AvpProtocolError as exc:
+        raise RuntimeError(f"{text.split(' ', 1)[0]}: {exc}") from None
 
 
 def _is_position(value) -> bool:
@@ -179,13 +178,15 @@ class SourceController:
                  control_port: int = 0,
                  run_command: Optional[Callable[[str], Optional[str]]] = None,
                  probe: Callable[[str], Optional[int]] = probe_duration_ms):
+        """*run_command* sends one control line and raises RuntimeError with the engine's reason
+        when it is refused: ``control_command`` on *control_port* unless given. With neither, the
+        playback commands are refused (``mixer.source.set`` needs no refusal and works)."""
         self.avp, self.pads, self.mixer = avp, pads, mixer
-        self.control_port = control_port
+        if run_command is None and control_port:
+            run_command = functools.partial(control_command, control_port)
         self._run_command = run_command
         self._probe = probe
         self.lock = threading.Lock()
-        # Pause and seek retries serialize: a failed pause can leave the team needing resume first.
-        self._playback_lock = threading.Lock()
 
     def set(self, request: dict) -> dict:
         pad = self._pad(request, "source.set")
@@ -287,6 +288,9 @@ class SourceController:
         if playback and not (pad.pause_team and pad.sync_team):
             raise ConfigError(f"{who}: source {source_id!r} has no pause/sync teams "
                               f"(build with MixerOptions.playback_control=True)")
+        if playback and self._run_command is None:
+            # Pause and seek are tried again on the engine's refusal, which the binding only logs.
+            raise ConfigError(f"{who} needs the engine's control port (MixerOptions.remote_control_port)")
         return pad
 
     def _set_unlocked(self, pad: SourcePad, url: str, loop: bool) -> None:
@@ -307,35 +311,22 @@ class SourceController:
         self.avp.executeCommandsFromString(f"node.param.set {node} {key} {json.dumps(value)}")
 
     def _control(self, text: str) -> Optional[str]:
-        """Run a control line; raises on refusal when a raising runner is available."""
-        if self._run_command is not None:
-            return self._run_command(text)
-        if self.control_port:
-            return _tcp_command(self.control_port, text)
-        self.avp.executeCommandsFromString(text)
-        return None
+        """Run a playback line; raises RuntimeError when the engine refuses it."""
+        return self._run_command(text)
 
     def _playback_command(self, text: str, wait_s: float = 3.0) -> None:
         """Pause and seek need a frame of the clip to have been shown; just after a source starts
-        there may be none yet, so they are tried again for a moment.
-
-        A pause that fails that way has already paused its team on avplumber builds before the
-        pause fix: the input, which waits on the team, stops reading and the frame never comes. So
-        the team is resumed before the pause is tried again."""
-        words = text.split()
-        team = words[1] if len(words) > 2 and words[0] == "pause" else None
-        with self._playback_lock:
-            deadline = time.monotonic() + wait_s
-            while True:
-                try:
-                    self._control(text)
-                    return
-                except RuntimeError as exc:
-                    if _CURRENT_TIME_ERR not in str(exc) or time.monotonic() > deadline:
-                        raise
-                    if team is not None:
-                        self._control(f"resume {team}")
-                time.sleep(0.1)
+        there may be none yet, so they are tried again for a moment. A pause that fails this way
+        leaves its team as it was (``PauseControlTeam``), so nothing is undone between tries."""
+        deadline = time.monotonic() + wait_s
+        while True:
+            try:
+                self._control(text)
+                return
+            except RuntimeError as exc:
+                if _CURRENT_TIME_ERR not in str(exc) or time.monotonic() > deadline:
+                    raise
+            time.sleep(0.1)
 
 
 def register_source_commands(avp, controller: SourceController) -> None:

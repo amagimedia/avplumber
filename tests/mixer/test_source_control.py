@@ -2,13 +2,16 @@
 from __future__ import annotations
 
 import json
+import socketserver
+import threading
 from types import SimpleNamespace
 
 import pytest
 
 from pyplumber.mixer.config import ConfigError
 from pyplumber.mixer.source_control import (
-    SourceController, SourcePad, group_shape, register_source_commands, source_pads, stop_group,
+    SourceController, SourcePad, control_command, group_shape, register_source_commands, source_pads,
+    stop_group,
 )
 
 
@@ -267,11 +270,70 @@ def test_playback_command_retries_until_a_frame_exists():
 
     controller, _ = _controller(run=run)
     controller.media({"id": "cam1", "action": "pause"})
-    assert commands == [
-        "pause input_0_pause now", "resume input_0_pause",
-        "pause input_0_pause now", "resume input_0_pause",
-        "pause input_0_pause now",
-    ]
+    # Nothing between the tries: a failed pause leaves the team as it was, and a resume here
+    # would start a team the operator had paused.
+    assert commands == ["pause input_0_pause now"] * 3
+
+
+def test_another_refusal_is_not_tried_again():
+    commands = []
+
+    def run(text):
+        commands.append(text)
+        raise RuntimeError("seek: 500 ERROR: Seek target is before the first frame")
+
+    controller, _ = _controller(run=run)
+    with pytest.raises(RuntimeError, match="before the first frame"):
+        controller.media({"id": "cam1", "action": "seek", "position_ms": 10})
+    assert commands == ["seek input_0_av_sync now 10"]
+
+
+@pytest.mark.parametrize("command, request_", [
+    ("prepare", {"url": "file:///clip.mp4", "loop": False}),
+    ("media", {"action": "pause"}),
+    ("resume_at", {"at_ms": 1000}),
+])
+def test_playback_without_a_control_port_is_refused_before_anything_changes(command, request_):
+    """The retry needs the engine's refusal, and the binding only logs one."""
+    avp = _Avp([_Node("input_0", dst="out")])
+    controller = SourceController(avp, {"cam1": _pad()})
+    with pytest.raises(ConfigError, match="remote_control_port"):
+        getattr(controller, command)({"id": "cam1", **request_})
+    assert avp.commands == [] and not avp._group.stop_asked
+
+
+class _ControlPort(socketserver.ThreadingTCPServer):
+    """AVPlumber's line protocol: a greeting, then per line the reply of `answers` or 200 OK."""
+    daemon_threads = True
+    allow_reuse_address = True
+
+    def __init__(self, answers):
+        self.lines, self.answers = [], answers
+        super().__init__(("127.0.0.1", 0), self.Handler)
+
+    class Handler(socketserver.StreamRequestHandler):
+        def handle(self):
+            self.wfile.write(b"100 VTR Ready\n")
+            for raw in self.rfile:
+                line = raw.decode().rstrip("\n")
+                self.server.lines.append(line)
+                self.wfile.write(self.server.answers.get(line.split(" ", 1)[0], "200 OK\n").encode())
+
+
+def test_control_command_returns_the_reply_and_raises_the_engines_refusal():
+    server = _ControlPort({"version": "201 OK\navplumber 1\n\n",
+                           "pause": "500 ERROR: Relative seek not possible. Can not determine current time.\n"})
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        port = server.server_address[1]
+        assert control_command(port, "resume input_0_pause") is None
+        assert control_command(port, "version") == "avplumber 1\n"
+        with pytest.raises(RuntimeError, match="^pause: 500 ERROR: .*Can not determine current time"):
+            control_command(port, "pause input_0_pause now")
+        assert server.lines == ["resume input_0_pause", "version", "pause input_0_pause now"]
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 def test_resume_at_schedules_the_pause_team():
