@@ -431,6 +431,14 @@ team when one is wired, and starts the group again.
 mixer.source.set {"mixer":"mixer","id":"<sourceId>","url":"…","loop":true}
 ```
 
+The command answers with an error, and not with the new `url`, when the input
+node did not take a parameter (the group is then started again with the
+parameters it has) or when the group did not stop within 5 s (the source then
+stays stopped until a `mixer.source.set` succeeds: its queues were not cleared,
+so starting it could end the chain with the old stream's EOS). The start itself
+is a request the engine carries out afterwards: a URL that cannot be opened shows
+in the engine's log and the node state, not in this answer.
+
 Address sources by show source id (resolved to `input_<index>` the way
 `build_application` names them). Supported kinds are `video` and `ndi` (chains
 built by `build_input`). Browser, raw (`v210` / `nv12` / `p010`), MXL and VMM

@@ -57,20 +57,30 @@ class _Group:
 
 
 class _Avp:
-    def __init__(self, nodes, edges=None):
+    """`refuse` lists the first words of lines this engine logs and drops, as the binding does."""
+
+    def __init__(self, nodes, edges=None, refuse=()):
         self._group = _Group(nodes)
         self._edges = {name: _Edge() for name in (edges or [])}
         self.commands = []
         self.handlers = {}
+        self.refuse = refuse
 
     def group(self, _name):
         return self._group
+
+    def node(self, name):
+        return next(node for node in self._group.sortedNodes if node.name == name)
 
     def getEdge(self, name, data_type=None):
         return self._edges[name]
 
     def executeCommandsFromString(self, command):
         self.commands.append(command)
+        word, _, rest = command.partition(" ")
+        if word == "node.param.set" and word not in self.refuse:
+            name, key, value = rest.split(" ", 2)
+            self.node(name).parameters[key] = json.loads(value)
 
     def registerControlCommand(self, name, handler, _payload, _quiet=False):
         self.handlers[name] = handler
@@ -157,6 +167,31 @@ def test_set_checks_the_request_before_stopping(request_, match):
         controller.set(request_)
     assert avp.commands == []
     assert not avp._group.stop_asked
+
+
+def test_a_parameter_the_engine_did_not_take_is_an_error_and_the_source_plays_again():
+    avp = _Avp([_Node("input_0", dst="v_pkt"), _Node("otm", src="v_pkt", dst="out")],
+               edges=["v_pkt"], refuse=("node.param.set",))
+    controller = SourceController(avp, {"cam1": _pad()})
+    with pytest.raises(RuntimeError, match="input_0: url was not set"):
+        controller.set({"id": "cam1", "url": "file:///clip.mp4", "loop": True})
+    # Stopped and emptied, so it is safe to start: with the URL it had, not dark.
+    assert avp._group.stop_asked and avp.commands[-1] == "group.start input_0"
+
+
+def test_a_group_that_does_not_stop_is_an_error_that_says_the_source_stays_stopped(monkeypatch):
+    class Stuck(_Group):
+        def stopNodes(self):
+            self.stop_asked = True   # and input_0 keeps running
+
+    avp = _Avp([_Node("input_0", dst="v_pkt"), _Node("otm", src="v_pkt", dst="out")], edges=["v_pkt"])
+    avp._group = Stuck(avp._group.sortedNodes)
+    controller = SourceController(avp, {"cam1": _pad()})
+    monkeypatch.setattr(controller, "STOP_TIMEOUT_S", 0.02)
+    with pytest.raises(RuntimeError, match="input_0 did not stop within 0.02 s; source 'cam1' stays stopped"):
+        controller.set({"id": "cam1", "url": "file:///clip.mp4", "loop": True})
+    # Its queues were not cleared: nothing is changed or started over them.
+    assert avp.commands == [] and avp._edges["v_pkt"].cleared == 0
 
 
 def test_unsupported_kind_is_refused():

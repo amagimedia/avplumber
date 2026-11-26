@@ -174,6 +174,8 @@ def _no_other_fields(request: dict, who: str, *fields: str) -> None:
 
 
 class SourceController:
+    STOP_TIMEOUT_S = 5.0
+
     def __init__(self, avp, pads: dict[str, SourcePad], *, mixer: str = "mixer",
                  control_port: int = 0,
                  run_command: Optional[Callable[[str], Optional[str]]] = None,
@@ -295,20 +297,32 @@ class SourceController:
 
     def _set_unlocked(self, pad: SourcePad, url: str, loop: bool) -> None:
         continuous = bool(loop and pad.continuous_loop)
-        stop_group(self.avp, pad.group)
-        self._param(pad.input_node, "url", url)
-        self._param(pad.input_node, "loop", loop)
-        self._param(pad.input_node, "loop_continuous_ts", continuous)
-        # The chain paces on one realtime team; the new input starts its own timeline, so the
-        # team starts again too (otherwise it waits on the old one).
-        if pad.sync_team:
-            self.avp.executeCommandsFromString(f"realtime.team.reset {pad.sync_team}")
-        if pad.pause_team:
-            self.avp.executeCommandsFromString(f"resume {pad.pause_team}")
-        self.avp.executeCommandsFromString(f"group.start {pad.group}")
+        try:
+            stop_group(self.avp, pad.group, self.STOP_TIMEOUT_S)
+        except RuntimeError as exc:
+            # Not started again here: a node is still running and the group's queues were not
+            # cleared, so they may hold the old stream's end, which would end the started chain.
+            raise RuntimeError(f"{exc}; source {pad.id!r} stays stopped until a mixer.source.set succeeds") from None
+        try:
+            self._param(pad.input_node, "url", url)
+            self._param(pad.input_node, "loop", loop)
+            self._param(pad.input_node, "loop_continuous_ts", continuous)
+            # The chain paces on one realtime team; the new input starts its own timeline, so the
+            # team starts again too (otherwise it waits on the old one).
+            if pad.sync_team:
+                self.avp.executeCommandsFromString(f"realtime.team.reset {pad.sync_team}")
+            if pad.pause_team:
+                self.avp.executeCommandsFromString(f"resume {pad.pause_team}")
+        finally:
+            # After a failure too: the group is stopped and empty, and stays stopped until asked
+            # to start. With the parameters it has, the source plays again instead of going dark.
+            self.avp.executeCommandsFromString(f"group.start {pad.group}")
 
     def _param(self, node: str, key: str, value: Any) -> None:
         self.avp.executeCommandsFromString(f"node.param.set {node} {key} {json.dumps(value)}")
+        # The binding only logs a refused line; the node's parameters say whether it was taken.
+        if dict(self.avp.node(node).parameters).get(key) != value:
+            raise RuntimeError(f"{node}: {key} was not set; the engine's log has the reason")
 
     def _control(self, text: str) -> Optional[str]:
         """Run a playback line; raises RuntimeError when the engine refuses it."""
