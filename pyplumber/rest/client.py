@@ -10,8 +10,9 @@ class ControlClient(Protocol):
 
     `pyplumber.mixer.gui.MixerBridge` is one: it serializes callers and reconnects when the
     engine restarts. A command the engine refuses raises `pyplumber.mixer.control.AvpProtocolError`
-    with the engine's status line; an unreachable engine raises ConnectionError or OSError, a
-    reply that does not arrive in time TimeoutError. Implementations must be safe to call from
+    with the engine's status line; an unreachable engine raises ConnectionError, a reply that
+    does not arrive in time TimeoutError. Another OSError is not taken for the engine being away:
+    the gateway answers it with 500 `internal_error`. Implementations must be safe to call from
     several threads: the gateway serves each request on a worker thread.
     """
 

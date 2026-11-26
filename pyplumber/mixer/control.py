@@ -28,11 +28,19 @@ class AvpConnection:
         return self.writer is not None
 
     async def connect(self) -> None:
+        """A connection that cannot be made is a ConnectionError, whatever the reason: the system
+        reports no route, an unknown host name or its own connect timeout as other OSErrors, and a
+        caller must be able to tell them from an OSError that is not about the connection."""
         await self.disconnect()
         try:
-            # queues.json is one line and exceeds asyncio's 64 KiB default on larger mixers.
-            self.reader, self.writer = await asyncio.open_connection(
-                self.host, self.port, limit=4 * 1024 * 1024)
+            try:
+                # queues.json is one line and exceeds asyncio's 64 KiB default on larger mixers.
+                self.reader, self.writer = await asyncio.open_connection(
+                    self.host, self.port, limit=4 * 1024 * 1024)
+            except ConnectionError:
+                raise
+            except OSError as exc:
+                raise ConnectionError(f"no connection to {self.host}:{self.port}: {exc}") from exc
             code, status, _ = await self._read_response()
             if code != 100:
                 raise AvpProtocolError(f"unexpected greeting: {code} {status}")

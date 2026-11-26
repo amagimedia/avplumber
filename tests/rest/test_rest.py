@@ -422,6 +422,10 @@ def application_router(prefix="/director", tags=("director",)):
     @router.patch("")
     def control():
         raise ApiError(409, "director_busy", "a rundown is running")
+
+    @router.put("")
+    def save():
+        raise PermissionError(13, "Permission denied", "/secret/path/show.json")
     return router
 
 
@@ -433,6 +437,9 @@ def test_application_router_is_served_beside_the_core_under_its_rules(engine, br
     failed = api.delete("/director", headers=authorized)   # an exception the router did not expect
     assert failed.status_code == 500 and failed.json()["error"]["code"] == "internal_error"
     assert "secret" not in failed.text
+    unwritable = api.put("/director", headers=authorized)   # the router's own file, not the engine's connection
+    assert unwritable.status_code == 500 and unwritable.json()["error"]["code"] == "internal_error"
+    assert "secret" not in unwritable.text
     assert api.get("/director", headers=authorized).json() == {"enabled": True}
     assert api.patch("/director", headers=authorized).json() == {"error": {"code": "director_busy", "message": "a rundown is running"}}
     assert api.get("/mixer/status", headers=authorized).status_code == 200

@@ -85,8 +85,8 @@ def _reply(status: int, code: str, message: str, *, details=None, headers=None) 
 
 
 def install_error_handlers(app: FastAPI) -> None:
-    """Starlette picks the handler of the most specific class, so TimeoutError (an OSError)
-    and JSONDecodeError get their own answers."""
+    """Starlette picks the handler of the most specific class, so JSONDecodeError (a ValueError)
+    gets its own answer."""
 
     @app.exception_handler(ApiError)
     async def api_error(_request: Request, exc: ApiError):
@@ -122,7 +122,9 @@ def install_error_handlers(app: FastAPI) -> None:
 
     async def engine_unreachable(_request: Request, exc: Exception):
         return _reply(503, "engine_unreachable", str(exc) or type(exc).__name__)
-    for unreachable in (OSError, EOFError):   # ConnectionError is an OSError
+    # Not OSError: a router's own unreadable file or full disk is not the engine being away, and
+    # answers 500. AvpConnection raises ConnectionError for every connection it cannot make.
+    for unreachable in (ConnectionError, EOFError):
         app.add_exception_handler(unreachable, engine_unreachable)
 
     @app.exception_handler(json.JSONDecodeError)
