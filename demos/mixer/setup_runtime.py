@@ -16,6 +16,7 @@ from . import gpu_spec, ndi_senders, prepare_demo
 from .demo_recipe import DSK_PAGES, allocate, validate_dsk
 from .instance_profiles import INSTANCE_PROFILES, InstanceType, geforce_profile, mxl_sources
 from pyplumber.mixer.color import TRANSFER_TAGS
+from pyplumber.mixer.thumbnail import is_thumbnail
 from pyplumber.mixer.config import CANVAS_RATES, parse, parse_rate, rate_number, rate_weight
 from pyplumber.mixer.gui.storage import write_atomic
 from pyplumber.mixer.gui.telemetry import _static_facts
@@ -30,7 +31,7 @@ PROGRAM_SIZE = (1920, 1080)
 DEFAULT_SETTINGS = dict(orientation="portrait", fps=60, bit_depth=10, chroma="422",
                         source_count=16, scene_count=32, layout="balanced", weights=[8, 4, 2, 0, 2, 0, 0, 0, 0],
                         encodes={}, dsk=[], clean_feed=False, extra_aux=0, browser_motion="static",
-                        decode_mix="profile")
+                        decode_mix="profile", source_thumbnails=False)
 # What the SDR 4:2:0 group's clips are coded as: the profile's choice (the qualified show; HLG clips
 # are always HEVC), H.264 with the same low-delay references, or a mix of both codecs and reference
 # structures, cycled per source by prepare_demo (hevc and h264 low delay, then hevc and h264 with
@@ -101,7 +102,7 @@ def current_settings(profile, settings):
     encodes = {**programs, "extra": dict(defaults["aux"]), **encodes}
     encodes = {o: {"codec": "hevc_nvenc" if o == "hdr" else "h264_nvenc", **e} if isinstance(e, dict) else e
                for o, e in encodes.items()}
-    return {"extra_aux": 0, "browser_motion": "static", "decode_mix": "profile",
+    return {"extra_aux": 0, "browser_motion": "static", "decode_mix": "profile", "source_thumbnails": False,
             **{k: v for k, v in settings.items() if k not in ("browser_frame_queue", "browser_ring_size", "bitrate_kbps")},
             "encodes": encodes, **({"weights": [*weights, *[0] * (9 - len(weights))]}
                                    if isinstance(weights, list) and len(weights) in (7, 8) else {})}
@@ -189,6 +190,8 @@ def recipe_for(profile, settings):
     # buses are known (SetupRuntime.apply).
     if type(settings["extra_aux"]) is not int or not 0 <= settings["extra_aux"] <= 30:
         raise ValueError("extra_aux must be an integer from 0 to 30")
+    if type(settings["source_thumbnails"]) is not bool:
+        raise ValueError("source_thumbnails must be true or false")
     low, high = profile["nvenc"]["bitrate_kbps"]
     for output, encode in settings["encodes"].items():
         if not isinstance(encode, dict) or encode.get("codec") not in ("h264_nvenc", "hevc_nvenc"):
@@ -270,6 +273,8 @@ def recipe_for(profile, settings):
                             source["pattern"] = "bars"
                         break
     recipe["dsk"], recipe["clean_feed"] = dsk, settings["clean_feed"]
+    if settings["source_thumbnails"]:
+        recipe["source_thumbnails"] = True
     recipe["setup"] = settings
     recipe["layouts"] = layouts
     return recipe
@@ -450,6 +455,10 @@ class SetupRuntime(BaseSetupRuntime):
 
     def extra_aux_limit(self, cfg, encodes):
         return extra_aux_limit(self.profile, cfg, encodes)
+
+    def own_aux_buses(self, own, recipe):
+        """The thumbnail banks only while Setup asks for them."""
+        return own if recipe.get("source_thumbnails") else [b for b in own if not is_thumbnail(b)]
 
     def _validate_capacity(self, show, settings=None):
         cfg = parse(show)

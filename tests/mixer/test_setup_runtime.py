@@ -553,6 +553,26 @@ def test_setup_drops_saved_aux_layouts_the_new_sources_no_longer_have(runtime, m
     assert bus["layouts"] == [kept] and bus["layout"] == kept
 
 
+def test_source_thumbnails_follow_the_setup_option(runtime):
+    """Setup's checkbox adds a bank per 64 sources beside the instance's own buses; clearing it
+    removes the banks again, which the previous show would otherwise carry over."""
+    settings = {**DEFAULT_SETTINGS, "chroma": "420", "weights": [4, 0, 0, 0, 1, 0, 0]}
+    config = runtime.media_dir / "mixer.demo.json"
+    show, _, _ = prepare_demo.plan(recipe_for(T4, settings), runtime.media_dir)
+    show["aux_buses"] = [{"id": "mv", "renditions": [{"id": "monitor", "port": 5008}]}]
+    config.write_text(json.dumps(show))
+    runtime.bridge.command = lambda cmd: json.dumps([])
+    ids = lambda: [b["id"] for b in json.loads(config.read_text())["aux_buses"]]
+    apply_and_wait(runtime, {**settings, "source_thumbnails": True})
+    assert runtime.status()["phase"] == "running", runtime.status()
+    assert ids() == ["mv", "thumbnails1"]
+    assert [b.get("thumbnail", False) for b in runtime.status()["aux_buses"]] == [False, True]
+    apply_and_wait(runtime, settings)
+    assert ids() == ["mv"] and len(runtime.status()["aux_buses"]) == 1
+    with pytest.raises(ValueError, match="source_thumbnails"):
+        recipe_for(T4, {**settings, "source_thumbnails": 1})
+
+
 def test_setup_reconciles_aux_geometry_rate_and_removed_scenes(runtime):
     from pyplumber.mixer.config import parse
     old, _, _ = prepare_demo.plan(recipe_for(T4, DEFAULT_SETTINGS), runtime.media_dir)

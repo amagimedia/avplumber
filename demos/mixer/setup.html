@@ -117,6 +117,7 @@ summary { cursor: pointer; }
 </section>
 <section class="card"><div class="card-title title-row"><h2>Outputs</h2><button id="output-defaults">Defaults</button></div>
 <p class="hint">Codec, preset and bitrate per output. Extra AUX share one selection. p1 is the fastest; bitrate does not change NVENC load.</p>
+<div class="toggles"><label class="toggle"><input type="checkbox" id="source-thumbnails"> Source thumbnails · one 8 × 8 grid output per 64 sources</label></div>
 <div class="source output output-head" aria-hidden="true"><span></span><span id="count-head">Count</span><span>Codec</span><span>Preset</span><span>Mbit/s</span></div>
 <div id="encodes"></div><div class="allocation" id="nvenc-bar" aria-hidden="true"></div>
 <p class="hint" id="nvenc-note"></p>
@@ -209,7 +210,7 @@ function encodeOutputs(canvasRate,tenBit){
  const output=(id,name,r)=>({id,name,codec:(encodes[id]?.codec??defaultEncode(id).codec)==='hevc_nvenc'?'hevc':'h264',
                              fps:rateWeight(r),label:rateLabel(r)});
  return [output('sdr','Program',canvasRate),...tenBit?[output('hdr','Program HLG',canvasRate)]:[],output('sdr_clean','Clean feed',canvasRate),
-  ...auxBuses.map(b=>output(b.id,b.label,auxRate(canvasRate,b.full_rate))),...janusApi?[output('extra','Extra aux',auxRate(canvasRate,false))]:[]];
+  ...auxBuses.filter(b=>!b.thumbnail).map(b=>output(b.id,b.label,auxRate(canvasRate,b.full_rate))),...janusApi?[output('extra','Extra aux',auxRate(canvasRate,false))]:[]];
 }
 function encodeRow(o){
  if(!encodeRows.has(o.id))encodeRows.set(o.id,MixerSetup.encodeRow({
@@ -377,7 +378,7 @@ function update(){
  if(counts[1]>(limits().nvdec_hdr_decodes?.[fps]??Infinity))throw Error(`HDR NVDEC inputs are limited to ${limits().nvdec_hdr_decodes[fps]} at ${label} fps to reserve VRAM.`);
  const portrait=$('orientation').value==='portrait',width=portrait?sourceHeight:sourceWidth,height=portrait?sourceWidth:sourceHeight;
  currentSettings={orientation:$('orientation').value,fps:rateSetting(rate()),source_count:sourceCount,scene_count:sceneCount,layout:$('layout').value,
-   bit_depth,chroma,weights:counts,encodes,dsk:dskPages(),clean_feed:clean,extra_aux:extra?integer('extra-aux',0,extraLimit):0,
+   bit_depth,chroma,weights:counts,encodes,dsk:dskPages(),clean_feed:clean,extra_aux:extra?integer('extra-aux',0,extraLimit):0,source_thumbnails:$('source-thumbnails').checked,
    browser_motion:$('browser-motion').value};
  $('allocation').replaceChildren(...sourceGroups.flatMap(([,indices])=>indices).map(i=>{const span=document.createElement('span');span.style.width=`${100*counts[i]/sourceCount}%`;span.style.background=types[i].color;return span}));
  $('allocation-note').textContent=`${sourceCount} independent inputs. NVDEC: ${counts[0]+counts[1]}/${nvdecLimit(fps)} combined SDR + HDR. Upload: ${counts[5]+2*counts[6]+counts[7]}/${rawUploadUnits(fps)} units (NV12 = 1, P010 = 2${mxlLimit()?', MXL = 1':''}). Capacity depends on codec and content.`;
@@ -414,7 +415,7 @@ function loadSettings(s){
  $('mode').value=`${depth}:${s.chroma??(depth===8?'420':'422')}`;
  for(const [id,key] of Object.entries({orientation:'orientation',fps:'fps',scenes:'scene_count',layout:'layout'}))if(s[key]!==undefined)$(id).value=s[key];
  manualCounts=null;encodes=structuredClone(s.encodes??{});encodeRows.clear();extraAux=s.extra_aux??0;
- document.querySelectorAll('#dsk-pages input').forEach(i=>{i.checked=(s.dsk||[]).includes(i.value);});$('clean-feed').checked=!!s.clean_feed;
+ document.querySelectorAll('#dsk-pages input').forEach(i=>{i.checked=(s.dsk||[]).includes(i.value);});$('clean-feed').checked=!!s.clean_feed;$('source-thumbnails').checked=!!s.source_thumbnails;
  typedSources=s.source_count<sourceLimit()?s.source_count:null;
  const saved=Array.isArray(s.weights)&&[7,8].includes(s.weights.length)?[...s.weights,...Array(9-s.weights.length).fill(0)]:s.weights;   // saved before MXL or NDI
  if(Array.isArray(saved)&&saved.length===types.length&&saved.every(n=>Number.isInteger(n)&&n>=0)&&

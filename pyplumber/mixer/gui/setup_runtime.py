@@ -256,11 +256,18 @@ class SetupRuntime:
         # An adopted explicit show can declare the same setup metadata as a generated recipe.
         stored = json.loads(self.recipe_path.read_text()) if self.recipe_path.exists() else previous
         own, extra = _split_aux((previous or stored).get("aux_buses", []), stored)
+        self._list_aux(own)
+        self.extra_ports = _ports(extra)
+        return previous, own, extra
+
+    def _list_aux(self, own):
         self.aux_buses = [{"id": b["id"], "label": aux_label(b["id"], b.get("label", ""), b.get("layout")),
                            "full_rate": b.get("full_rate", False),
                            **({"thumbnail": True} if is_thumbnail(b) else {})} for b in own]
-        self.extra_ports = _ports(extra)
-        return previous, own, extra
+
+    def own_aux_buses(self, own, recipe):
+        """The instance's own buses a setup of *recipe* keeps; an application may add or drop some."""
+        return own
 
     def _preserve_aux(self, recipe, show):
         """Keep instance outputs while replacing the generic sources and scenes: each bus keeps its
@@ -268,6 +275,7 @@ class SetupRuntime:
         at its encode settings. The setup's extra buses follow the own ones: as many as asked for, within
         the NVENC budget, which the show's encodes must fit without them."""
         previous, own, extra = self._previous_show()
+        own = self.own_aux_buses(own, recipe)
         if "max_compositor_layers" in previous:
             recipe["max_compositor_layers"] = show["max_compositor_layers"] = previous["max_compositor_layers"]
         wanted, encodes = recipe["setup"]["extra_aux"], recipe["setup"]["encodes"]
@@ -276,6 +284,7 @@ class SetupRuntime:
             reserved = reserve_buses({**show, "aux_buses": own + extra}, len(extra),
                                       encode_options(recipe["source_thumbnails"]))
             own = [b for b in own if not is_thumbnail(b)] + [b for b in reserved if is_thumbnail(b)]
+        self._list_aux(own)
         for bus in own:
             if is_thumbnail(bus):
                 continue
