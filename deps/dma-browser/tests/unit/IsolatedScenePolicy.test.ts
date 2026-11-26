@@ -101,11 +101,13 @@ describe('isolated scene policy', () => {
 
 it('denies navigation, redirects, webviews, popups and direct UDP WebRTC', () => {
   const contents = {
+    setAudioMuted: vi.fn(),
     setWindowOpenHandler: vi.fn(),
     on: vi.fn(),
     setWebRTCIPHandlingPolicy: vi.fn(),
   };
   new IsolatedScenePolicy(root).attach(contents as unknown as Electron.WebContents);
+  expect(contents.setAudioMuted).toHaveBeenCalledWith(true);
   expect(contents.setWindowOpenHandler.mock.calls[0]?.[0]()).toEqual({ action: 'deny' });
   expect(contents.on.mock.calls.map((call) => String(call[0]))).toEqual([
     'will-navigate',
