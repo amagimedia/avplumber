@@ -374,8 +374,10 @@ def test_control_command_returns_the_reply_and_raises_the_engines_refusal():
 def test_resume_at_schedules_the_pause_team():
     commands = []
     controller, _ = _controller(run=commands.append)
-    assert controller.resume_at({"id": "cam1", "at_ms": 90_000, "position_ms": 1500}) == {
-        "id": "cam1", "at_ms": 90_000, "position_ms": 1500}
+    assert controller.resume_at({"id": "cam1", "at_ms": 90_000}) == {"id": "cam1", "at_ms": 90_000}
+    assert commands == ["resume input_0_pause at 90000"]
+    with pytest.raises(ConfigError, match="unsupported fields"):   # the engine tracks no playhead to set
+        controller.resume_at({"id": "cam1", "at_ms": 90_000, "position_ms": 1500})
     assert commands == ["resume input_0_pause at 90000"]
 
 

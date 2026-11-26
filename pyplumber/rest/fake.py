@@ -3,13 +3,15 @@
 `python -m pyplumber.rest --fake` serves the REST API over it, for writing a client away from
 a mixer host, and the gateway's tests run on it. It keeps what a client can observe through the
 API (Program and Preview, keys, an AUX bus of each mode, gains) and records every line it was sent.
-It does not model time: a take is on Program at once, and a key is on or off without a fade.
+It does not model time: a take is on Program at once, a key is on or off without a fade, and a
+source scheduled to resume is playing at once.
 """
 
 from __future__ import annotations
 
 import json
 import threading
+import time
 import uuid
 
 from pyplumber.mixer.control import AvpProtocolError
@@ -114,7 +116,7 @@ class FakeEngine:
     def _status(self):
         return {"pgm_scene": self.pgm, "pvw_scene": self.pvw, "pvw_slot_scene": self.pvw, "transition": "idle",
                 "transition_on_air": False, "transition_paused": False, "transition_manual": False,
-                "transition_progress": 0.0, "transition_duration_ms": 0,
+                "transition_progress": 0.0, "transition_duration_ms": 0, "now_pts_ms": int(time.monotonic() * 1000),
                 "lever": {"position": self.lever, "origin": 0.0, "engaged": 0 < self.lever < 1}}
 
     def _settings(self):
@@ -287,7 +289,4 @@ class FakeEngine:
         if not isinstance(at_ms, int) or isinstance(at_ms, bool) or at_ms < 0:
             raise _Refused("source.resume_at needs a non-negative int at_ms")
         source["paused"] = False
-        reply = {"id": source["id"], "at_ms": at_ms}
-        if "position_ms" in request and request["position_ms"] is not None:
-            reply["position_ms"] = request["position_ms"]
-        return reply
+        return {"id": source["id"], "at_ms": at_ms}

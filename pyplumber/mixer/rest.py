@@ -77,6 +77,8 @@ class Status(Reply):
     transition_manual: bool | None = Field(None, description="The lever runs the transition")
     transition_duration_ms: int | None = None
     lever: Lever | None = None
+    now_pts_ms: int | None = Field(None, description="The engine's wallclock now, in ms: the clock `at_ms` of "
+                                                     "`POST /mixer/sources/{id}/resume_at` is on")
 
 
 class Scenes(BaseModel):
@@ -333,17 +335,13 @@ class SourceMediaResult(Reply):
 
 
 class SourceResumeAt(Request):
-    """Schedule resume of the source's pause team at a wallclock time (ms)."""
-    at_ms: int = Field(ge=0, description="Wallclock ms in the mixer start_pts domain")
-    position_ms: int | None = Field(
-        None, ge=0,
-        description="Client playhead at resume; echoed only — the engine does not track position")
+    """Schedule resume of the source's pause team at a time on the engine's clock."""
+    at_ms: int = Field(ge=0, description="The engine's wallclock in ms: the clock of `now_pts_ms` in `GET /mixer/status`")
 
 
 class SourceResumeAtResult(Reply):
     id: str
     at_ms: int
-    position_ms: int | None = None
 
 
 # --- Audio ---

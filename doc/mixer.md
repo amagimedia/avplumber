@@ -468,18 +468,19 @@ binding only logs one. Address sources by show source id.
 ```text
 mixer.source.prepare {"mixer":"mixer","id":"<sourceId>","url":"…","loop":false,"cue_in_ms":0}
 mixer.source.media   {"mixer":"mixer","id":"<sourceId>","action":"play"|"pause"|"seek"|"stop"|"restart",…}
-mixer.source.resume_at {"mixer":"mixer","id":"<sourceId>","at_ms":<wallclock_ms>,"position_ms":?}
+mixer.source.resume_at {"mixer":"mixer","id":"<sourceId>","at_ms":<wallclock_ms>}
 ```
 
 `prepare` repoints like `source.set`, probes duration when ffprobe knows it, pauses on
 the first frame, then seeks to `cue_in_ms` (the pause node holds that frame). `media`
 drives play / pause / seek / stop / restart; pause and seek retry while the chain has
 no frame yet (`Can not determine current time`). `resume_at` schedules
-`resume <pause_team> at <at_ms>` in the mixer wallclock domain.
+`resume <pause_team> at <at_ms>`. `at_ms` is on the engine's wallclock, in
+milliseconds: the clock `mixer.status` reports as `now_pts_ms` (`GET
+/mixer/status`), so a client reads it there and adds its lead time.
 
-The engine does **not** report playhead position. `position_ms` on `resume_at` is
-echoed for the client's own clock only. REST: `POST /mixer/sources/{id}/prepare`,
-`/media`, `/resume_at`.
+The engine does **not** report playhead position; a client keeps its own
+estimate. REST: `POST /mixer/sources/{id}/prepare`, `/media`, `/resume_at`.
 
 ## Profiling
 

@@ -83,8 +83,8 @@ def spaced(command, **payload):
      200, spaced("source.media", action="pause", id="cam1", mixer="mixer")),
     ("POST", "/mixer/sources/cam1/media", {"action": "seek", "position_ms": 1000},
      200, spaced("source.media", action="seek", position_ms=1000, id="cam1", mixer="mixer")),
-    ("POST", "/mixer/sources/cam1/resume_at", {"at_ms": 90000, "position_ms": 500},
-     200, spaced("source.resume_at", at_ms=90000, position_ms=500, id="cam1", mixer="mixer")),
+    ("POST", "/mixer/sources/cam1/resume_at", {"at_ms": 90000},
+     200, spaced("source.resume_at", at_ms=90000, id="cam1", mixer="mixer")),
     ("GET", "/mixer/audio/gains", None, 200, "mixer.audio_gain_status"),
     ("PATCH", "/mixer/audio/gains", {"gains": {"cam1": -6, "cam2": 3.5}}, 200, spaced("audio_gain", gains={"cam1": -6.0, "cam2": 3.5})),
     ("GET", "/mixer/audio/processors", None, 200, "mixer.audio_processor_status"),
@@ -120,8 +120,10 @@ def test_source_prepare_media_and_resume_at(api, engine):
                         "duration_ms": 60_000}
     assert api.post("/mixer/sources/cam2/media", json={"action": "play"}).json() == {
         "id": "cam2", "action": "play"}
-    assert api.post("/mixer/sources/cam2/resume_at", json={"at_ms": 12_000}).json() == {
-        "id": "cam2", "at_ms": 12_000}
+    # at_ms is on the clock the status reports.
+    now = api.get("/mixer/status").json()["now_pts_ms"]
+    assert api.post("/mixer/sources/cam2/resume_at", json={"at_ms": now + 2000}).json() == {
+        "id": "cam2", "at_ms": now + 2000}
 
 
 def test_key_and_aux_replies_are_the_mixers(api):
@@ -195,6 +197,7 @@ def test_each_aux_mode_refuses_the_other_modes_commands_and_an_external_bus_repo
     ("POST", "/mixer/sources/cam1/media", {"action": "play", "position_ms": 1}),
     ("POST", "/mixer/sources/cam1/resume_at", {}),
     ("POST", "/mixer/sources/cam1/resume_at", {"at_ms": -1}),
+    ("POST", "/mixer/sources/cam1/resume_at", {"at_ms": 1000, "position_ms": 500}),   # the engine tracks no playhead
     ("PATCH", "/mixer/audio/gains", {"gains": {}}),
     ("PATCH", "/mixer/audio/gains", {"gains": {"cam1": 11}}),
     ("PATCH", "/mixer/audio/processors/program/duck", {}),

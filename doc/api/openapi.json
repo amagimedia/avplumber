@@ -1451,26 +1451,13 @@
       },
       "SourceResumeAt": {
         "additionalProperties": false,
-        "description": "Schedule resume of the source's pause team at a wallclock time (ms).",
+        "description": "Schedule resume of the source's pause team at a time on the engine's clock.",
         "properties": {
           "at_ms": {
-            "description": "Wallclock ms in the mixer start_pts domain",
+            "description": "The engine's wallclock in ms: the clock of `now_pts_ms` in `GET /mixer/status`",
             "minimum": 0.0,
             "title": "At Ms",
             "type": "integer"
-          },
-          "position_ms": {
-            "anyOf": [
-              {
-                "minimum": 0.0,
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Client playhead at resume; echoed only \u2014 the engine does not track position",
-            "title": "Position Ms"
           }
         },
         "required": [
@@ -1489,17 +1476,6 @@
           "id": {
             "title": "Id",
             "type": "string"
-          },
-          "position_ms": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Position Ms"
           }
         },
         "required": [
@@ -1566,6 +1542,18 @@
                 "type": "null"
               }
             ]
+          },
+          "now_pts_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The engine's wallclock now, in ms: the clock `at_ms` of `POST /mixer/sources/{id}/resume_at` is on",
+            "title": "Now Pts Ms"
           },
           "pgm_scene": {
             "title": "Pgm Scene",

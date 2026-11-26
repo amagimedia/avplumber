@@ -252,23 +252,17 @@ class SourceController:
         return reply
 
     def resume_at(self, request: dict) -> dict:
-        """Schedule ``resume <pause_team> at <at_ms>`` (wallclock ms, mixer start_pts domain)."""
+        """Schedule ``resume <pause_team> at <at_ms>``: the engine's wallclock in ms, the clock
+        ``mixer.status`` reports as ``now_pts_ms``."""
         pad = self._pad(request, "source.resume_at", playback=True)
         at_ms = request.get("at_ms")
         if not _is_position(at_ms):
             raise ConfigError("source.resume_at needs a non-negative int at_ms")
-        position_ms = request.get("position_ms")
-        if position_ms is not None and not _is_position(position_ms):
-            raise ConfigError("source.resume_at: position_ms must be a non-negative int when set")
-        _no_other_fields(request, "source.resume_at", "at_ms", "position_ms")
+        _no_other_fields(request, "source.resume_at", "at_ms")
 
         with self.lock:
             self._control(f"resume {pad.pause_team} at {at_ms}")
-        reply = {"id": pad.id, "at_ms": at_ms}
-        if position_ms is not None:
-            # Echo only: the engine does not track playhead; clients keep their own clock.
-            reply["position_ms"] = position_ms
-        return reply
+        return {"id": pad.id, "at_ms": at_ms}
 
     def _pad(self, request: dict, who: str, *, playback: bool = False) -> SourcePad:
         """The pad a request names, for this mixer; with *playback*, one that can pause and seek."""
