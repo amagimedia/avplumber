@@ -31,6 +31,7 @@ make -j"${jobs}" python_module \
     HAVE_NVJPEG=0 \
     HAVE_MXL=0 \
     HAVE_TENSORRT=0 \
+    HAVE_CUDA_VMM_IPC=1 \
     NEURAL_NET=0 \
     TENSORRT_ROOT=/opt/tensorrt \
     HAVE_LIBFABRIC=1 \
