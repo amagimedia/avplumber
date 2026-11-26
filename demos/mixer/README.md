@@ -130,6 +130,11 @@ Program and clean Program, Program/Preview and Multiviewer. You can lower **Uniq
 before applying. The launcher keeps shows and the CUDA JIT cache in
 `media/desktop/` across restarts.
 
+The desktop app shows Program, the clean feed and every AUX bus from the GPU, and the AUX buses
+are then not encoded: a browser beside the app plays Program and the clean feed only
+(`MIXER_LOCAL_PREVIEWS=0 ./demos/mixer/desktop.sh` keeps the AUX WebRTC streams). **Source
+thumbnails** in Setup adds one 8 × 8 grid output per 64 sources.
+
 For an 8-bit 4:2:2 show, choose **SDR · 8-bit · 4:2:2** in Setup. The NV16 canvas preserves each input chroma row from SDR v210 through compositing. H.264 and HEVC outputs use 4:2:0. Setup estimates NV16 capacity from the 10-bit 4:2:2 profile. The desktop smoke check compares NV16 output pixels with a reference during fades, dips and wipes.
 
 | Size | HEVC decoded | Raw NV12 | Browser scene sources | Browser keys |

@@ -70,6 +70,9 @@ case "${1:-}" in
         mkdir -p -m 700 "$MIXER_MONITOR_DIR"
         if configure_gui "${MIXER_DESKTOP_UI:-auto}"; then
             export COMPOSE_PROFILES="${COMPOSE_PROFILES:+$COMPOSE_PROFILES,}desktop-gui"
+            # The app shows every AUX bus from the GPU: no encoder for them. MIXER_LOCAL_PREVIEWS=0
+            # keeps their WebRTC streams, for a browser beside the app.
+            export MIXER_LOCAL_PREVIEWS="${MIXER_LOCAL_PREVIEWS:-1}"
             echo "Opening the mixer on the local $MIXER_GUI_PLATFORM desktop."
         fi
         "$stack" build

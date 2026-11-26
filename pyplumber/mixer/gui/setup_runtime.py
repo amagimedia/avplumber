@@ -538,7 +538,9 @@ class SetupRuntime:
                     expected.update(f"janus_{o['rendition']}_encoded" for o in outputs.get("program_outputs", [])[1:])
                     expected.update(f"janus_{o['rendition']}_encoded" for o in outputs.get("preview_outputs", [])
                                     if o["bus"].startswith("clean_"))
-                    expected.update(f"aux_{bid}_encoded" for bid in outputs.get("aux_buses", []))
+                    # A bus shown on its local monitor only (MixerOptions.local_aux_previews) has no encoder.
+                    expected.update({f"aux_{bid}_encoded" for bid in outputs.get("aux_buses", [])}
+                                    & {q["name"] for q in queues})
                     encoded = {q["name"] for q in queues if q["enqueued_total"] > 0}
                     ready = expected <= encoded
                     last_problem = "waiting for encoded output"

@@ -11,6 +11,7 @@ services:
       CUDA_DEVICE_MAX_COPY_CONNECTIONS: ${CUDA_DEVICE_MAX_COPY_CONNECTIONS:-8}
       MIXER_GRAPH_URL: /graph/
       MIXER_DMABUF_MONITOR_DIR: ${MIXER_DMABUF_MONITOR_DIR:-}
+      MIXER_LOCAL_PREVIEWS: ${MIXER_LOCAL_PREVIEWS:-}
       # GPU 0 as stack.sh read it on the host: Setup's desktop sizes on a GeForce GPU.
       MIXER_GPU: ${MIXER_GPU:-}
     build:

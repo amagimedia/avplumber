@@ -56,3 +56,8 @@ An optional `subscription` names a `one_to_many` subscribed output. The sink
 enables that output while a receiver is connected, so an upstream monitor colour
 conversion can idle between viewers. The desktop mixer uses this for Program
 after keys and transitions, the configured clean feed and each AUX bus.
+
+With `--local-aux-previews` (`MIXER_LOCAL_PREVIEWS=1`) a Janus AUX bus has no encoder and no
+Janus stream: its sink is the only reader of the bus. `demos/mixer/desktop.sh` sets it when it
+opens the desktop app; a browser then plays Program and the clean feed, not the AUX buses. Start
+with `MIXER_LOCAL_PREVIEWS=0` to keep their WebRTC streams.

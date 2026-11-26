@@ -246,6 +246,8 @@ def parse_args(argv: list[str] | None = None) -> GraphOptions:
     add("--remote-control-port", type=int, default=7777)
     add("--dmabuf-monitor-dir", default=os.environ.get("MIXER_DMABUF_MONITOR_DIR", ""), metavar="DIR",
         help="Publish local Program and configured AUX GPU textures in this existing socket directory")
+    add("--local-aux-previews", action="store_true", default=os.environ.get("MIXER_LOCAL_PREVIEWS") == "1",
+        help="With --dmabuf-monitor-dir: show Janus AUX buses on their local monitors only, without encoders")
     add("--dmabuf-socket-dir", default="/tmp/dma-page",
         help="dma-browser socket directory for dmabuf://<window-id> inputs")
     add("--dmabuf-size", default="1920x1080", metavar="WxH",

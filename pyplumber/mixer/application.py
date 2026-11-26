@@ -141,6 +141,9 @@ class MixerOptions:
     cuda_ipc_inputs: tuple[tuple[str, str], ...] = ()
     cuda_ipc_output: str = ""
     dmabuf_monitor_dir: str = ""
+    # With dmabuf_monitor_dir: a Janus AUX bus feeds its local monitor only, without an encoder.
+    # For a show watched in the desktop app; a browser cannot play such a bus.
+    local_aux_previews: bool = False
     cuda_ipc_slots: int = 12
 
     def __post_init__(self):
@@ -475,7 +478,9 @@ class MixerApplication:
             # Encoder initialization stalls the shared CUDA context. Let each bus
             # drain its first frames before opening the next one's surface pool.
             self._purge_idle_imports(wait=True, idle_ms=0)
-            self.aux_buses.start(lambda bus: self._wait_for_edges(
+            # A bus on its local monitor only has no encoder: its compositor's first frame says it runs.
+            self.aux_buses.start(lambda bus: self._wait_for_edges((bus.output_edge,), "auxiliary output")
+                                 if getattr(bus, "local", False) else self._wait_for_edges(
                 (f"{bus.prefix}_encoded",), "auxiliary output", "packet"))
         self._check_startup()
 

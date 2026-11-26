@@ -60,6 +60,7 @@ class AuxBus:
         self.output_edge = f"{self.prefix}_out"
         self.lock = threading.Lock()
         self.listener, self.error, self.follower_status = None, "", {}
+        self.local = False   # shown on its local monitor only, without an encoder
         self.layout, self.scenes = bus.layout, list(bus.scenes)
         self.checked_at = time.monotonic()
         self.revision = uuid.uuid4().hex
@@ -145,16 +146,19 @@ class AuxBus:
                 "graph": self.mixer.backend.conversion("sdr", storage, source=self.cfg.out_color,
                                           source_format=self.cfg.working_format, tonemap=r.tonemap or "clip"),
             }))
-        if getattr(options, "dmabuf_monitor_dir", ""):
+        monitor_dir = getattr(options, "dmabuf_monitor_dir", "")
+        # Watched in the desktop app only: the bus needs no encoder, Janus stream or RTCP listener.
+        local = self.local = bool(monitor_dir and getattr(options, "local_aux_previews", False) and r.target == "janus")
+        if monitor_dir:
             from .dmabuf_outputs import tap_monitor
-            converted = tap_monitor(self.avp, self.api, self.mixer.backend, options.dmabuf_monitor_dir,
+            converted = tap_monitor(self.avp, self.api, self.mixer.backend, monitor_dir,
                                     "aux_" + self.bus.id, converted, Color.parse("sdr"),
-                                    storage, self.group, self.hwaccel)
+                                    storage, self.group, self.hwaccel, through=not local)
         if r.target == "mxl":
             from .application import _build_record_output
             _build_record_output(self.avp, self.api, converted, r, codec=r.codec, enc_format=storage, color={},
                                  prefix=self.prefix, group=self.group, failure_mode="off")
-        self.listener = None if r.target == "mxl" else build_janus_output(
+        self.listener = None if local or r.target == "mxl" else build_janus_output(
             self.avp, self.api, converted,
             JanusVideoConfig(host=options.janus_host, video_port=r.port,
                              bitrate_kbps=r.bitrate_kbps, ssrc=options.janus_video_ssrc + r.port,

@@ -40,6 +40,39 @@ def test_local_monitor_taps_program_before_encoding(tmp_path):
     assert sink["type"] == "ipc_dmabuf_sink"
 
 
+def test_local_aux_previews_replace_the_bus_encoder_with_its_monitor(native_boundary, tmp_path):
+    """The desktop app shows an AUX bus from the GPU, so the bus has no encoder, Janus stream or
+    monitor tap: the monitor is the only reader. Without the option, or without a monitor
+    directory, the bus is encoded as before."""
+    class Engine(NativeEngine):
+        def addNode(self, node, **kwargs):
+            super().addNode(node)
+
+        def registerControlCommand(self, *args):
+            pass
+
+    cfg = show()
+    cfg = replace(cfg, aux_buses=config.parse_aux_buses([{
+        "id": "mv", "renditions": [{"id": "monitor", "port": 5012}]}], cfg))
+    def build(**options):
+        api = fake_api()
+        api.AVPlumber, api.MixerGraphBuilder = Engine, native_boundary[1]
+        app = build_application(cfg, MixerOptions(**options), api=api)
+        return app, app.avp.nodes
+    app, local = build(dmabuf_monitor_dir=str(tmp_path), local_aux_previews=True)
+    bus = next(iter(app.aux_buses))
+    assert bus.listener is None and bus.local
+    sink = local["monitor_aux_mv"]
+    assert sink["src"] == bus.output_edge and "subscription" not in sink and "monitor_aux_mv_tap" not in local
+    assert not [name for name in local if name.startswith("aux_mv") and "enc" in name]
+    assert "monitor_program_tap" in local and any(n.get("type") == "enc_video" for n in local.values())   # the program is encoded
+    app, encoded = build(dmabuf_monitor_dir=str(tmp_path))
+    assert not next(iter(app.aux_buses)).local and "monitor_aux_mv_tap" in encoded
+    assert set(local) < set(encoded)
+    _, plain = build(local_aux_previews=True)
+    assert set(plain) == {name for name in encoded if not name.startswith("monitor_")}
+
+
 def test_processed_cuda_ipc_input_uses_final_edge_for_optional_startup(native_boundary):
     options = MixerOptions(cuda_ipc_inputs=(("cam", "/tmp/playout.sock"),))
     app = build_application(show(), options, api=fake_api(),
