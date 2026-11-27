@@ -392,6 +392,10 @@ class AuxBusConfig:
     pgm_delay_frames: int = 1
     full_rate: bool = False              # run at the canvas rate at 50/60 fps instead of half
     label: str = ""                      # the control page's name for it; "" names it by its preset or id
+    # "follow": mixer_pvw_follow writes composition from fixed scenes (default). "external": clocked
+    # compositor + outputs only; the client sets composition via mixer.aux_composition (studio
+    # monitor buses). External buses do not freeze mixer.scene definitions.
+    mode: str = "follow"
 
 
 @dataclass(frozen=True)
@@ -1106,8 +1110,13 @@ def parse_aux_buses(values, cfg):
             raise ConfigError("aux needs a distinct explicit Janus RTP/RTCP port pair")
         if not isinstance(obj.get("label", ""), str):
             raise ConfigError(f"aux {bid}: label must be a string")
+        mode = obj.get("mode", "follow")
+        if mode not in ("follow", "external"):
+            raise ConfigError(f"aux {bid}: mode must be 'follow' or 'external'")
+        if mode == "external" and thumbnails:
+            raise ConfigError(f"aux {bid}: thumbnail banks cannot use mode external")
         result.append(AuxBusConfig(bid, tuple(scenes), (r,), layouts[0], tuple(layouts), max_layers,
-                                   label=obj.get("label", ""), **timing))
+                                   label=obj.get("label", ""), mode=mode, **timing))
     # The legacy audio leg's default ports are only claimed where a source actually has audio;
     # audio_rendition is None exactly then, and is what decides whether that leg is built.
     check_janus_ports([*cfg.renditions, *(b.renditions[0] for b in result)],

@@ -37,13 +37,18 @@ class AuxBus:
     """One AUX bus: a compositor over subscribed sources (and the program, last, when one of its
     layouts draws it), then SDR H.264 or HEVC to Janus, or SDR v210 to MXL.
 
-    A ``mixer_pvw_follow`` node (``<prefix>_pvw``) is the only writer of the composition: this class
-    computes, for the current layout, every scene's preview layers and the base (everything else)
-    with a new revision, and hands them to the node, which draws the mixer's preview changes with
-    the program. A slot assignment, a layout switch and a page turn are each a new base."""
+    Mode ``follow`` (default): a ``mixer_pvw_follow`` node (``<prefix>_pvw``) is the only writer of
+    the composition. This class computes, for the current layout, every scene's preview layers and
+    the base with a new revision, and hands them to the node. Slot assignment, layout switch and
+    page turn each send a new base. Registering with the mixer freezes ``mixer.scene``.
+
+    Mode ``external``: the same clocked compositor and outputs, without a follower and without
+    registering with the mixer, so runtime ``mixer.scene`` stays allowed. The client sets the
+    picture with ``mixer.aux_composition`` (``node.object.set <prefix>_comp composition …``)."""
 
     def __init__(self, avp, api, mixer, cfg, bus, index: int = 0):
         self.avp, self.api, self.mixer, self.cfg, self.bus, self.index = avp, api, mixer, cfg, bus, index
+        self.external = bus.mode == "external"
         self.rendition = bus.renditions[0]
         self.fps = self.rendition.fps
         self.prefix = f"aux_{bus.id}"
@@ -60,6 +65,9 @@ class AuxBus:
         self.lock = threading.Lock()
         self.listener, self.error, self.follower_status = None, "", {}
         self.layout, self.scenes = bus.layout, list(bus.scenes)
+        # External mode: the composition last handed to the compositor. None while the bus still
+        # draws what it was built with, its configured layout and scenes.
+        self.composition = None
         self.checked_at = time.monotonic()
         self.revision = uuid.uuid4().hex
         for source, edge in zip(cfg.sources, self.edges):
@@ -122,19 +130,22 @@ class AuxBus:
         for edge in [self.output_edge, converted]:
             self.avp.edges.planCapacity(edge, 1)
         initial = self.layout_object()
-        self.avp.addNode(self.mixer.canvas_compositor({
+        # Omit "mixer" in external mode: registering an aux compositor freezes mixer.scene.
+        compositor = {
             "name": self.node_name, "src": inputs, "dst": self.output_edge,
             "fps": str(fps), "width": self.rendition.width, "height": self.rendition.height,
             "latency_ms": latency, "warmup_timeout_ms": 250,
             "output_hwaccel": self.hwaccel,
-            "aux_mode": True, "subscriptions": inputs, "mixer": self.mixer.name,
+            "aux_mode": True, "subscriptions": inputs,
             "max_layers": self.bus.max_layers,
             "group": self.group, "auto_restart": "off", "on_error": "off",
+            **({"mixer": self.mixer.name} if not self.external else {}),
             **({"pgm_delay_frames": self.pgm_delay_frames} if self.pgm_delay_frames else {}),
             # Look for frames every few milliseconds instead of waking for each source's frame.
             **({} if self.cfg.aux_input_poll_ms is None else {"input_poll_ms": self.cfg.aux_input_poll_ms}),
             **initial["base"],
-        }, api=self.api), early_create=True)
+        }
+        self.avp.addNode(self.mixer.canvas_compositor(compositor, api=self.api), early_create=True)
         r = self.bus.renditions[0]
         if needs_conversion:
             self.avp.addNode(self.api.FilterVideo({
@@ -171,12 +182,13 @@ class AuxBus:
                 self.avp, self.api, f"{router}_{self.bus.id}",
                 JanusAudioConfig(host=options.janus_host, audio_port=r.audio_port),
                 group=self.group, prefix=f"{self.prefix}_audio", failure_mode="off")
-        self.avp.addNode(_PvwFollowNode({
-            "name": self.follower, "mixer": self.mixer.name, "compositor": self.node_name,
-            "fps": str(fps), "latency_ms": latency, "main_latency_ms": self.main_latency_ms(),
-            "pgm_delay_frames": self.pgm_delay_frames, "align": self.bus.pvw_align,
-            "layout": initial, "group": self.group, "auto_restart": "off", "on_error": "off",
-        }))
+        if not self.external:
+            self.avp.addNode(_PvwFollowNode({
+                "name": self.follower, "mixer": self.mixer.name, "compositor": self.node_name,
+                "fps": str(fps), "latency_ms": latency, "main_latency_ms": self.main_latency_ms(),
+                "pgm_delay_frames": self.pgm_delay_frames, "align": self.bus.pvw_align,
+                "layout": initial, "group": self.group, "auto_restart": "off", "on_error": "off",
+            }))
 
     def start(self):
         self.avp.group(self.group).startNodes()
@@ -205,9 +217,16 @@ class AuxBus:
 
     def _resend(self):
         """The current layout to the follower. While the follower is unreachable the binding logs
-        and drops the command; tick() resends it."""
+        and drops the command; tick() resends it. External buses have no follower."""
+        if self.external:
+            return
         self.avp.executeCommandsFromString(
             f"node.object.set {self.follower} layout {json.dumps(self.layout_object())}")
+
+    def _refuse_follow(self, who: str) -> None:
+        if self.external:
+            raise ConfigError(f"aux {self.bus.id}: {who} needs mode follow "
+                              f"(this bus is external; use mixer.aux_composition)")
 
     def _pages(self):
         """A source_pages layout's page shown, page count and sources shown."""
@@ -229,26 +248,33 @@ class AuxBus:
         with self.lock:
             status = self._status(self.node_name)
             running, status = status is not None, status or {}
-            follower = self._status(self.follower)
-            if follower is not None:
-                self.follower_status = follower
+            if not self.external:
+                follower = self._status(self.follower)
+                if follower is not None:
+                    self.follower_status = follower
             sources = self.cfg.sources
             cells = [{**c, "id": sources[c["source"]].id, "kind": sources[c["source"]].kind}
                      if c["role"] == "source" else c for c in self.cells()]
             # Pending until the compositor draws this revision: the follower sets it a wake after
             # the change, and the compositor stages it until its new inputs have frames.
-            pending = status.get("composition_pending", False) or status.get("composition_revision") != self.revision
-            return {"id": self.bus.id, "error": self.error, "cells": cells,
+            pending = status.get("composition_pending", False)
+            if not self.external:
+                pending = pending or status.get("composition_revision") != self.revision
+            return {"id": self.bus.id, "error": self.error, "cells": cells, "mode": self.bus.mode,
                     "max_layers": self.bus.max_layers, "canvas": {"w": self.rendition.width, "h": self.rendition.height},
                     "fps": rate_number(self.fps), "latency_ms": self.latency_ms(), "pvw_align": self.bus.pvw_align,
                     "pgm_delay_frames": self.pgm_delay_frames, "follower": self.follower_status,
                     "pvw_scene": self.follower_status.get("pvw_scene", ""), **self._live(), **status,
+                    # layout, scenes and cells are what an external bus was built with: its picture
+                    # until the first composition, and no longer once this is set.
+                    **({"composition": self.composition} if self.external else {}),
                     "running": running, "composition_pending": pending}
 
     def assign(self, request):
         """Slot assignments: the complete ``scenes`` list as the status reports it, by slot index,
         against ``expected_revision``."""
         with self.lock:
+            self._refuse_follow("aux")
             if request.get("expected_revision") != self.revision:
                 return {"error": "Assignments changed; refresh before editing", "conflict": True, **self._summary()}
             scenes, cells = request.get("scenes"), self.cells()
@@ -264,6 +290,7 @@ class AuxBus:
     def set_layout(self, request):
         """Switch to ``layout``, validated and within the layer budget; assignments keep their slots."""
         with self.lock:
+            self._refuse_follow("aux_layout")
             if self.bus.layout.get("preset") == thumbnail.PRESET:
                 raise ConfigError("thumbnail banks have a fixed source mapping")
             layout = parse_layout(self.cfg, request.get("layout"))
@@ -281,6 +308,7 @@ class AuxBus:
     def turn(self, request):
         """Show a page (``page`` or relative ``step``) of a source_pages layout: the layout's ``page``."""
         with self.lock:
+            self._refuse_follow("aux_page")
             if self.layout.get("preset") != "source_pages":
                 raise ConfigError(f"aux {self.bus.id} shows no source pages")
             pages = page_count(self.cfg)
@@ -294,10 +322,36 @@ class AuxBus:
             self._send()
             return self._summary()
 
+    def set_composition(self, request):
+        """Write the compositor's ``composition`` object (external mode only). The answer says it
+        was handed over: the compositor stages it until its inputs have frames, and the bus's
+        state has ``composition_pending`` and ``composition_error`` for what became of it."""
+        with self.lock:
+            if not self.external:
+                raise ConfigError(f"aux {self.bus.id}: aux_composition needs mode external")
+            composition = request.get("composition")
+            if not isinstance(composition, dict) or "layers" not in composition:
+                raise ConfigError(f"aux {self.bus.id}: composition needs a layers list")
+            if not isinstance(composition["layers"], list):
+                raise ConfigError(f"aux {self.bus.id}: composition.layers must be a list")
+            # The binding logs what the compositor refuses and returns, so the two refusals that
+            # can be told from here are made here: its setter reads active_inputs unconditionally,
+            # and a command to a node that is not running is dropped.
+            if "active_inputs" not in composition:
+                raise ConfigError(f"aux {self.bus.id}: composition needs active_inputs")
+            if self._status(self.node_name) is None:
+                raise ConfigError(f"aux {self.bus.id}: its compositor is not running")
+            self.avp.executeCommandsFromString(
+                f"node.object.set {self.node_name} composition {json.dumps(composition)}")
+            self.composition, self.error = composition, ""
+            return {"bus": self.bus.id, "node": self.node_name}
+
     def tick(self, now):
         """One pass of the shared scheduler: once a second, resend the layout to a follower that
         restarted (it holds the one it was built with). Returns the seconds until this bus is due
-        again."""
+        again. External buses have nothing to poll."""
+        if self.external:
+            return 1.0
         with self.lock:
             try:
                 if now >= self.checked_at + 1:
@@ -363,6 +417,7 @@ class AuxBuses:
         self.avp.registerControlCommand("mixer.aux", command(AuxBus.assign), True)
         self.avp.registerControlCommand("mixer.aux_layout", command(AuxBus.set_layout), True)
         self.avp.registerControlCommand("mixer.aux_page", command(AuxBus.turn), True)
+        self.avp.registerControlCommand("mixer.aux_composition", command(AuxBus.set_composition), True)
         # Polled several times a second by every open page: quiet, and without what does not change.
         self.avp.registerControlCommand("mixer.aux_status", lambda _arg: json.dumps([b.state() for b in self]) + "\n", True, True)
         layouts = json.dumps({b.bus.id: list(b.bus.layouts) for b in self}) + "\n"

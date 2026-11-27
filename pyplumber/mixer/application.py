@@ -27,6 +27,9 @@ from .dmabuf_inputs import (BrowserStartupUnsettled, dmabuf_cuda_input_nodes, op
                             refresh_windows, rest_request, wait_for_sockets)
 from .dsk import DownstreamKeyer, register_dsk_commands
 from .inputs import build_input, build_v210_input, build_raw420_input
+from .browser_control import BrowserController, register_browser_commands
+from .source_control import (SETTABLE_KINDS, SourceController, SourceUrls, chain_teams,
+                             register_source_commands, source_pads)
 from .janus import (DEFAULT_KEYFRAME_MIN_INTERVAL_MS, JANUS_KEYFRAME_NODE, JanusVideoConfig,
                     RtcpFeedbackGroup, add_nodes, build_janus_output, dpb_options, release_commands)
 from ..transform import transform_output, transform_params
@@ -37,6 +40,8 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("mixer")
 DEFAULT_FPS = 30
+# Frame keys pause/seek need on each decoded frame (wallclock for resume-at; frame_ts for seek).
+PLAYBACK_FRAME_METADATA = ("wallclock", "frame_ts")
 # Instance-owned: a global (@) device survives shutdown until CUDA static teardown.
 HWACCEL = "mixer_gpu"
 # An alpha source's frames to the GPU as RGBA. Not pinned: pinned staging needs
@@ -138,6 +143,15 @@ class MixerOptions:
     # leaves this name alone and skips the audio_mixer-specific gain controller.
     audio_router_node: str = ""
     build_audio_mixer: bool = True
+    # Pause node + named realtime team on every video source's chain, so pause / seek / resume
+    # (and resume … at) work without an application monkeypatching build_input. Not on an NDI
+    # source's: its plain input node has nothing to pause or seek. Off for demos.
+    playback_control: bool = False
+    # What mixer.source.set / prepare may give an input: FFmpeg protocol names ("srt", "https";
+    # "file" is every file) and absolute directories (the files below them). None: any URL, as
+    # the control port's node.param.set takes. Set it when the commands are reachable by others
+    # than the operator of the host, e.g. through the REST API (source_control.SourceUrls).
+    source_urls: tuple[str, ...] | None = None
     cuda_ipc_inputs: tuple[tuple[str, str], ...] = ()
     cuda_ipc_output: str = ""
     cuda_ipc_slots: int = 12
@@ -156,6 +170,7 @@ class MixerOptions:
         object.__setattr__(self, "fps", mixer_config.parse_rate(self.fps, "--fps"))
         if not 0 <= self.remote_control_port <= 65535:
             raise ValueError("remote_control_port must be between 0 and 65535")
+        SourceUrls(self.source_urls)
         if not 0 <= self.janus_rtcp_port <= 65535:
             raise ValueError("janus_rtcp_port must be between 0 and 65535")
         if self.preheat_timeout_sec <= 0:
@@ -681,6 +696,7 @@ def load_avp_api():
         OneToMany,
         Output,
         OutputNb,
+        Pause,
         PreheatVideoRouter,
         RawVideoFileCuda,
         Realtime,
@@ -722,6 +738,7 @@ def load_avp_api():
         OneToMany=OneToMany,
         Output=Output,
         OutputNb=OutputNb,
+        Pause=Pause,
         PreheatVideoRouter=PreheatVideoRouter,
         RawVideoFileCuda=RawVideoFileCuda,
         Realtime=Realtime,
@@ -733,6 +750,18 @@ def load_avp_api():
         Split=Split,
         PackedToCuda=PackedToCuda,
     )
+
+
+def _playback_input_kwargs(pause_team: str, sync_team: str, *, frame_metadata,
+                           input_params: dict | None = None) -> dict:
+    """Args that give ``build_input`` a pause node and a seekable realtime team (studio playout)."""
+    return {
+        "pause_team": pause_team,
+        "sync_team": sync_team,
+        "input_params": {**(input_params or {}), "pause_team": pause_team},
+        "pause_params": {"pass_on_seek": False},
+        "frame_metadata": sorted(set(frame_metadata or ()) | set(PLAYBACK_FRAME_METADATA)),
+    }
 
 
 def infer_output_format(output: str, explicit_format: str | None = None) -> str:
@@ -1098,18 +1127,25 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
                 ndi = source.kind == "ndi"
                 if ndi:
                     live_inputs.append(f"input_{index}")
+                input_params = ({"format": "libndi_newtek", "options": {
+                    **NDI_INPUT_OPTIONS, **({"extra_ips": source.extra_ips} if source.extra_ips else {})}}
+                    if ndi else None)
+                sync_team, pause_team = chain_teams(index, source, playback_control=options.playback_control)
+                playback = (_playback_input_kwargs(pause_team, sync_team, input_params=input_params,
+                                                   frame_metadata=file_params["frame_metadata"])
+                            if pause_team else {
+                                **({} if input_params is None else {"input_params": input_params}),
+                                **({} if sync_team is None else {"sync_team": sync_team}),
+                            })
                 edge, audio_edge = build_input(
                     avp, api, str(index), source.location, continuous_loop=True,
-                    **({"input_params": {"format": "libndi_newtek", "options": {
-                        **NDI_INPUT_OPTIONS, **({"extra_ips": source.extra_ips} if source.extra_ips else {})}},
-                        "live_timeout": NDI_READ_TIMEOUT_S} if ndi else {}),
+                    **({"live_timeout": NDI_READ_TIMEOUT_S} if ndi else {}),
                     # NVDEC drops alpha: an alpha source decodes in software, in its codec's own
                     # format (argb, yuva444p12...), and is uploaded as RGBA after its chain. NDI's
                     # packed 4:2:2 (UYVY) is no codec NVDEC has: its frames go the same way, as NV12.
                     decoder_params={**_decoder_params(source, cfg), **({"hwaccel_only_for_codecs": []} if source.alpha or ndi else {})},
                     decoded_ahead=cfg.decoded_frames_ahead,
-                    # realtime measures and drops a backlog as a member of a team, also one of its own.
-                    has_audio=source.has_audio, sync_team=(f"input_{index}_av_sync" if source.has_audio or ndi else None),
+                    has_audio=source.has_audio,
                     # Not with audio: its realtime node gets the same parameters and shares the team,
                     # and audio queued in its own chain would flush the pictures with it (untested).
                     **({"realtime_params": {"jitter_margin": fps_den / fps_num, "initial_jitter_margin": fps_den / fps_num,
@@ -1119,7 +1155,7 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
                                                 "intermediate_queues": [f"input_{index}_video_packets"],
                                                 "max_buffered": NDI_BACKLOG_MAX * fps_den / fps_num,
                                                 "min_buffered": NDI_BACKLOG_KEEP * fps_den / fps_num})}} if ndi else {}),
-                    **file_params)
+                    **{**file_params, **playback})
                 if audio_edge:
                     audio_edges.append((source.id, audio_edge))
                 if source.alpha or ndi:
@@ -1298,6 +1334,19 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
         return json.dumps({"outputs": overlay_on}) + "\n"
 
     avp.registerControlCommand("mixer.debug_overlay", debug_overlay, True)
+    pads = source_pads(cfg.sources, external=set(external),
+                       playback_control=options.playback_control, raw_upload=cfg.raw_upload)
+    source_hints = {s.id: {"url": s.location, "loop": s.loop}
+                    for s in cfg.sources if pads[s.id].kind in SETTABLE_KINDS}
+    browser_urls = {s.id: s.location for s in cfg.sources if pads[s.id].kind == "browser"}
+    register_source_commands(avp, SourceController(
+        avp, pads, mixer=MIXER_NAME, control_port=options.remote_control_port,
+        allowed_urls=options.source_urls, hints=source_hints, browser_urls=browser_urls))
+    if browsers and options.dmabuf_rest:
+        register_browser_commands(avp, BrowserController(
+            dmabuf_rest=options.dmabuf_rest,
+            browser_ids=(source.id for source in browsers.values()), mixer=MIXER_NAME,
+            urls=browser_urls))
     held = []
     # Purge idle imports left by the capture pool's start-up churn.
     importers = tuple(f"input_{index}_to_cuda" for index in browsers)

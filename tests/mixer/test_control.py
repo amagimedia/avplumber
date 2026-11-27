@@ -76,6 +76,21 @@ def test_a_cancelled_greeting_leaves_no_half_connected_socket():
     asyncio.run(exercise())
 
 
+@pytest.mark.parametrize("failure, raised", [
+    (OSError(65, "No route to host"), ConnectionError),
+    (TimeoutError(60, "Operation timed out"), ConnectionError),   # the system's connect timeout: nothing was sent
+    (ConnectionRefusedError(61, "Connection refused"), ConnectionRefusedError),
+])
+def test_a_connection_that_cannot_be_made_is_a_connection_error(monkeypatch, failure, raised):
+    async def no_connection(*_args, **_kwargs):
+        raise failure
+    monkeypatch.setattr(asyncio, "open_connection", no_connection)
+    connection = AvpConnection("engine.example", 7777)
+    with pytest.raises(raised) as caught:
+        asyncio.run(connection.connect())
+    assert failure.strerror in str(caught.value) and not connection.connected
+
+
 def test_mixer_command_uses_generic_json_payload():
     command = mixer_command("fade", "main", scene="grid_4_page_0", duration_sec=0.5)
     prefix, payload = command.split(" ", 1)

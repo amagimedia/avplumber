@@ -176,7 +176,7 @@ separate key-only Auto behavior and the distinction between ALL and NEXT.
 
 ## aux_buses
 
-Each bus has an `id`, layouts, scene assignments and Janus renditions (`port`, optional `codec`, `preset`, `bitrate_kbps`). It reuses source frames and drops output rather than blocking Program. SDR only; half canvas rate above 30 fps unless `full_rate` (`60000/1001` halves to `30000/1001`). Canvas rates: 25, 30000/1001, 30, 50, 60000/1001 and 60. Commands: `mixer.aux_layout`, `mixer.aux`, `mixer.aux_page`, `mixer.aux_status`. Assignment updates include the current `expected_revision`. Layout changes stage new sources; status exposes `composition_pending` and `composition_error`. See [timing details](../../../doc/mixer.md#aux-bus-follower).
+Each bus has an `id`, layouts, scene assignments and Janus renditions (`port`, optional `codec`, `preset`, `bitrate_kbps`). It reuses source frames and drops output rather than blocking Program. SDR only; half canvas rate above 30 fps unless `full_rate` (`60000/1001` halves to `30000/1001`). Canvas rates: 25, 30000/1001, 30, 50, 60000/1001 and 60. Commands: `mixer.aux_layout`, `mixer.aux`, `mixer.aux_page`, `mixer.aux_status`; external buses also take `mixer.aux_composition`. Assignment updates include the current `expected_revision`. Layout changes stage new sources; status exposes `composition_pending` and `composition_error`. See [timing details](../../../doc/mixer.md#aux-bus-follower).
 
 | role | draws |
 | --- | --- |
@@ -204,6 +204,7 @@ Each bus has an `id`, layouts, scene assignments and Janus renditions (`port`, o
 | `pvw_align` | `program` | Change PVW alongside Program, or `pgm_tile` to align with the delayed PGM cell. |
 | `label` | `Program preview`, `Multiviewer` or `Aux <id>` by its initial layout | the bus's name on the control page |
 | `full_rate` | `false` | Keep canvas rate above 30 fps; increases compositor/encoder work. |
+| `mode` | `"follow"` | `"follow"`: a `mixer_pvw_follow` node writes composition from slot/layout/page. `"external"`: clocked compositor + outputs only; the client sets the picture with `mixer.aux_composition` (studio monitor buses). External mode does not freeze `mixer.scene`. |
 
 ## Known limitations
 

@@ -22,7 +22,6 @@ from __future__ import annotations
 import json
 import queue
 import socket
-import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
@@ -31,6 +30,7 @@ from typing import Dict, List, Optional, Tuple
 
 from pyplumber.mixer.inputs import build_input
 from pyplumber.mixer.janus import JanusVideoConfig, build_janus_output
+from pyplumber.mixer.source_control import probe_duration_ms
 from playlist import SLOT_CAPACITY, BackendEvent, Clip, Transition, now_ms
 
 MIXER = "mixer"
@@ -115,13 +115,7 @@ def load_avp_api():
 
 
 def probe_length_ms(url: str) -> Optional[int]:
-    try:
-        out = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", url],
-            capture_output=True, text=True, timeout=10, check=True).stdout.strip()
-        return int(float(out) * 1000)
-    except (OSError, ValueError, subprocess.SubprocessError):
-        return None
+    return probe_duration_ms(url, timeout=10)
 
 
 def _fingerprint(clip: Clip) -> Tuple:

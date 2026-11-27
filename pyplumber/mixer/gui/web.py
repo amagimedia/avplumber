@@ -73,10 +73,11 @@ import logging
 import os
 import signal
 import threading
-from urllib.parse import urlsplit
 from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+from pyplumber.rest.origin import cross_origin
 
 from .bridge import AUX_COMMANDS, MixerBridge
 from .contracts import GpuTelemetry, SetupController
@@ -323,9 +324,7 @@ class Handler(BaseHTTPRequestHandler):
     def _cross_origin(self) -> bool:
         """A browser request sent by another origin's page, which must not drive this instance.
         Clients other than browsers send no Origin; who may reach the port is the deployment's choice."""
-        origin = self.headers.get("Origin")
-        return bool(origin and urlsplit(origin).netloc != self.headers.get("Host")) or \
-            self.headers.get("Sec-Fetch-Site") == "cross-site"
+        return cross_origin(self.headers)
 
     def _read_json(self, limit: int, what: str) -> dict:
         """The request's JSON object. Requiring application/json also makes a browser preflight any

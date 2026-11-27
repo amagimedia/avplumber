@@ -198,6 +198,11 @@ def open_windows(base_url: str, windows: List[dict]) -> None:
                                      len(changed), len(windows), time.monotonic() - started)
 
 
+def update_window(base_url: str, window_id: str, url: str) -> None:
+    """Load *url* in an existing window without recreating it (size stays as opened)."""
+    rest_request(base_url, "POST", "/window/update", {"id": window_id, "url": url})
+
+
 def refresh_windows(base_url: str, ids: List[str]) -> None:
     """Reload pages so ones that only paint on load paint again into a connected chain."""
     for name in ids:

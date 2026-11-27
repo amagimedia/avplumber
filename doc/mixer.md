@@ -415,6 +415,121 @@ Python boundaries are `gui.bridge` (AVP connection and command ordering),
 thread priority), and `gui.web` (HTTP and CLI). Existing public imports from
 `gui.web` remain available; new applications can use `pyplumber.mixer.gui`.
 
+Programs other than the control page drive the mixer through the optional
+[REST API](rest_api.md): `pyplumber.mixer.rest.mixer_router(bridge)` serves the
+takes, keys, AUX buses, sources and audio as typed, OpenAPI-described routes over the same
+`MixerBridge`.
+
+### Source repoint (`mixer.source.set`)
+
+Change the URL and loop of an existing show source pad without tearing down the
+mixer. The command stops the source's input group from its terminal nodes, waits,
+clears the group's own queues (so a leftover EOS cannot end the chain or the
+nodes behind the compositors), sets `url` / `loop` / `loop_continuous_ts` on the
+input node, resets the source's realtime team when one is wired, resumes a pause
+team when one is wired, and starts the group again.
+
+```text
+mixer.source.set {"mixer":"mixer","id":"<sourceId>","url":"…","loop":true}
+```
+
+The command answers with an error, and not with the new `url`, when the input
+node did not take a parameter (the group is then started again with the
+parameters it has) or when the group did not stop within 5 s (the source then
+stays stopped until a `mixer.source.set` succeeds: its queues were not cleared,
+so starting it could end the chain with the old stream's EOS). The start itself
+is a request the engine carries out afterwards: a URL that cannot be opened shows
+in the engine's log and the node state, not in this answer.
+
+Address sources by show source id (resolved to `input_<index>` the way
+`build_application` names them). Supported kinds are `video`, `ndi`, raw
+(`v210` / `nv12` / `p010`) and `mxl`. Raw and MXL pads keep the width, height,
+pixel format and colour they were built with: only the URL changes. An MXL URL
+is `mxl://<domain>?id=<flow>` (absolute domain path and a video flow id) and
+`loop` must be false. Browser and VMM pads answer with a clear error. REST:
+`PUT /mixer/sources/{id}` with `{"url","loop"}`. A browser page uses
+`mixer.browser.navigate` (below) instead.
+
+`mixer.sources` lists every show pad in index order (`id`, `kind`, and `url` /
+`loop` when known — from the input node's params or the show config for settable
+kinds, and from navigate tracking for browsers). REST: `GET /mixer/sources`.
+
+The URL is opened by the engine, on its host: a file there, or an address that
+host reaches. By default any URL is taken, as `node.param.set` on the control
+port takes one. `MixerOptions.source_urls` limits what `mixer.source.set` and
+`mixer.source.prepare` accept; set it when others than the host's operator can
+send these commands, e.g. through the REST API. It is a list of:
+
+* FFmpeg protocol names: `"srt"`, `"https"`, `"udp"`, `"mxl"`. `"file"` allows
+  every file. The name is the URL's whole scheme, so `"https"` does not allow
+  `crypto+https://…`, and `concat:` or `subfile,…:` need their own entry.
+* absolute directories: `"/media/clips"` allows the files below it, given as a
+  path or as `file:<path>`. `..` and symbolic links are resolved first.
+
+```python
+MixerOptions(source_urls=("srt", "mxl", "/media/clips"))
+```
+
+An empty list allows nothing. A URL outside the list is refused before the
+source is stopped. The rule is about the URL the request names: a playlist in
+an allowed directory may still refer to files elsewhere. The control port
+itself is not limited by it.
+
+### Browser navigate (`mixer.browser.navigate` / `refresh`)
+
+A browser source's page lives in the DMA-BUF browser service, not on an FFmpeg
+input node. Changing it does not stop the mixer's input group:
+
+```text
+mixer.browser.navigate {"mixer":"mixer","id":"<sourceId>","url":"https://…"}
+mixer.browser.refresh  {"mixer":"mixer","id":"<sourceId>"}
+```
+
+`navigate` loads the URL in the existing window (`POST /window/update`);
+`refresh` reloads the current page (`POST /window/refresh`). The window id is
+the show source id. Size stays as the show opened it. The commands are
+registered only when the show has browser sources; otherwise the engine answers
+unknown command (REST: 404 `not_available`). A non-browser id is refused.
+REST: `POST /mixer/sources/{id}/navigate` with `{"url"}`, and
+`POST /mixer/sources/{id}/refresh`.
+
+### Playback control (`MixerOptions.playback_control`)
+
+Opt in so the chain of each `video` source gets a `pause` node
+(`input_<tag>_pause`), a realtime sync team (`input_<tag>_av_sync` even without
+audio), `pass_on_seek: false` on the pause node, and `wallclock` / `frame_ts` on
+decoded frames. That is what pause / seek / `resume … at` need; ordinary demos
+leave the option off. An `ndi` source's chain stays as it is without the option:
+it is read by the plain `input` node, which waits on no pause team and has no
+position to seek to.
+Studio and other playout callers set `MixerOptions(playback_control=True)`
+instead of monkeypatching `build_input`.
+
+### Playout (`mixer.source.prepare` / `media` / `resume_at`)
+
+Need `playback_control` and a `video` source; an `ndi` source answers with an
+error (it takes `mixer.source.set` only). They also need the control port
+(`MixerOptions.remote_control_port`, set by default): pause and seek are sent
+through it, because the retry below acts on the engine's refusal and the Python
+binding only logs one. Address sources by show source id.
+
+```text
+mixer.source.prepare {"mixer":"mixer","id":"<sourceId>","url":"…","loop":false,"cue_in_ms":0}
+mixer.source.media   {"mixer":"mixer","id":"<sourceId>","action":"play"|"pause"|"seek"|"stop"|"restart",…}
+mixer.source.resume_at {"mixer":"mixer","id":"<sourceId>","at_ms":<wallclock_ms>}
+```
+
+`prepare` repoints like `source.set`, probes duration when ffprobe knows it, pauses on
+the first frame, then seeks to `cue_in_ms` (the pause node holds that frame). `media`
+drives play / pause / seek / stop / restart; pause and seek retry while the chain has
+no frame yet (`Can not determine current time`). `resume_at` schedules
+`resume <pause_team> at <at_ms>`. `at_ms` is on the engine's wallclock, in
+milliseconds: the clock `mixer.status` reports as `now_pts_ms` (`GET
+/mixer/status`), so a client reads it there and adds its lead time.
+
+The engine does **not** report playhead position; a client keeps its own
+estimate. REST: `POST /mixer/sources/{id}/prepare`, `/media`, `/resume_at`.
+
 ## Profiling
 
 The engine marks its timeline with NVTX ([timeline.hpp](../src/timeline.hpp)). Without a
@@ -594,9 +709,9 @@ compositor's counters and releases all outputs together on a key
 frame, in that order, so what the counters say on air starts from zero and
 nothing on air is reset away. `mixer.startup` answers with how it went:
 `settled` (false after the timeout), `waited_sec`, `reason`, each compositor's
-`counters` at the release and the `warm_up` totals the reset discarded. Setup
-waits up to 180 s for the mixer's startup: the preheat and this wait share that
-budget.
+`counters` at the release and the `warm_up` totals the reset discarded. REST:
+`GET /mixer/startup` (404 until the show is on air). Setup waits up to 180 s for
+the mixer's startup: the preheat and this wait share that budget.
 
 Sources feed the compositors directly after source normalization.
 Their scene layers use `dst_x`, `dst_y`, `dst_w`, `dst_h`, optional `crop`, and
@@ -776,19 +891,47 @@ CUDA device. This is separate from the GPU-native program video path.
 
 ## AUX bus follower
 
-Every AUX bus (`demos/mixer/docs/config.md`, `aux_buses`) has a
-`mixer_pvw_follow` node, `aux_<id>_pvw`, the only writer of its compositor's
-`composition`. The control side (`pyplumber/mixer/aux.py`) turns the bus's
-layout, a list of cells by role (`pyplumber/mixer/aux_layout.py`), into the
-node's `layout` object: every scene's layers in the `pvw` cells (empty when
-there are none) and the base, everything else, with a revision. The node sets
-pvw[shown] followed by the base with that revision; the compositor reports the
-revision it draws (`composition_revision`), and the bus is
+Every AUX bus (`demos/mixer/docs/config.md`, `aux_buses`) with the default
+`mode: "follow"` has a `mixer_pvw_follow` node, `aux_<id>_pvw`, the only writer
+of its compositor's `composition`. The control side (`pyplumber/mixer/aux.py`)
+turns the bus's layout, a list of cells by role (`pyplumber/mixer/aux_layout.py`),
+into the node's `layout` object: every scene's layers in the `pvw` cells (empty
+when there are none) and the base, everything else, with a revision. The node
+sets pvw[shown] followed by the base with that revision; the compositor reports
+the revision it draws (`composition_revision`), and the bus is
 `composition_pending` until it is the bus's own. A slot assignment, a layout
 switch and a page turn are each a new layout object; one Python thread for all
 buses resends the layout to a follower that restarted with the one it was built
 with. The timing of the PVW cells is
 `src/mixer/primitives/PreviewFollow.hpp`.
+
+### External AUX mode (`mode: "external"`)
+
+An external bus builds the same clocked compositor and Janus/MXL outputs, but
+omits the follower and does **not** register the compositor with the mixer
+(registering freezes `mixer.scene`). The client writes the picture:
+
+```text
+mixer.aux_composition {"bus":"<id>","composition":{"layers":[…],"active_inputs":…}}
+```
+
+REST: `PUT /mixer/aux/{bus}/composition` with `{"composition":…}`. Slot / layout
+/ page commands refuse on an external bus. Studio monitor buses use this mode
+instead of monkeypatching `AuxBus`.
+
+Until the first composition the bus draws the layout and scenes it was built
+with. `mixer.aux_status` reports them for an external bus too, and beside them
+`composition`: null until one is set, then the one last handed to the
+compositor.
+
+The answer means the composition was handed to the compositor, not that it is
+drawn. The command refuses a composition without `layers` or `active_inputs`
+and a bus whose compositor is not running. The compositor then stages the
+composition until its inputs have frames: `mixer.aux_status` (`GET /mixer/aux`)
+reports `composition_pending` meanwhile, and `composition_error` when it kept
+the previous picture. What the compositor itself refuses (a layer naming an
+input the bus does not have, more layers than `max_layers`) is in the engine's
+log only: the Python binding does not return a control command's error.
 
 Every preview change is one `MixerState::PreviewChange` (revision, the pts of
 the first program frame of the new program, the take command's receipt and
