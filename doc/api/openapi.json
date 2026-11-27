@@ -243,6 +243,55 @@
         "title": "AuxScenes",
         "type": "object"
       },
+      "BrowserNavigate": {
+        "additionalProperties": false,
+        "description": "Load a page in an existing browser source window. Size stays as the show opened it.\nNeeds a show with browser sources (dma-browser); otherwise 404 `not_available`.",
+        "properties": {
+          "url": {
+            "minLength": 1,
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "title": "BrowserNavigate",
+        "type": "object"
+      },
+      "BrowserNavigateResult": {
+        "additionalProperties": true,
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "url"
+        ],
+        "title": "BrowserNavigateResult",
+        "type": "object"
+      },
+      "BrowserRefreshResult": {
+        "additionalProperties": true,
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "BrowserRefreshResult",
+        "type": "object"
+      },
       "Cut": {
         "additionalProperties": false,
         "properties": {
@@ -5047,6 +5096,144 @@
         ]
       }
     },
+    "/api/v1/mixer/sources/{source_id}/navigate": {
+      "post": {
+        "description": "Load a URL in a browser source's window (dma-browser). Not `source.set`.",
+        "operationId": "mixer_navigate_browser",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "source_id",
+            "required": true,
+            "schema": {
+              "title": "Source Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BrowserNavigate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BrowserNavigateResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unauthorized`: the gateway requires a bearer token and the request has none, or another one"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`cross_origin`: a browser sent the request for another site's page"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`not_available`: this show or engine has no such command (e.g. keys in a show without a keyer)"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`engine_rejected`: the engine refused the command, `message` is its reason; `conflict`: the resource changed since the revision the request names"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`invalid_request`: the request does not match the schema, `details` lists the fields"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`internal_error`: the gateway failed; its log has the cause"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`bad_engine_reply`: the engine's reply is not JSON, or lacks a field this route's schema promises"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`engine_unreachable`: no control connection to the engine; `engine_not_ready`: the engine is starting and does not take this command yet"
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`engine_timeout`: the engine did not answer in time; the command may still have run"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Navigate Browser",
+        "tags": [
+          "mixer"
+        ]
+      }
+    },
     "/api/v1/mixer/sources/{source_id}/prepare": {
       "post": {
         "description": "Load a URL, pause on the cue-in frame. Needs a mixer built with playback_control.",
@@ -5180,6 +5367,134 @@
           }
         ],
         "summary": "Prepare Source",
+        "tags": [
+          "mixer"
+        ]
+      }
+    },
+    "/api/v1/mixer/sources/{source_id}/refresh": {
+      "post": {
+        "description": "Reload the page currently shown by a browser source.",
+        "operationId": "mixer_refresh_browser",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "source_id",
+            "required": true,
+            "schema": {
+              "title": "Source Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BrowserRefreshResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unauthorized`: the gateway requires a bearer token and the request has none, or another one"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`cross_origin`: a browser sent the request for another site's page"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`not_available`: this show or engine has no such command (e.g. keys in a show without a keyer)"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`engine_rejected`: the engine refused the command, `message` is its reason; `conflict`: the resource changed since the revision the request names"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`invalid_request`: the request does not match the schema, `details` lists the fields"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`internal_error`: the gateway failed; its log has the cause"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`bad_engine_reply`: the engine's reply is not JSON, or lacks a field this route's schema promises"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`engine_unreachable`: no control connection to the engine; `engine_not_ready`: the engine is starting and does not take this command yet"
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`engine_timeout`: the engine did not answer in time; the command may still have run"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Refresh Browser",
         "tags": [
           "mixer"
         ]

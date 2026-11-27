@@ -443,7 +443,7 @@ Address sources by show source id (resolved to `input_<index>` the way
 `build_application` names them). Supported kinds are `video` and `ndi` (chains
 built by `build_input`). Browser, raw (`v210` / `nv12` / `p010`), MXL and VMM
 pads answer with a clear error. REST: `PUT /mixer/sources/{id}` with
-`{"url","loop"}`.
+`{"url","loop"}`. A browser page uses `mixer.browser.navigate` (below) instead.
 
 The URL is opened by the engine, on its host: a file there, or an address that
 host reaches. By default any URL is taken, as `node.param.set` on the control
@@ -465,6 +465,24 @@ An empty list allows nothing. A URL outside the list is refused before the
 source is stopped. The rule is about the URL the request names: a playlist in
 an allowed directory may still refer to files elsewhere. The control port
 itself is not limited by it.
+
+### Browser navigate (`mixer.browser.navigate` / `refresh`)
+
+A browser source's page lives in the DMA-BUF browser service, not on an FFmpeg
+input node. Changing it does not stop the mixer's input group:
+
+```text
+mixer.browser.navigate {"mixer":"mixer","id":"<sourceId>","url":"https://…"}
+mixer.browser.refresh  {"mixer":"mixer","id":"<sourceId>"}
+```
+
+`navigate` loads the URL in the existing window (`POST /window/update`);
+`refresh` reloads the current page (`POST /window/refresh`). The window id is
+the show source id. Size stays as the show opened it. The commands are
+registered only when the show has browser sources; otherwise the engine answers
+unknown command (REST: 404 `not_available`). A non-browser id is refused.
+REST: `POST /mixer/sources/{id}/navigate` with `{"url"}`, and
+`POST /mixer/sources/{id}/refresh`.
 
 ### Playback control (`MixerOptions.playback_control`)
 

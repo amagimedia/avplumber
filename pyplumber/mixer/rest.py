@@ -353,6 +353,21 @@ class SourceResumeAtResult(Reply):
     at_ms: int
 
 
+class BrowserNavigate(Request):
+    """Load a page in an existing browser source window. Size stays as the show opened it.
+    Needs a show with browser sources (dma-browser); otherwise 404 `not_available`."""
+    url: Annotated[str, Field(min_length=1)]
+
+
+class BrowserNavigateResult(Reply):
+    id: str
+    url: str
+
+
+class BrowserRefreshResult(Reply):
+    id: str
+
+
 # --- Audio ---
 
 GainDb = Annotated[float, Field(ge=DB_MIN, le=DB_MAX)]
@@ -556,6 +571,16 @@ def mixer_router(bridge: MixerBridge, *, on_aux_change: Callable[[str, dict], No
     def resume_source_at(source_id: str, request: SourceResumeAt):
         """Schedule `resume <pause_team> at <at_ms>` for a timed cue-in."""
         return send("source.resume_at", request, id=source_id, mixer=bridge.mixer)
+
+    @router.post("/sources/{source_id}/navigate", response_model=BrowserNavigateResult)
+    def navigate_browser(source_id: str, request: BrowserNavigate):
+        """Load a URL in a browser source's window (dma-browser). Not `source.set`."""
+        return send("browser.navigate", request, id=source_id, mixer=bridge.mixer)
+
+    @router.post("/sources/{source_id}/refresh", response_model=BrowserRefreshResult)
+    def refresh_browser(source_id: str):
+        """Reload the page currently shown by a browser source."""
+        return send("browser.refresh", id=source_id, mixer=bridge.mixer)
 
     # --- Audio ---
 

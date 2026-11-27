@@ -180,6 +180,8 @@ the OpenAPI document; [mixer.md](mixer.md) describes what the commands do.
 | `POST /mixer/sources/{id}/prepare` | `mixer.source.prepare` |
 | `POST /mixer/sources/{id}/media` | `mixer.source.media` |
 | `POST /mixer/sources/{id}/resume_at` | `mixer.source.resume_at` |
+| `POST /mixer/sources/{id}/navigate` | `mixer.browser.navigate` (browser sources) |
+| `POST /mixer/sources/{id}/refresh` | `mixer.browser.refresh` (browser sources) |
 | `GET`, `PATCH /mixer/audio/gains` | `mixer.audio_gain_status`, `mixer.audio_gain` |
 | `GET /mixer/audio/processors` | `mixer.audio_processor_status` |
 | `PATCH /mixer/audio/processors/{output}/{id}` | `mixer.audio_processor` |

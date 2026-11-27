@@ -27,6 +27,7 @@ from .dmabuf_inputs import (BrowserStartupUnsettled, dmabuf_cuda_input_nodes, op
                             refresh_windows, rest_request, wait_for_sockets)
 from .dsk import DownstreamKeyer, register_dsk_commands
 from .inputs import build_input, build_v210_input, build_raw420_input
+from .browser_control import BrowserController, register_browser_commands
 from .source_control import SourceController, SourceUrls, chain_teams, register_source_commands, source_pads
 from .janus import (DEFAULT_KEYFRAME_MIN_INTERVAL_MS, JANUS_KEYFRAME_NODE, JanusVideoConfig,
                     RtcpFeedbackGroup, add_nodes, build_janus_output, dpb_options, release_commands)
@@ -1336,6 +1337,10 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
         avp, source_pads(cfg.sources, external=set(external),
                          playback_control=options.playback_control), mixer=MIXER_NAME,
         control_port=options.remote_control_port, allowed_urls=options.source_urls))
+    if browsers and options.dmabuf_rest:
+        register_browser_commands(avp, BrowserController(
+            dmabuf_rest=options.dmabuf_rest,
+            browser_ids=(source.id for source in browsers.values()), mixer=MIXER_NAME))
     held = []
     # Purge idle imports left by the capture pool's start-up churn.
     importers = tuple(f"input_{index}_to_cuda" for index in browsers)

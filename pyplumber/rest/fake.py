@@ -15,6 +15,7 @@ import time
 import uuid
 from types import SimpleNamespace
 
+from pyplumber.mixer.browser_control import BrowserController
 from pyplumber.mixer.config import ConfigError
 from pyplumber.mixer.control import AvpProtocolError
 from pyplumber.mixer.source_control import SourceController, source_pads
@@ -45,10 +46,15 @@ class FakeEngine:
         # mixer's own controller checks and answers the source commands, over a graph of no nodes.
         self.sources = {scene: {"id": scene, "url": f"fake://{scene}", "loop": False, "kind": "video"}
                         for scene in self.scenes}
+        self.sources["web"] = {"id": "web", "url": "https://example.test/", "loop": False, "kind": "browser"}
         self._source_control = SourceController(
             _NoGraph(), source_pads([SimpleNamespace(id=scene, kind="video", has_audio=False) for scene in self.scenes],
                                     playback_control=True),
             mixer=mixer, run_command=lambda _line: None, probe=lambda _url: 60_000)
+        self._browser_control = BrowserController(
+            dmabuf_rest="http://127.0.0.1:9", browser_ids=("web",), mixer=mixer,
+            navigate=lambda _base, window_id, url: self.sources[window_id].__setitem__("url", url),
+            refresh=lambda _base, _ids: None)
         self.processor = {"output": "program", "id": "duck", "type": "ducker", "enabled": True, "threshold_db": -40.0,
                           "depth_db": -20.0, "attack_ms": 10.0, "hold_ms": 300.0, "release_ms": 800.0, "gain_db": 0.0}
         self._lock = threading.Lock()
@@ -84,6 +90,8 @@ class FakeEngine:
             "mixer.source.prepare": lambda arg: self._source_prepare(json.loads(arg)),
             "mixer.source.media": lambda arg: self._source_media(json.loads(arg)),
             "mixer.source.resume_at": lambda arg: self._source("resume_at", json.loads(arg), paused=False),
+            "mixer.browser.navigate": lambda arg: self._browser_control.navigate(json.loads(arg)),
+            "mixer.browser.refresh": lambda arg: self._browser_control.refresh(json.loads(arg)),
         }
 
     def command(self, line: str, timeout: float | None = None) -> str | None:

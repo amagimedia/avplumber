@@ -14,7 +14,8 @@ from pyplumber.mixer.source_control import COMMAND_BUDGET_S
 TAKE_COMMANDS = ("cut", "fade", "wipe", "move", "preview", "interrupt")
 PROGRAM_TAKES = ("cut", "fade", "wipe", "move")
 AUX_COMMANDS = ("aux", "aux_layout", "aux_page", "aux_composition")
-SOURCE_COMMANDS = ("source.set", "source.prepare", "source.media", "source.resume_at")
+SOURCE_COMMANDS = ("source.set", "source.prepare", "source.media", "source.resume_at",
+                   "browser.navigate", "browser.refresh")
 # A source command answers when the mixer has done the work (a prepare: the group stopped, the
 # URL opened, a frame shown, the seek), plus one exchange of the mixer's own with its engine.
 SOURCE_COMMAND_TIMEOUT_S = COMMAND_BUDGET_S + 10.0
