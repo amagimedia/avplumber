@@ -288,8 +288,9 @@ class AuxCompositionResult(Reply):
 # --- Sources ---
 
 class SourceSet(Request):
-    """Repoint a wired file / live video (or NDI) source: stop its group safely, set URL and loop,
-    restart. Browser, raw, MXL and VMM pads refuse the command.
+    """Repoint a wired file / live video, NDI or raw (`v210` / `nv12` / `p010`) source: stop its
+    group safely, set URL and loop, restart. Browser, MXL and VMM pads refuse the command.
+    Raw pads keep the geometry and format they were built with.
 
     The engine opens the URL on its host. A mixer built with `MixerOptions.source_urls` refuses
     one outside the protocols and directories listed there (409 `engine_rejected`)."""

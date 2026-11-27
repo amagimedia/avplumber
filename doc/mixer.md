@@ -440,8 +440,9 @@ is a request the engine carries out afterwards: a URL that cannot be opened show
 in the engine's log and the node state, not in this answer.
 
 Address sources by show source id (resolved to `input_<index>` the way
-`build_application` names them). Supported kinds are `video` and `ndi` (chains
-built by `build_input`). Browser, raw (`v210` / `nv12` / `p010`), MXL and VMM
+`build_application` names them). Supported kinds are `video`, `ndi` and raw
+(`v210` / `nv12` / `p010`). Raw pads keep the width, height, pixel format and
+colour they were built with: only the file path changes. Browser, MXL and VMM
 pads answer with a clear error. REST: `PUT /mixer/sources/{id}` with
 `{"url","loop"}`. A browser page uses `mixer.browser.navigate` (below) instead.
 

@@ -1335,8 +1335,8 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
     avp.registerControlCommand("mixer.debug_overlay", debug_overlay, True)
     register_source_commands(avp, SourceController(
         avp, source_pads(cfg.sources, external=set(external),
-                         playback_control=options.playback_control), mixer=MIXER_NAME,
-        control_port=options.remote_control_port, allowed_urls=options.source_urls))
+                         playback_control=options.playback_control, raw_upload=cfg.raw_upload),
+        mixer=MIXER_NAME, control_port=options.remote_control_port, allowed_urls=options.source_urls))
     if browsers and options.dmabuf_rest:
         register_browser_commands(avp, BrowserController(
             dmabuf_rest=options.dmabuf_rest,

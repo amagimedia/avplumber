@@ -11,8 +11,8 @@ import pytest
 
 from pyplumber.mixer.config import ConfigError
 from pyplumber.mixer.source_control import (
-    SourceController, SourcePad, SourceUrls, control_command, group_shape, register_source_commands,
-    source_pads, stop_group, url_protocol,
+    SourceController, SourcePad, SourceUrls, continuous_loop_for, control_command, group_shape,
+    register_source_commands, source_pads, stop_group, url_protocol,
 )
 
 
@@ -254,23 +254,53 @@ def test_unsupported_kind_is_refused():
         id="page", index=1, kind="browser", group="input_1", input_node="input_1")})
     with pytest.raises(ConfigError, match="unsupported"):
         controller.set({"id": "page", "url": "https://example", "loop": False})
+    for kind in ("mxl", "vmm"):
+        controller = SourceController(avp, {"x": SourcePad(
+            id="x", index=0, kind=kind, group="input_0", input_node="input_0")})
+        with pytest.raises(ConfigError, match="unsupported"):
+            controller.set({"id": "x", "url": "file:///a", "loop": False})
+
+
+def test_raw_pads_accept_source_set_without_playback():
+    avp = _Avp([_Node("input_0", dst="out")])
+    for kind in ("v210", "nv12", "p010"):
+        pad = SourcePad(id="bars", index=0, kind=kind, group="input_0", input_node="input_0",
+                        continuous_loop=kind == "v210")
+        controller = SourceController(avp, {"bars": pad})
+        assert controller.set({"id": "bars", "url": "file:///next.v210", "loop": True}) == {
+            "id": "bars", "url": "file:///next.v210", "loop": True}
+        with pytest.raises(ConfigError, match="no pause or seek"):
+            controller.prepare({"id": "bars", "url": "file:///next.v210", "loop": False})
+
+
+def test_continuous_loop_follows_the_raw_upload_path():
+    assert continuous_loop_for("video") and continuous_loop_for("v210")
+    assert continuous_loop_for("nv12", raw_upload="direct")
+    assert not continuous_loop_for("nv12", raw_upload="hwupload")
+    assert not continuous_loop_for("p010")   # default hwupload
 
 
 def test_source_pads_follow_build_application_naming():
     sources = [SimpleNamespace(id="a", kind="video", has_audio=True),
                SimpleNamespace(id="b", kind="ndi", has_audio=False),
                SimpleNamespace(id="c", kind="browser", has_audio=False),
-               SimpleNamespace(id="d", kind="video", has_audio=False)]
+               SimpleNamespace(id="d", kind="video", has_audio=False),
+               SimpleNamespace(id="e", kind="nv12", has_audio=False),
+               SimpleNamespace(id="f", kind="v210", has_audio=False)]
     pads = source_pads(sources, external={"d"})
     assert pads["a"].group == "input_0" and pads["a"].sync_team == "input_0_av_sync"
     assert pads["b"].sync_team == "input_1_av_sync" and pads["b"].kind == "ndi"
     assert pads["c"].kind == "browser" and pads["c"].sync_team is None and pads["c"].pause_team is None
     assert pads["d"].kind == "vmm"
     assert pads["d"].sync_team is None and pads["a"].pause_team is None
+    assert pads["e"].kind == "nv12" and pads["e"].sync_team is None and not pads["e"].continuous_loop
+    assert pads["f"].continuous_loop and pads["f"].sync_team is None
+    assert source_pads(sources, raw_upload="direct")["e"].continuous_loop
     play = source_pads(sources, playback_control=True)
     assert play["b"].pause_team is None and play["b"].sync_team == "input_1_av_sync"   # NDI: live, no playback
     assert play["d"].sync_team == "input_3_av_sync" and play["d"].pause_team == "input_3_pause"
     assert play["c"].pause_team is None and play["c"].sync_team is None   # a browser pad is no build_input chain
+    assert play["e"].pause_team is None and play["f"].pause_team is None
 
 
 def test_register_source_commands_wires_the_control_handler():

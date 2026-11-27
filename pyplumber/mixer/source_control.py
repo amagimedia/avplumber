@@ -28,11 +28,11 @@ from typing import Any, Callable, Iterable, Optional
 from .config import ConfigError
 from .control import AvpConnection, AvpProtocolError
 
-# Chains built by ``build_input`` (file / live video and NDI). Browser, raw, MXL and VMM pads need
-# other primitives (navigate, unpack params, IPC) and refuse ``mixer.source.set``.
-SETTABLE_KINDS = frozenset({"video", "ndi"})
+# Pads whose head node is ``input_<index>`` with a retargetable ``url`` / ``loop``. Browser needs
+# navigate (dma-browser); MXL and VMM need other primitives and refuse ``mixer.source.set``.
+SETTABLE_KINDS = frozenset({"video", "ndi", "v210", "nv12", "p010"})
 # Pause and seek are input_rec's: a file, or a stream it can seek. An NDI feed is read by the plain
-# input node, which waits on no pause team and has no position to seek to.
+# input node, which waits on no pause team and has no position to seek to. Raw files have none.
 PLAYBACK_KINDS = frozenset({"video"})
 MEDIA_ACTIONS = frozenset({"play", "pause", "seek", "stop", "restart"})
 # Pause / seek need a shown frame; just after group.start there may be none yet. The control
@@ -103,19 +103,29 @@ def chain_teams(index: int, source, *, playback_control: bool) -> tuple[Optional
     return sync, (f"input_{index}_pause" if playback else None)
 
 
+def continuous_loop_for(kind: str, *, raw_upload: str = "hwupload") -> bool:
+    """Whether ``loop_continuous_ts`` follows ``loop`` on this kind's head node.
+
+    ``nv12``/``p010`` with the default ``hwupload`` path run ``setpts=N*…`` and were built with
+    ``loop_continuous_ts`` false; every other settable kind stamps continuous timestamps when
+    looping (direct/pinned raw, v210, video, NDI)."""
+    return not (kind in ("nv12", "p010") and raw_upload == "hwupload")
+
+
 def source_pads(sources, *, external: Optional[set[str]] = None,
-                playback_control: bool = False) -> dict[str, SourcePad]:
+                playback_control: bool = False, raw_upload: str = "hwupload") -> dict[str, SourcePad]:
     """Pads for every show source, named the way ``build_application`` wires them. Only a
-    ``build_input`` chain has teams."""
+    ``build_input`` chain has teams. *raw_upload* is the show's ``canvas.raw_upload``."""
     external = external or set()
     pads = {}
     for index, source in enumerate(sources):
         kind = source.kind if source.id not in external else "vmm"
+        # Teams exist only on ``build_input`` chains (video / NDI); raw pads pace without them.
         sync, pause = (chain_teams(index, source, playback_control=playback_control)
-                       if kind in SETTABLE_KINDS else (None, None))
+                       if kind in ("video", "ndi") else (None, None))
         pads[source.id] = SourcePad(
             id=source.id, index=index, kind=kind, group=f"input_{index}", input_node=f"input_{index}",
-            sync_team=sync, pause_team=pause, continuous_loop=True)
+            sync_team=sync, pause_team=pause, continuous_loop=continuous_loop_for(kind, raw_upload=raw_upload))
     return pads
 
 

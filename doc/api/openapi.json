@@ -1536,7 +1536,7 @@
       },
       "SourceSet": {
         "additionalProperties": false,
-        "description": "Repoint a wired file / live video (or NDI) source: stop its group safely, set URL and loop,\nrestart. Browser, raw, MXL and VMM pads refuse the command.\n\nThe engine opens the URL on its host. A mixer built with `MixerOptions.source_urls` refuses\none outside the protocols and directories listed there (409 `engine_rejected`).",
+        "description": "Repoint a wired file / live video, NDI or raw (`v210` / `nv12` / `p010`) source: stop its\ngroup safely, set URL and loop, restart. Browser, MXL and VMM pads refuse the command.\nRaw pads keep the geometry and format they were built with.\n\nThe engine opens the URL on its host. A mixer built with `MixerOptions.source_urls` refuses\none outside the protocols and directories listed there (409 `engine_rejected`).",
         "properties": {
           "loop": {
             "title": "Loop",
