@@ -11,11 +11,12 @@ const root = path.resolve(__dirname, '../frontend/dist');
 const instances = ['a', 'b'].map(id => ({ id, name: id, host: '127.0.0.1', port: 1 }));
 const nodes = source => [{ name: 'shared', type: 'input', params: { source, dst: source + '_queue' } },
   ...(source === 'old' ? [{ name: 'old_extra', type: 'mixer_compositor', params: { mixer: 'demo', src: 'old_queue' } },
+    { name: 'second_scene', type: 'mixer_compositor', params: { mixer: 'demo' } },
     { name: 'delivery', type: 'mixer_delivery', params: { dst: 'delivered' } }] : [])];
 const queue = source => [{ name: `${source}_queue`, type: 'av::VideoFrame', occupied: 1, capacity: 3, pps: 25 },
   {name: 'browser_import', type: 'EglImageFrame', pps: 10}, {name: 'audio', type: 'av::AudioSamples', pps: 50},
   ...(source === 'old' ? [{name: 'delivered', type: 'av::VideoFrame', pps: 24.8}] : [])];
-let startupGraphReady = false, timingReady = false;
+let startupGraphReady = false, timingReady = false, pgmSlot = 'A', compositorName;
 let registry = instances, initialReplies = true, socket, connections = 0;
 const requests = [], errors = [], prefix = '/graph';
 const server = http.createServer((req, res) => {
@@ -45,7 +46,7 @@ backend.on('connection', (client, req) => {
     requests.push(request);
     if (initialReplies && request.instanceId === 'a') {
       reply(request, request.command === 'nodes.json' ? (startupGraphReady ? nodes('old') : []) :
-        request.command === 'mixer.status demo' ? { pgm_slot: 'A', playout: { A: { timing: { period_ms: 40,
+        request.command === 'mixer.status demo' ? { pgm_slot: pgmSlot, playout: { [pgmSlot]: { compositor: compositorName, timing: { period_ms: 40,
           draw: { count: timingReady ? 60 : 0, mean_ms: 2, p95_ms: 3, p99_ms: 4, max_ms: 5, recent: 60 } } } } } :
         request.command === 'queues.json' ? queue('old') : []);
     }
@@ -102,6 +103,25 @@ backend.on('connection', (client, req) => {
     await until(async () => /Program compose mean 2.0\s*· p95 3.0 · p99 4.0 \/ 40.0 ms/.test(await hud())).catch(async error => { throw new Error(await hud(), {cause: error}); });
     assert.match(await hud(), /Program 24\.8 fps/);
     assert.match(await hud(), /Queue traffic 60 frames\/s/);
+    const composeButton = "document.querySelector('.gv-compose')";
+    assert.ok(await evaluate(composeButton + '.disabled'), 'older mixers still show timing without a target');
+    for (const [slot, name] of [['A', 'old_extra'], ['B', 'second_scene']]) {
+      pgmSlot = slot;
+      compositorName = name;
+      await until(() => evaluate(composeButton + `.dataset.tip.includes('Inspect ${name}.')`));
+      await evaluate(composeButton + '.click()');
+      await until(() => evaluate(`document.querySelector('main').dataset.selected === 'node:${name}'`));
+      if (!await evaluate("!!document.querySelector('.gv-nogl')")) {
+        await until(() => evaluate(`(() => {
+          const card = document.querySelector('.gv-cards [data-id="${name}"]:not([hidden])')?.getBoundingClientRect();
+          const stage = document.querySelector('.gv-sigma').getBoundingClientRect();
+          return card && Math.abs(card.left + card.width/2 - stage.left - stage.width/2) < 3 &&
+            Math.abs(card.top + card.height/2 - stage.top - stage.height/2) < 3;
+        })()`));
+      }
+    }
+    compositorName = 'missing_node';
+    await until(() => evaluate(composeButton + '.disabled'));
     // Select a node from the Nodes page: the row opens it in the graph.
     await evaluate(`location.hash = 'nodes'`);
     await until(async () => await evaluate(`!!document.querySelector('tr[data-node="shared"]')`));
@@ -235,6 +255,8 @@ backend.on('connection', (client, req) => {
     }
 
     // A browser without WebGL: the graph shows a notice and the other panels still mount.
+    initialReplies = true;
+    compositorName = 'second_scene';
     await call('Page.enable');
     await call('Page.addScriptToEvaluateOnNewDocument', { source: `{ const get = HTMLCanvasElement.prototype.getContext;
       HTMLCanvasElement.prototype.getContext = function (type, ...rest) { return /webgl/.test(type) ? null : get.call(this, type, ...rest); }; }` });
@@ -244,8 +266,11 @@ backend.on('connection', (client, req) => {
     await delay(150);
     assert(await evaluate(`!!document.querySelector('.gv-nogl')`), 'no notice in place of the graph without WebGL');
     assert(await evaluate(`document.querySelectorAll('.lm_stack').length > 1`), 'the graph without WebGL took the other panels down');
+    await until(() => evaluate(composeButton + "?.dataset.tip.includes('Inspect second_scene.')"));
+    await evaluate(composeButton + '.click()');
+    await until(() => evaluate("document.querySelector('main').dataset.selected === 'node:second_scene'"));
     assert.deepEqual(errors, []);
-    console.log('PASS: switching, late replies, pagination, full params, subscriptions, paused/stale telemetry and no WebGL');
+    console.log('PASS: Program compositor navigation, switching, late replies, pagination, full params, subscriptions, paused/stale telemetry and no WebGL');
   } finally {
     if (ws) ws.close();
     if (page) await fetch(`${cdp}/json/close/${page.id}`);

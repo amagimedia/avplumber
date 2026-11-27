@@ -349,17 +349,20 @@
   let compose = null, composePrev = null;
   async function refreshCompose() {
     if (!mixerName || !wsConnected || !currentInstanceId) { compose = null; return; }
+    if ([...pending.values()].some(request => request.kind === 'mixer.status')) return;
     const generation = instanceGeneration;
     try {
-      const resp = await sendCommand(`mixer.status ${mixerName}`, `mixer-status-${Date.now()}`);
+      const resp = await sendCommand(`mixer.status ${mixerName}`, 'mixer.status');
       if (generation !== instanceGeneration) return;
       const status = JSON.parse(resp.body || '{}'), slot = status.pgm_slot, draw = status.playout?.[slot]?.timing?.draw;
       if (!draw?.count) { compose = null; return; }
-      const now = { slot, count: draw.count, sum: draw.mean_ms * draw.count };
+      const compositor = status.playout[slot].compositor;
+      const now = { slot, compositor, count: draw.count, sum: draw.mean_ms * draw.count };
       // Counters publish every 60 frames. Two polls can observe the same snapshot.
-      if (compose && composePrev?.slot === slot && composePrev.count === now.count) return;
-      const prev = composePrev?.slot === slot && now.count > composePrev.count ? composePrev : null;  // not across a cut or a counter reset
-      compose = { ms: prev ? (now.sum - prev.sum) / (now.count - prev.count) : draw.mean_ms,
+      const sameCompositor = composePrev?.slot === slot && composePrev.compositor === compositor;
+      if (compose && sameCompositor && composePrev.count === now.count) return;
+      const prev = sameCompositor && now.count > composePrev.count ? composePrev : null;  // not across a cut or a counter reset
+      compose = { compositor, ms: prev ? (now.sum - prev.sum) / (now.count - prev.count) : draw.mean_ms,
                   p95Ms: draw.p95_ms ?? null, p99Ms: draw.p99_ms ?? null, recent: draw.recent ?? 0,
                   budgetMs: status.playout[slot].timing.period_ms, maxMs: draw.max_ms };
       composePrev = now;

@@ -65,6 +65,9 @@ label.toggle input { display: inline-block; width: auto; margin: 0; }
 .stats span, .summary p { font-size: 12px; color: var(--muted); }
 .summary p { margin-top: 12px; }
 .notice { font-size: 12px; color: var(--muted); margin-top: 12px; }
+#pending-changes { margin: 12px 0; font-size: 13px; }
+#pending-changes ul { margin: 4px 0; padding-left: 18px; }
+#pending-changes details { margin-top: 4px; }
 .error { color: var(--error); }
 .error:empty { display: none; }
 details { margin-top: 14px; font-size: 13px; }
@@ -129,6 +132,10 @@ summary { cursor: pointer; }
 <section class="card">
 <button class="primary" id="apply">Apply setup</button>
 <p class="hint">Prepares assets and restarts this instance’s mixer. Output pauses during the restart.</p>
+<div id="pending-changes" hidden>
+<b id="change-heading"></b><ul id="change-list"></ul>
+<details id="other-changes"><summary></summary><ul></ul></details>
+</div>
 <div id="error" class="notice error" role="alert"></div>
 <div id="feedback" class="notice" role="status">Connecting to instance…</div>
 <p><a href="/" id="open-controls">Open mixer controls</a></p>
@@ -184,17 +191,17 @@ const rateWeight=v=>Math.round(rateNumber(v));
 // config.aux_fps: half the canvas rate above 30 fps unless the bus runs at the full rate; 59.94 halves to 29.97.
 const auxRate=(v,fullRate)=>rateNumber(v)>30&&!fullRate?(/\//.test(String(v))?`${Number(String(v).split('/')[0])/2}/1001`:v/2):v;
 // setup_runtime.for_mode: the profile with the limits measured apart on the chosen canvas.
-const limits=()=>({...profile,...profile.mode_limits?.[$('mode').value]});
+const limits=(mode=$('mode').value)=>({...profile,...profile.mode_limits?.[mode]});
 const browserLimit=()=>limits().browser_windows_by_fps?.[rateWeight(rate())]??limits().browser_windows;
 const nvdecLimit=fps=>limits().nvdec_decodes[fps], rawUploadUnits=fps=>limits().raw_upload_units[fps];
 // Offered only by an instance whose profile measured it, on an image whose FFmpeg reads MXL (setup_runtime.py).
 const mxlLimit=()=>limits().mxl_sources?.[rateWeight(rate())]??0;
 // NDI likewise, on an image whose FFmpeg receives NDI; its senders and decoders load the CPUs.
 const ndiLimit=()=>limits().ndi_sources?.[rateWeight(rate())]??0;
-const sourceBudgets=()=>[
- [[2,3],[1,1],limits().hlg_v210,'4:2:2 upload'],[[4],[1],browserLimit()-dskPages().length,'Browser'],
- [[0,1],[1,1],nvdecLimit(rateWeight(rate())),'Combined NVDEC'],
- [[7],[1],mxlLimit(),'MXL'],[[5,6,7],[1,2,1],rawUploadUnits(rateWeight(rate())),'Raw 4:2:0 upload units'],[[8],[1],ndiLimit(),'NDI']
+const sourceBudgets=(l=limits(),fps=rateWeight(rate()),keys=dskPages().length)=>[
+ [[2,3],[1,1],l.hlg_v210,'4:2:2 upload'],[[4],[1],(l.browser_windows_by_fps?.[fps]??l.browser_windows)-keys,'Browser'],
+ [[0,1],[1,1],l.nvdec_decodes[fps],'Combined NVDEC'],
+ [[7],[1],l.mxl_sources?.[fps]??0,'MXL'],[[5,6,7],[1,2,1],l.raw_upload_units[fps],'Raw 4:2:0 upload units'],[[8],[1],l.ndi_sources?.[fps]??0,'NDI']
 ];
 let currentSettings=null, busy=false, online=false, loaded=false, submitting=false, submission=0;
 // setup_runtime.source_limit, less the key pages.
@@ -255,15 +262,15 @@ function cappedAllocation(total,values,costs,limit){
   if(counts.reduce((n,v,k)=>n+v*costs[k],0)<=limit)return counts;
  }
 }
-function sourceCounts(total,values){
+function sourceCounts(total,values,budgets=sourceBudgets()){
  let counts=allocate(total,values);
- for(const [indices,costs,limit,name] of sourceBudgets()){
+ for(const [indices,costs,limit,name] of budgets){
   if(indices.reduce((n,i,k)=>n+counts[i]*costs[k],0)<=limit)continue;
   const capped=cappedAllocation(indices.reduce((n,i)=>n+counts[i],0),indices.map(i=>values[i]),costs,limit);
   const size=capped.reduce((a,b)=>a+b,0);
   const remaining=values.map((w,i)=>indices.includes(i)?0:w);
   if(!remaining.some(Boolean))throw Error(`${name} is limited to ${limit}; enable another source type.`);
-  counts=sourceCounts(total-size,remaining);indices.forEach((index,i)=>counts[index]=capped[i]);break;
+  counts=sourceCounts(total-size,remaining,budgets);indices.forEach((index,i)=>counts[index]=capped[i]);break;
  }
  return counts;
 }
@@ -304,6 +311,54 @@ function fitManualCounts(values){
 }
 const FIELD_NAMES={sources:'Unique sources',scenes:'Scenes','extra-aux':'Extra aux outputs'};
 function integer(id,min,max){const v=Number($(id).value);if(!Number.isInteger(v)||v<min||v>max)throw Error(`${FIELD_NAMES[id]??id} must be a whole number from ${min} to ${max}.`);return v;}
+// Compare the same values the operator can apply, including capacity-driven changes.
+let baseline=null, savedSignature, changes=[], fromDefaults=true, decodeMix='profile';
+function mixCounts(s){
+ const weights=types.map((_,i)=>s.weights?.[i]??0);
+ if(weights.reduce((a,b)=>a+b,0)===s.source_count)return weights;
+ // Older recipes saved proportions. A profile with different source limits may no longer fit them.
+ try{
+  const budgets=sourceBudgets(limits(`${s.bit_depth}:${s.chroma}`),rateWeight(s.fps),s.dsk?.length??0);
+  return sourceCounts(s.source_count,weights,budgets);
+ }catch{return [];}
+}
+function reviewFields(s){
+ const option=(id,v)=>[...$(id).options].find(o=>o.value===String(v))?.text??String(v);
+ const toggle=v=>v?'On':'Off';
+ const fields={
+  'Canvas':option('mode',`${s.bit_depth}:${s.chroma}`),'Frame rate':rateLabel(s.fps)+' fps',
+  'Orientation':option('orientation',s.orientation),'Extra AUX':s.extra_aux??0,
+  'Unique sources':s.source_count,'Scenes':s.scene_count,'Scene mix':option('layout',s.layout).split(' · ')[0],
+  'Downstream keys':[...document.querySelectorAll('#dsk-pages input')].filter(i=>s.dsk?.includes(i.value))
+    .map(i=>i.parentElement.textContent.trim().split(' · ')[0]).join(', ')||'Off',
+  'Clean feed':toggle(s.clean_feed),'Source thumbnails':toggle(s.source_thumbnails),
+  'Browser overlay':option('browser-motion',s.browser_motion??'static').split(' · ')[0]
+ };
+ for(const [i,count] of mixCounts(s).entries())fields[types[i].name]=count;
+ const outputs=encodeOutputs(s.fps,true);
+ for(const {id,name} of outputs){
+  const e={...defaultEncode(id),...s.encodes?.[id]};
+  const label=outputs.some(o=>o.id!==id&&o.name===name)?`${name} (${id})`:name;
+  fields[label+' encode']=`${e.codec==='hevc_nvenc'?'H.265':'H.264'} · ${e.preset} · ${e.bitrate_kbps/1000} Mbit/s`;
+ }
+ return fields;
+}
+function reviewChanges(){
+ const fields=currentSettings&&baseline?reviewFields(currentSettings):{};
+ const rows=Object.entries(fields).filter(([key,v])=>Object.hasOwn(baseline,key)&&baseline[key]!==v)
+   .map(([key,v])=>`${key}: ${baseline[key]} → ${v}`);
+ $('change-heading').textContent=fromDefaults?'Changes from initial settings':'Changes to apply';
+ $('pending-changes').hidden=!rows.length;
+ if(rows.length===changes.length&&rows.every((row,i)=>row===changes[i]))return;
+ changes=rows;
+ const items=rows.map(text=>Object.assign(document.createElement('li'),{textContent:text}));
+ $('change-list').replaceChildren(...items.slice(0,3));
+ const more=$('other-changes');
+ more.hidden=items.length<=3;
+ more.querySelector('summary').textContent=more.hidden?'':`${items.length-3} more ${items.length===4?'change':'changes'}`;
+ if(more.hidden)more.open=false;
+ more.querySelector('ul').replaceChildren(...items.slice(3));
+}
 function update(){
  if(!profile)return;   // #clean-feed stays enabled before the first setup status
  try{
@@ -380,7 +435,7 @@ function update(){
  const portrait=$('orientation').value==='portrait',width=portrait?sourceHeight:sourceWidth,height=portrait?sourceWidth:sourceHeight;
  currentSettings={orientation:$('orientation').value,fps:rateSetting(rate()),source_count:sourceCount,scene_count:sceneCount,layout:$('layout').value,
    bit_depth,chroma,weights:counts,encodes,dsk:dskPages(),clean_feed:clean,extra_aux:extra?integer('extra-aux',0,extraLimit):0,source_thumbnails:$('source-thumbnails').checked,
-   browser_motion:$('browser-motion').value};
+   browser_motion:$('browser-motion').value,decode_mix:decodeMix};
  $('allocation').replaceChildren(...sourceGroups.flatMap(([,indices])=>indices).map(i=>{const span=document.createElement('span');span.style.width=`${100*counts[i]/sourceCount}%`;span.style.background=types[i].color;return span}));
  $('allocation-note').textContent=`${sourceCount} independent inputs. NVDEC: ${counts[0]+counts[1]}/${nvdecLimit(fps)} combined SDR + HDR. Upload: ${counts[5]+2*counts[6]+counts[7]}/${rawUploadUnits(fps)} units (NV12 = 1, P010 = 2${mxlLimit()?', MXL = 1':''}). Capacity depends on codec and content.`;
  $('canvas-label').textContent=`${width} × ${height} · ${label} fps · ${portrait?'portrait':'landscape'}`;
@@ -396,6 +451,7 @@ function update(){
  }catch(error){
   currentSettings=null;$('error').textContent=error.message;
  }
+ reviewChanges();
  setBusy(busy);
 }
 function setBusy(value){
@@ -418,7 +474,7 @@ function loadSettings(s){
  manualCounts=null;encodes=structuredClone(s.encodes??{});encodeRows.clear();extraAux=s.extra_aux??0;
  document.querySelectorAll('#dsk-pages input').forEach(i=>{i.checked=(s.dsk||[]).includes(i.value);});$('clean-feed').checked=!!s.clean_feed;$('source-thumbnails').checked=!!s.source_thumbnails;
  typedSources=s.source_count<sourceLimit()?s.source_count:null;
- const saved=Array.isArray(s.weights)&&[7,8].includes(s.weights.length)?[...s.weights,...Array(9-s.weights.length).fill(0)]:s.weights;   // saved before MXL or NDI
+ const saved=Array.isArray(s.weights)&&[7,8].includes(s.weights.length)?[...s.weights,...Array(9-s.weights.length).fill(0)]:s.weights;
  if(Array.isArray(saved)&&saved.length===types.length&&saved.every(n=>Number.isInteger(n)&&n>=0)&&
     saved.reduce((a,b)=>a+b,0)===s.source_count){
   const balanced=sourceCounts(Math.min(s.source_count,sourceLimit()),foldForMode([...BALANCED]));
@@ -434,7 +490,8 @@ async function refresh(){
   const status=await response.json();
   if(submitting||requestedSubmission!==submission)return;
   online=true;profile=status.profile;instanceType=status.instance_type;auxBuses=status.aux_buses;janusApi=status.janus_api;
-  if(!loaded&&!['preparing','starting'].includes(status.phase)){
+  const settled=!['preparing','starting'].includes(status.phase);
+  if(!loaded&&settled){
    desktop=status.desktop;
    if(desktop){
     $('desktop-presets').hidden=false;
@@ -450,7 +507,18 @@ async function refresh(){
    const settings=status.settings??desktop?.presets[desktop.suggested];
    if(settings)loadSettings(settings);
    loaded=true;update();
+   if(!status.settings&&currentSettings)baseline=reviewFields(currentSettings);
   }
+  const signature=JSON.stringify(status.settings);
+  if(settled&&status.settings&&signature!==savedSignature){
+   // A successful apply publishes settings after the restart. Keep local edits across polls and failed applies.
+   if(baseline&&!changes.length&&currentSettings){loadSettings(status.settings);update();}
+   baseline=reviewFields(status.settings);
+   decodeMix=status.settings.decode_mix??'profile';
+   if(currentSettings)currentSettings.decode_mix=decodeMix;
+   fromDefaults=false;savedSignature=signature;
+  }
+  reviewChanges();
   showStatus(status);
  }catch(error){
   if(submitting||requestedSubmission!==submission)return;

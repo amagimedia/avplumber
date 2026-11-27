@@ -11,7 +11,7 @@ const { chromium } = require('playwright');
   try {
     const page = await browser.newPage();
     const errors = [], submissions = [];
-    let initialSettings = null;
+    let initialSettings = null, rejectApply = false, phase = 'idle';
     // The live show's own aux buses (Program preview and Multiviewer) and a Janus API for extra ones.
     const ownAux = [{id: 'mv', label: 'Program preview', full_rate: false}, {id: 'mv2', label: 'Multiviewer', full_rate: false}];
     let auxStatus = {aux_buses: ownAux, janus_api: true};
@@ -33,8 +33,11 @@ const { chromium } = require('playwright');
       if (route.request().url().endsWith('/setup.js')) return route.fulfill({contentType: 'text/javascript',
         body: fs.readFileSync(path.join(__dirname, '../../pyplumber/mixer/gui/assets/setup.js'), 'utf8')});
       if (route.request().url().endsWith('/api/setup')) {
-        if (route.request().method() === 'POST') submissions.push(route.request().postDataJSON());
-        return route.fulfill({json: {phase: 'idle', message: 'Ready', settings: initialSettings,
+        if (route.request().method() === 'POST') {
+          submissions.push(route.request().postDataJSON());
+          if (rejectApply) return route.fulfill({status: 400, json: {error: 'Rejected by fixture'}});
+        }
+        return route.fulfill({json: {phase, message: 'Ready', settings: initialSettings,
           instance_type: instanceType, profile: profiles[instanceType], ...auxStatus}});
       }
       return route.fulfill({contentType: 'text/html', body: html});
@@ -58,13 +61,36 @@ const { chromium } = require('playwright');
     await reset();
     const browserMotion = page.locator('#browser-motion');
     assert.equal(await browserMotion.inputValue(), 'static');
+    const pending = page.locator('#pending-changes');
+    assert.ok(await pending.isHidden());
+    await browserMotion.selectOption('dynamic');
+    assert.equal(await text('change-heading'), 'Changes from initial settings');
+    assert.equal(await text('change-list'), 'Browser overlay: Centered → Moving');
+    await browserMotion.selectOption('static');
+    assert.ok(await pending.isHidden(), 'reverting an edit clears the review');
     await browserMotion.selectOption('dynamic');
     const movingSettings = await apply();
     assert.equal(movingSettings.browser_motion, 'dynamic');
-    await reset(movingSettings);
+    assert.ok(await pending.isVisible(), 'POST alone does not confirm the show');
+    phase = 'preparing';
+    initialSettings = movingSettings;
+    await page.waitForFunction(() => document.getElementById('apply').disabled);
+    assert.ok(await pending.isVisible(), 'preparation still shows the unconfirmed changes');
+    phase = 'running';
+    await pending.waitFor({state: 'hidden'});
     assert.equal(await browserMotion.inputValue(), 'dynamic');
     await browserMotion.selectOption('half');
+    rejectApply = true;
+    await apply();
+    assert.equal(await text('feedback'), 'Rejected by fixture');
+    assert.equal(await text('change-heading'), 'Changes to apply');
+    assert.equal(await text('change-list'), 'Browser overlay: Moving → Half dynamic');
+    rejectApply = false;
+    await reset({...movingSettings, decode_mix: 'mixed', weights: movingSettings.weights.slice(0,7)});
+    assert.ok(await pending.isHidden(), 'older source arrays match the loaded form');
+    await browserMotion.selectOption('half');
     const halfSettings = await apply();
+    assert.equal(halfSettings.decode_mix, 'mixed', 'unrelated edits preserve the show’s decoder mix');
     assert.equal(halfSettings.browser_motion, 'half');
     await reset(halfSettings);
     assert.equal(await browserMotion.inputValue(), 'half');
@@ -91,6 +117,7 @@ const { chromium } = require('playwright');
     assert.equal(await bitrate('Program HLG').inputValue(), '8');
     await preset('Program').selectOption('p1');
     await bitrate('Program').fill('8.5');
+    assert.equal(await text('change-list'), 'Program encode: H.264 · p3 · 6 Mbit/s → H.264 · p1 · 8.5 Mbit/s');
     const encode = (preset, mbps, codec = "h264_nvenc") => ({codec, preset, bitrate_kbps: mbps * 1000});
     const defaults = {sdr: encode('p3', 6), hdr: encode('p3', 8, 'hevc_nvenc'), sdr_clean: encode('p3', 6), mv: encode('p1', 4),
       mv2: encode('p1', 4), extra: encode('p1', 4)};
@@ -317,6 +344,11 @@ const { chromium } = require('playwright');
     assert.equal(await extraAux.inputValue(), '12');
     assert.match(await text('aux-adjustment'), /automatically reduced .* to 12/);
     assert.match(await text('nvenc-note'), /^NVENC 69% of 70%/);
+    assert.ok(await pending.isVisible());
+    assert.match(await text('change-list'), /Canvas: SDR · 8-bit · 4:2:0 → HDR · 10-bit · 4:2:2/);
+    assert.match(await text('change-list'), /Extra AUX: 26 → 12/);
+    await page.locator('#other-changes summary').click();
+    assert.ok(await page.locator('#other-changes li').first().isVisible());
     const hdr422=await apply();
     assert.equal(hdr422.extra_aux, 12);
     assert.equal(hdr422.encodes.sdr.preset, 'p5', 'budget changes preserve operator presets');

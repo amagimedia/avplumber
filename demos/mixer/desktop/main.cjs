@@ -1,7 +1,8 @@
 // The desktop uses the same documents and keyboard handlers as the browser.
 // Each tool has one window. Navigation between tools focuses that window.
-const { app, BrowserWindow, Menu, nativeTheme, net, session, ipcMain } = require('electron');
+const { app, BrowserWindow, Menu, nativeTheme, net, screen, session, ipcMain } = require('electron');
 const path = require('node:path');
+const { openWorkspace } = require('./workspace.cjs');
 
 const port = Number(process.env.MIXER_PUBLIC_PORT || 7681);
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid MIXER_PUBLIC_PORT');
@@ -15,7 +16,7 @@ const views = {
   matrix: { title: 'Audio Matrix', route: '/matrix', width: 1200, height: 800 }
 };
 const windows = new Map();
-let startupSetup, quitting = false;
+let workspace, restoreTools = [], startupSetup, quitting = false;
 
 function destination(address) {
   if (!URL.canParse(address)) return;
@@ -31,7 +32,7 @@ function focus(win) {
   win.focus();
 }
 
-function openView(key, address = origin + views[key].route) {
+function openView(key, address = origin + views[key].route, background = false) {
   const view = views[key];
   const existing = windows.get(key);
   if (existing) {
@@ -39,7 +40,7 @@ function openView(key, address = origin + views[key].route) {
     return existing;
   }
   const win = new BrowserWindow({
-    title: view.title, width: view.width, height: view.height,
+    title: view.title, ...workspace.bounds(key, view),
     backgroundColor: '#15191c', show: false,
     webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false,
       preload: path.join(__dirname, 'preload.cjs') }
@@ -48,12 +49,26 @@ function openView(key, address = origin + views[key].route) {
   // Keep menu accelerators available in tool windows, including return to Mixer.
   if (key !== 'mixer' && process.platform !== 'darwin') win.setMenuBarVisibility(false);
   if (key === 'mixer') startupSetup?.close();
-  win.once('ready-to-show', () => win.show());
+  const maximized = workspace.state[key]?.maximized;
+  const remember = () => workspace.remember(key, win, true);
+  remember();
+  for (const event of ['move', 'resize', 'maximize', 'unmaximize']) win.on(event, remember);
+  win.on('close', remember);
+  win.once('ready-to-show', () => {
+    if (maximized) win.maximize();
+    if (background) win.showInactive();
+    else win.show();
+    if (key === 'mixer') {
+      for (const tool of restoreTools) if (!windows.has(tool)) openView(tool, undefined, true);
+      restoreTools = [];
+    }
+  });
   win.on('page-title-updated', event => event.preventDefault());
   let retry;
   win.on('closed', () => {
     clearTimeout(retry);
     windows.delete(key);
+    if (!quitting) workspace.closed(key);
   });
 
   win.webContents.setWindowOpenHandler(({ url }) => {
@@ -104,6 +119,8 @@ async function initialWindow() {
   if (phase === 'running') {
     openView('mixer');
   } else {
+    // Dismissing startup Setup also dismisses any Setup saved from the previous session.
+    restoreTools = restoreTools.filter(key => key !== 'setup');
     startupSetup = openView('setup');
     startupSetup.once('close', () => {
       startupSetup = undefined;
@@ -120,7 +137,13 @@ if (!app.requestSingleInstanceLock()) {
     const win = windows.get('mixer') || windows.get('setup') || windows.values().next().value;
     if (win) focus(win);
   });
+  app.on('will-quit', () => workspace?.flush());
   app.whenReady().then(() => {
+    const platform = app.commandLine.getSwitchValue('ozone-platform') || process.env.MIXER_GUI_PLATFORM;
+    const wayland = process.platform === 'linux' && (platform === 'wayland' ||
+      (!platform || platform === 'auto') && Boolean(process.env.WAYLAND_DISPLAY));
+    workspace = openWorkspace(app.getPath('userData'), screen, !wayland);
+    restoreTools = Object.keys(views).filter(key => key !== 'mixer' && workspace.state[key]?.open === true);
     nativeTheme.themeSource = 'dark';
     // A desktop app opened against an older web UI must never start its network player.
     session.defaultSession.webRequest.onBeforeRequest({ urls: [origin + '/preview/*', 'http://127.0.0.1:8080/*'] },

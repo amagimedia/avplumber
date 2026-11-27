@@ -738,8 +738,8 @@ An AUX bus shows each preview change as described in
 [AUX bus follower](#aux-bus-follower).
 
 `mixer.status <name>` returns the current PGM/PVW scene and transition state,
-and under `playout` each slot compositor's (`A`, `B`) running `frames`, `repeats`
-and `missed_deadlines`, published every 60 output frames. When `mixer.init`
+and under `playout` each slot’s (`A`, `B`) node name in `compositor` and its
+running `frames`, `repeats` and `missed_deadlines` counters, published every 60 output frames. When `mixer.init`
 names a `wipe_cache_store`, `wipe_cache` holds that clip cache's `bytes`,
 `budget_bytes` and `clips` (`path`, `frames`, `bytes`, `complete`).
 `mixer.scenes <name>` lists registered scenes.

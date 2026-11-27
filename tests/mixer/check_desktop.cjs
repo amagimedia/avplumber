@@ -102,11 +102,22 @@ const executablePath = require(path.join(demo, 'desktop/node_modules/electron'))
     await reopened.locator('#graph-link').waitFor();
     assert.equal(app.windows().length, 2);
     assert.equal(await graph.getByRole('textbox').inputValue(), 'compositor');
+    const graphWindow = await app.browserWindow(graph);
+    const beforeQuit = await graphWindow.evaluate(w => {
+      w.setBounds({ x: 68, y: 105, width: 810, height: 600 });
+      return w.getNormalBounds();
+    });
     await app.close();
     app = await launch();
     const live = await app.firstWindow();
     await live.locator('#graph-link').waitFor();
-    assert.equal(app.windows().length, 1);
+    const restored = app.windows().find(p => p !== live) || await app.waitForEvent('window');
+    await restored.waitForURL('**/graph/');
+    const restoredWindow = await app.browserWindow(restored);
+    const afterRestart = await restoredWindow.evaluate(w => w.getNormalBounds());
+    assert.deepEqual(afterRestart, beforeQuit, 'the open Graph inspector restores its bounds');
+    assert.equal(app.windows().length, 2, 'the explicitly closed Setup stays closed');
+    await restoredWindow.evaluate(w => w.close());
     assert.equal(previewRequests, 0, 'Electron must never load the WebRTC player');
     await app.close();
     phase = 'starting';
@@ -117,7 +128,7 @@ const executablePath = require(path.join(demo, 'desktop/node_modules/electron'))
     const [consoleWindow] = await Promise.all([app.waitForEvent('window'), firstSetupWindow.evaluate(w => w.close())]);
     await consoleWindow.locator('#graph-link').waitFor();
     assert.equal(app.windows().length, 1, 'closing first-run Setup opens Mixer');
-    console.log('Desktop startup, reconnect, window routing and viewer isolation passed');
+    console.log('Desktop startup, reconnect, workspace restore, window routing and viewer isolation passed');
   } finally {
     if (app) await app.close();
     server.closeAllConnections();

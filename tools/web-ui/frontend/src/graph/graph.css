@@ -68,7 +68,11 @@
 
 /* stage overlays */
 .gv-hud { position: absolute; z-index: 4; left: 12px; right: 56px; bottom: 12px; display: flex; gap: 8px; flex-wrap: wrap; pointer-events: none; }
-.gv-hud > span { background: var(--panel); border: 1px solid var(--edge); border-radius: 7px; padding: 4px 9px; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.gv-hud > span, .gv-hud .gv-compose { background: var(--panel); border: 1px solid var(--edge); border-radius: 7px; padding: 4px 9px; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.gv-hud .gv-compose { pointer-events: auto; font-family: inherit; }
+.gv-compose:enabled { cursor: pointer; }
+.gv-compose:enabled::after { content: ' ↗'; color: var(--accent); }
+.gv-compose:enabled:hover, .gv-compose:focus-visible { border-color: var(--accent); }
 .gv-hud b { color: var(--text); }
 .gv-hud .seg { pointer-events: auto; }
 .gv-hud .seg button { padding: 4px 9px; font-size: 11px; }
