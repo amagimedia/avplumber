@@ -129,6 +129,55 @@ protected:
 
     av::Timestamp shift_ = NOTS;
     Parameters streams_object_, programs_object_;
+    void probeLiveMpegtsVideo(const Parameters &params) {
+        // findStreamInfo buffers packets for playback, but its byte/time budget can end
+        // before a mid-GOP join sees video headers. Give the next probe a fresh demuxer
+        // and a bounded packet buffer while continuing on the very same live transport.
+        for (;;) {
+            std::error_code err;
+            ictx_.findStreamInfo(err);
+            auto *ctx = ictx_.raw();
+            auto *io = ctx->pb;
+            const auto interrupt = ctx->interrupt_callback;
+            if (interrupt.callback(interrupt.opaque)) {
+                throw std::system_error(AVERROR_EXIT, av::ffmpeg_category());
+            }
+            if (err && err.value() != -1 && err.value() != AVERROR_INVALIDDATA) {
+                throw std::system_error(err);
+            }
+            for (unsigned i = 0; i < ctx->nb_streams; ++i) {
+                const auto *par = ctx->streams[i]->codecpar;
+                if (par->codec_type == AVMEDIA_TYPE_VIDEO) {
+                    if (!err && par->width > 0 && par->height > 0 && par->format != AV_PIX_FMT_NONE) {
+                        return;
+                    }
+                    break;
+                }
+            }
+            if (!io || io->seekable || std::string_view(ctx->iformat->name) != "mpegts") {
+                throw Error("input_rec: missing video headers outside a live MPEG-TS input");
+            }
+            if (io->error || io->eof_reached) {
+                throw std::system_error(io->error ? io->error : AVERROR_EOF, av::ffmpeg_category());
+            }
+            logstream << "input_rec: waiting for live MPEG-TS video headers";
+            const auto format = ictx_.inputFormat();
+            // avcpp's close() allocates a fresh format context. Borrow the socket
+            // through the reset and return ownership to libavformat after openInput.
+            ctx->flags |= AVFMT_FLAG_CUSTOM_IO;
+            std::unique_ptr<AVIOContext, decltype(&avio_close)> transport(io, avio_close);
+            ictx_.close();
+            ictx_.raw()->interrupt_callback = interrupt;
+            ictx_.raw()->pb = transport.get();
+            av::Dictionary options;
+            if (params.count("options")) {
+                options = parametersToDict(params["options"]);
+            }
+            ictx_.openInput(params["url"], options, format);
+            ictx_.raw()->flags &= ~AVFMT_FLAG_CUSTOM_IO;
+            transport.release();
+        }
+    }
     av::Packet readPacket() {
         std::error_code error;
         av::Packet packet = ictx_.readPacket(error);
@@ -1220,7 +1269,11 @@ public:
 
         ictx_.openInput(params["url"], opts, ifmt);
         warnUnusedInputOptions(opts);
-        ictx_.findStreamInfo();
+        if (params.value("wait_for_video_headers", false)) {
+            probeLiveMpegtsVideo(params);
+        } else {
+            ictx_.findStreamInfo();
+        }
         logstream << "Opened URL " << params["url"] << " . Streams:";
         for (unsigned i=0; i<ictx_.streamsCount(); i++) {
             av::Stream stream = ictx_.stream(i);
