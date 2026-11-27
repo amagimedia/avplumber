@@ -75,6 +75,7 @@ def spaced(command, **payload):
     ("PUT", "/mixer/aux/mv/layout", {"layout": {"preset": "source_pages"}}, 200, spaced("aux_layout", layout={"preset": "source_pages"}, bus="mv")),
     ("PUT", "/mixer/aux/monitor/composition", {"composition": {"layers": [], "active_inputs": 0}},
      200, spaced("aux_composition", composition={"layers": [], "active_inputs": 0}, bus="monitor")),
+    ("GET", "/mixer/sources", None, 200, "mixer.sources"),
     ("PUT", "/mixer/sources/cam1", {"url": "file:///clip.mp4", "loop": True},
      200, spaced("source.set", url="file:///clip.mp4", loop=True, id="cam1", mixer="mixer")),
     ("POST", "/mixer/sources/cam1/prepare", {"url": "file:///clip.mp4", "loop": False, "cue_in_ms": 500},
@@ -107,6 +108,19 @@ def test_take_reaches_program_and_swaps_preview(api):
     status = api.get("/mixer/status").json()
     assert (status["pgm_scene"], status["pvw_scene"]) == ("cam3", "cam1")
     assert status["lever"] == {"position": 0.0, "origin": 0.0, "engaged": False}   # fields the model does not name pass through
+
+
+def test_list_sources_reports_pads_and_follows_set_and_navigate(api, engine):
+    listed = api.get("/mixer/sources").json()["sources"]
+    by_id = {src["id"]: src for src in listed}
+    assert by_id["cam1"] == {"id": "cam1", "kind": "video", "url": "fake://cam1", "loop": False}
+    assert by_id["mxl1"]["kind"] == "mxl" and by_id["web"] == {
+        "id": "web", "kind": "browser", "url": "https://example.test/"}
+    api.put("/mixer/sources/cam2", json={"url": "file:///next.mp4", "loop": False})
+    api.post("/mixer/sources/web/navigate", json={"url": "https://example.test/next"})
+    after = {src["id"]: src for src in api.get("/mixer/sources").json()["sources"]}
+    assert after["cam2"]["url"] == "file:///next.mp4" and after["cam2"]["loop"] is False
+    assert after["web"]["url"] == "https://example.test/next"
 
 
 def test_source_set_repoints_a_wired_pad(api, engine):

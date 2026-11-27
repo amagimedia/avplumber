@@ -242,19 +242,44 @@ class SourceController:
                  control_port: int = 0,
                  run_command: Optional[Callable[[str], Optional[str]]] = None,
                  probe: Callable[[str], Optional[int]] = probe_duration_ms,
-                 allowed_urls: Optional[Iterable[str]] = None):
+                 allowed_urls: Optional[Iterable[str]] = None,
+                 hints: Optional[dict[str, dict]] = None,
+                 browser_urls: Optional[dict[str, str]] = None):
         """*run_command* sends one control line and raises RuntimeError with the engine's reason
         when it is refused: ``control_command`` on *control_port* unless given. With neither, the
         playback commands are refused (``mixer.source.set`` needs no refusal and works).
-        *allowed_urls* is ``SourceUrls``' list; a ValueError when it is malformed."""
+        *allowed_urls* is ``SourceUrls``' list; a ValueError when it is malformed.
+        *hints* seeds ``url``/``loop`` per pad id when the input node has not been set yet.
+        *browser_urls* is shared with ``BrowserController`` (id → page URL)."""
         self.avp, self.pads, self.mixer = avp, pads, mixer
         self._urls = SourceUrls(allowed_urls)
+        self._hints = hints or {}
+        self._browser_urls = browser_urls
         if run_command is None and control_port:
             run_command = functools.partial(control_command, control_port)
         self._run_command = run_command
         self._probe = probe
         # One command at a time on a pad; pads do not wait for each other (a prepare takes seconds).
         self._locks = {source_id: threading.Lock() for source_id in pads}
+
+    def list(self) -> dict:
+        """Every show pad in index order: ``id``, ``kind``, and ``url``/``loop`` when known."""
+        sources = []
+        for pad in sorted(self.pads.values(), key=lambda p: p.index):
+            item: dict[str, Any] = {"id": pad.id, "kind": pad.kind}
+            hint = self._hints.get(pad.id, {})
+            if pad.kind in SETTABLE_KINDS:
+                params = dict(self.avp.node(pad.input_node).parameters)
+                url = params["url"] if "url" in params else hint.get("url")
+                loop = params["loop"] if "loop" in params else hint.get("loop")
+                if url is not None:
+                    item["url"] = url
+                if loop is not None:
+                    item["loop"] = loop
+            elif pad.kind == "browser" and self._browser_urls is not None and pad.id in self._browser_urls:
+                item["url"] = self._browser_urls[pad.id]
+            sources.append(item)
+        return {"sources": sources}
 
     def set(self, request: dict) -> dict:
         pad = self._pad(request, "source.set")
@@ -432,6 +457,8 @@ def register_source_commands(avp, controller: SourceController) -> None:
     def handle(method):
         return lambda arg: json.dumps(method(json.loads(arg))) + "\n"
 
+    avp.registerControlCommand("mixer.sources",
+                               lambda _arg: json.dumps(controller.list()) + "\n", True, True)
     avp.registerControlCommand("mixer.source.set", handle(controller.set), True)
     avp.registerControlCommand("mixer.source.prepare", handle(controller.prepare), True)
     avp.registerControlCommand("mixer.source.media", handle(controller.media), True)

@@ -326,9 +326,37 @@ def test_source_pads_follow_build_application_naming():
     assert play["e"].pause_team is None and play["f"].pause_team is None
 
 
+def test_list_reports_pads_with_hints_node_params_and_browser_urls():
+    avp = _Avp([_Node("input_0", dst="out"), _Node("input_1", dst="out")])
+    avp.node("input_0").parameters.update(url="file:///live.mp4", loop=True)
+    browser_urls = {"page": "https://example.test/"}
+    controller = SourceController(
+        avp,
+        {"cam1": _pad(),
+         "seed": _pad(id="seed", index=1, kind="video", group="input_1", input_node="input_1",
+                      sync_team=None, pause_team=None),
+         "page": _pad(id="page", index=2, kind="browser", group="input_2", input_node="input_2",
+                      sync_team=None, pause_team=None),
+         "vmm": _pad(id="vmm", index=3, kind="vmm", group="input_3", input_node="input_3",
+                     sync_team=None, pause_team=None)},
+        hints={"cam1": {"url": "file:///seed.mp4", "loop": False},
+               "seed": {"url": "file:///from-config.mp4", "loop": False}},
+        browser_urls=browser_urls)
+    # cam1: node params beat hints; seed: empty node → hints; page: shared map; vmm: id+kind.
+    assert controller.list() == {"sources": [
+        {"id": "cam1", "kind": "video", "url": "file:///live.mp4", "loop": True},
+        {"id": "seed", "kind": "video", "url": "file:///from-config.mp4", "loop": False},
+        {"id": "page", "kind": "browser", "url": "https://example.test/"},
+        {"id": "vmm", "kind": "vmm"},
+    ]}
+
+
 def test_register_source_commands_wires_the_control_handler():
     avp = _Avp([_Node("input_0", dst="out")])
     register_source_commands(avp, SourceController(avp, {"cam1": _pad(sync_team=None, pause_team=None)}))
+    assert "mixer.sources" in avp.handlers
+    assert json.loads(avp.handlers["mixer.sources"]("")) == {
+        "sources": [{"id": "cam1", "kind": "video"}]}
     reply = json.loads(avp.handlers["mixer.source.set"](json.dumps(
         {"id": "cam1", "url": "file:///a.mp4", "loop": False})))
     assert reply == {"id": "cam1", "url": "file:///a.mp4", "loop": False}

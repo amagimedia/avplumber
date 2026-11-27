@@ -19,13 +19,15 @@ class _Avp:
 
 def test_navigate_loads_the_page_in_the_named_window():
     calls = []
+    urls = {"bug": "https://example.test/", "lower": "https://example.test/lt"}
     controller = BrowserController(
         dmabuf_rest="http://browser", browser_ids=("bug", "lower"),
         navigate=lambda base, window_id, url: calls.append((base, window_id, url)),
-        refresh=lambda *_: None)
+        refresh=lambda *_: None, urls=urls)
     assert controller.navigate({"id": "bug", "url": "https://example.test/a"}) == {
         "id": "bug", "url": "https://example.test/a"}
     assert calls == [("http://browser", "bug", "https://example.test/a")]
+    assert urls["bug"] == "https://example.test/a" and urls["lower"] == "https://example.test/lt"
 
 
 def test_refresh_reloads_the_named_window():

@@ -18,10 +18,13 @@ from .dmabuf_inputs import refresh_windows, update_window
 class BrowserController:
     def __init__(self, *, dmabuf_rest: str, browser_ids: Iterable[str], mixer: str = "mixer",
                  navigate: Optional[Callable[[str, str, str], None]] = None,
-                 refresh: Optional[Callable[[str, list[str]], None]] = None):
-        """*navigate(base, id, url)* and *refresh(base, ids)* default to the dma-browser helpers."""
+                 refresh: Optional[Callable[[str, list[str]], None]] = None,
+                 urls: Optional[dict[str, str]] = None):
+        """*navigate(base, id, url)* and *refresh(base, ids)* default to the dma-browser helpers.
+        *urls* is the shared id→page map ``mixer.sources`` reads; updated on each navigate."""
         self.dmabuf_rest, self.mixer = dmabuf_rest, mixer
         self.browser_ids = frozenset(browser_ids)
+        self.urls = urls if urls is not None else {}
         self._navigate = navigate or update_window
         self._refresh = refresh or refresh_windows
         self._locks = {source_id: threading.Lock() for source_id in self.browser_ids}
@@ -33,6 +36,7 @@ class BrowserController:
                 self._navigate(self.dmabuf_rest, source_id, url)
             except Exception as exc:
                 raise RuntimeError(f"browser.navigate: {exc}") from None
+            self.urls[source_id] = url
         return {"id": source_id, "url": url}
 
     def refresh(self, request: dict) -> dict:

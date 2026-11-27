@@ -245,7 +245,7 @@
       },
       "BrowserNavigate": {
         "additionalProperties": false,
-        "description": "Load a page in an existing browser source window. Size stays as the show opened it.\nNeeds a show with browser sources (dma-browser); otherwise 404 `not_available`.",
+        "description": "Kinds: `browser` only. Not video, NDI, raw, MXL or VMM (use `PUT \u2026/sources/{id}` for those).\n\nLoad a page in an existing window; size stays as the show opened it. Needs a show with\nbrowser sources (dma-browser); otherwise 404 `not_available`.",
         "properties": {
           "url": {
             "minLength": 1,
@@ -1364,9 +1364,50 @@
         "title": "Scenes",
         "type": "object"
       },
+      "SourceInfo": {
+        "description": "One show pad. `url` / `loop` are present when known (settable kinds after set or from the\nshow config; browser after open or navigate). Absent for VMM and for pads not yet observed.",
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "loop": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Loop"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          }
+        },
+        "required": [
+          "id",
+          "kind"
+        ],
+        "title": "SourceInfo",
+        "type": "object"
+      },
       "SourceMedia": {
         "additionalProperties": false,
-        "description": "play / pause / seek / stop / restart on a video source of a mixer built with\n`MixerOptions.playback_control`.",
+        "description": "Kinds: `video` only (needs `MixerOptions.playback_control`). Not NDI, raw, MXL, browser or VMM.\n\nplay / pause / seek / stop / restart. Playhead stays client-estimated.",
         "properties": {
           "action": {
             "enum": [
@@ -1431,7 +1472,7 @@
       },
       "SourcePrepare": {
         "additionalProperties": false,
-        "description": "Load a URL on a video source, pause on the cue-in frame. Needs\n`MixerOptions.playback_control`; an NDI source has no pause or seek.\n\nAnswers when the source is paused on that frame: as long as the URL takes to open, up to\nabout 20 s. Other requests do not wait for it.",
+        "description": "Kinds: `video` only (needs `MixerOptions.playback_control`). Not NDI, raw, MXL, browser or VMM.\n\nLoad a URL, pause on the cue-in frame. Answers when that frame is shown: as long as the URL\ntakes to open, up to about 20 s. Other requests do not wait for it.",
         "properties": {
           "cue_in_ms": {
             "default": 0,
@@ -1500,7 +1541,7 @@
       },
       "SourceResumeAt": {
         "additionalProperties": false,
-        "description": "Schedule resume of the source's pause team at a time on the engine's clock.",
+        "description": "Kinds: `video` only (needs `MixerOptions.playback_control`). Not NDI, raw, MXL, browser or VMM.\n\nSchedule resume of the source's pause team at a time on the engine's clock.",
         "properties": {
           "at_ms": {
             "description": "The engine's wallclock in ms: the clock of `now_pts_ms` in `GET /mixer/status`",
@@ -1536,7 +1577,7 @@
       },
       "SourceSet": {
         "additionalProperties": false,
-        "description": "Repoint a wired file / live video, NDI, raw (`v210` / `nv12` / `p010`) or MXL source: stop\nits group safely, set URL and loop, restart. Browser and VMM pads refuse the command.\nRaw and MXL keep the geometry and format they were built with. MXL needs\n`url` `mxl://<domain>?id=<flow>` and `loop` false.\n\nThe engine opens the URL on its host. A mixer built with `MixerOptions.source_urls` refuses\none outside the protocols and directories listed there (409 `engine_rejected`); include\n`\"mxl\"` to allow MXL reader URLs.",
+        "description": "Kinds: `video`, `ndi`, `v210`, `nv12`, `p010`, `mxl`. Not `browser` or VMM (409).\n\nStop the source's group, set URL and loop, restart. Raw and MXL keep the geometry and format\nthey were built with. MXL needs `url` `mxl://<domain>?id=<flow>` and `loop` false. A browser\npage uses `POST \u2026/navigate` instead.\n\nThe engine opens the URL on its host. A mixer built with `MixerOptions.source_urls` refuses\none outside the protocols and directories listed there (409 `engine_rejected`); include\n`\"mxl\"` to allow MXL reader URLs.",
         "properties": {
           "loop": {
             "title": "Loop",
@@ -1577,6 +1618,22 @@
           "loop"
         ],
         "title": "SourceSetResult",
+        "type": "object"
+      },
+      "Sources": {
+        "properties": {
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/SourceInfo"
+            },
+            "title": "Sources",
+            "type": "array"
+          }
+        },
+        "required": [
+          "sources"
+        ],
+        "title": "Sources",
         "type": "object"
       },
       "Status": {
@@ -4820,9 +4877,126 @@
         ]
       }
     },
+    "/api/v1/mixer/sources": {
+      "get": {
+        "description": "Every show source pad: `id`, `kind`, and `url`/`loop` when known. Use `kind` to pick\n`PUT \u2026/sources/{id}` (video, ndi, raw, mxl), `POST \u2026/navigate` (browser), or prepare/media\n(video with playback_control).",
+        "operationId": "mixer_list_sources",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Sources"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unauthorized`: the gateway requires a bearer token and the request has none, or another one"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`cross_origin`: a browser sent the request for another site's page"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`not_available`: this show or engine has no such command (e.g. keys in a show without a keyer)"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`engine_rejected`: the engine refused the command, `message` is its reason; `conflict`: the resource changed since the revision the request names"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`invalid_request`: the request does not match the schema, `details` lists the fields"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`internal_error`: the gateway failed; its log has the cause"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`bad_engine_reply`: the engine's reply is not JSON, or lacks a field this route's schema promises"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`engine_unreachable`: no control connection to the engine; `engine_not_ready`: the engine is starting and does not take this command yet"
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`engine_timeout`: the engine did not answer in time; the command may still have run"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Sources",
+        "tags": [
+          "mixer"
+        ]
+      }
+    },
     "/api/v1/mixer/sources/{source_id}": {
       "put": {
-        "description": "Change the URL and loop of an existing show source pad without EOS killing the mixer.",
+        "description": "Repoint URL/loop. Kinds: video, ndi, v210, nv12, p010, mxl \u2014 not browser or VMM.",
         "operationId": "mixer_set_source",
         "parameters": [
           {
@@ -4960,7 +5134,7 @@
     },
     "/api/v1/mixer/sources/{source_id}/media": {
       "post": {
-        "description": "play / pause / seek / stop / restart. Playhead stays client-estimated.",
+        "description": "play / pause / seek / stop / restart. Kinds: video only (playback_control).",
         "operationId": "mixer_source_media",
         "parameters": [
           {
@@ -5098,7 +5272,7 @@
     },
     "/api/v1/mixer/sources/{source_id}/navigate": {
       "post": {
-        "description": "Load a URL in a browser source's window (dma-browser). Not `source.set`.",
+        "description": "Load a URL in a browser window (dma-browser). Kinds: browser only.",
         "operationId": "mixer_navigate_browser",
         "parameters": [
           {
@@ -5236,7 +5410,7 @@
     },
     "/api/v1/mixer/sources/{source_id}/prepare": {
       "post": {
-        "description": "Load a URL, pause on the cue-in frame. Needs a mixer built with playback_control.",
+        "description": "Cue-in pause. Kinds: video only (playback_control). Not NDI, raw, MXL, browser or VMM.",
         "operationId": "mixer_prepare_source",
         "parameters": [
           {
@@ -5374,7 +5548,7 @@
     },
     "/api/v1/mixer/sources/{source_id}/refresh": {
       "post": {
-        "description": "Reload the page currently shown by a browser source.",
+        "description": "Reload the current page. Kinds: browser only.",
         "operationId": "mixer_refresh_browser",
         "parameters": [
           {
@@ -5502,7 +5676,7 @@
     },
     "/api/v1/mixer/sources/{source_id}/resume_at": {
       "post": {
-        "description": "Schedule `resume <pause_team> at <at_ms>` for a timed cue-in.",
+        "description": "Timed cue-in resume. Kinds: video only (playback_control).",
         "operationId": "mixer_resume_source_at",
         "parameters": [
           {

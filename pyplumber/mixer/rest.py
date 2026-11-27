@@ -287,11 +287,25 @@ class AuxCompositionResult(Reply):
 
 # --- Sources ---
 
+class SourceInfo(BaseModel):
+    """One show pad. `url` / `loop` are present when known (settable kinds after set or from the
+    show config; browser after open or navigate). Absent for VMM and for pads not yet observed."""
+    id: str
+    kind: str
+    url: str | None = None
+    loop: bool | None = None
+
+
+class Sources(BaseModel):
+    sources: list[SourceInfo]
+
+
 class SourceSet(Request):
-    """Repoint a wired file / live video, NDI, raw (`v210` / `nv12` / `p010`) or MXL source: stop
-    its group safely, set URL and loop, restart. Browser and VMM pads refuse the command.
-    Raw and MXL keep the geometry and format they were built with. MXL needs
-    `url` `mxl://<domain>?id=<flow>` and `loop` false.
+    """Kinds: `video`, `ndi`, `v210`, `nv12`, `p010`, `mxl`. Not `browser` or VMM (409).
+
+    Stop the source's group, set URL and loop, restart. Raw and MXL keep the geometry and format
+    they were built with. MXL needs `url` `mxl://<domain>?id=<flow>` and `loop` false. A browser
+    page uses `POST …/navigate` instead.
 
     The engine opens the URL on its host. A mixer built with `MixerOptions.source_urls` refuses
     one outside the protocols and directories listed there (409 `engine_rejected`); include
@@ -307,11 +321,10 @@ class SourceSetResult(Reply):
 
 
 class SourcePrepare(Request):
-    """Load a URL on a video source, pause on the cue-in frame. Needs
-    `MixerOptions.playback_control`; an NDI source has no pause or seek.
+    """Kinds: `video` only (needs `MixerOptions.playback_control`). Not NDI, raw, MXL, browser or VMM.
 
-    Answers when the source is paused on that frame: as long as the URL takes to open, up to
-    about 20 s. Other requests do not wait for it."""
+    Load a URL, pause on the cue-in frame. Answers when that frame is shown: as long as the URL
+    takes to open, up to about 20 s. Other requests do not wait for it."""
     url: Annotated[str, Field(min_length=1)]
     loop: bool
     cue_in_ms: int = Field(0, ge=0, description="Seek to this offset after pause, in milliseconds")
@@ -326,8 +339,9 @@ class SourcePrepareResult(Reply):
 
 
 class SourceMedia(Request):
-    """play / pause / seek / stop / restart on a video source of a mixer built with
-    `MixerOptions.playback_control`."""
+    """Kinds: `video` only (needs `MixerOptions.playback_control`). Not NDI, raw, MXL, browser or VMM.
+
+    play / pause / seek / stop / restart. Playhead stays client-estimated."""
     action: Literal["play", "pause", "seek", "stop", "restart"]
     position_ms: int | None = Field(None, ge=0, description="Required for seek; ignored otherwise")
 
@@ -347,7 +361,9 @@ class SourceMediaResult(Reply):
 
 
 class SourceResumeAt(Request):
-    """Schedule resume of the source's pause team at a time on the engine's clock."""
+    """Kinds: `video` only (needs `MixerOptions.playback_control`). Not NDI, raw, MXL, browser or VMM.
+
+    Schedule resume of the source's pause team at a time on the engine's clock."""
     at_ms: int = Field(ge=0, description="The engine's wallclock in ms: the clock of `now_pts_ms` in `GET /mixer/status`")
 
 
@@ -357,8 +373,10 @@ class SourceResumeAtResult(Reply):
 
 
 class BrowserNavigate(Request):
-    """Load a page in an existing browser source window. Size stays as the show opened it.
-    Needs a show with browser sources (dma-browser); otherwise 404 `not_available`."""
+    """Kinds: `browser` only. Not video, NDI, raw, MXL or VMM (use `PUT …/sources/{id}` for those).
+
+    Load a page in an existing window; size stays as the show opened it. Needs a show with
+    browser sources (dma-browser); otherwise 404 `not_available`."""
     url: Annotated[str, Field(min_length=1)]
 
 
@@ -553,36 +571,43 @@ def mixer_router(bridge: MixerBridge, *, on_aux_change: Callable[[str, dict], No
 
     # --- Sources ---
 
+    @router.get("/sources", response_model=Sources, response_model_exclude_none=True)
+    def list_sources():
+        """Every show source pad: `id`, `kind`, and `url`/`loop` when known. Use `kind` to pick
+        `PUT …/sources/{id}` (video, ndi, raw, mxl), `POST …/navigate` (browser), or prepare/media
+        (video with playback_control)."""
+        return ask("mixer.sources", '{"sources":[]}')
+
     @router.put("/sources/{source_id}", response_model=SourceSetResult)
     def set_source(source_id: str, request: SourceSet):
-        """Change the URL and loop of an existing show source pad without EOS killing the mixer."""
+        """Repoint URL/loop. Kinds: video, ndi, v210, nv12, p010, mxl — not browser or VMM."""
         return send("source.set", request, id=source_id, mixer=bridge.mixer)
 
     @router.post("/sources/{source_id}/prepare", response_model=SourcePrepareResult)
     def prepare_source(source_id: str, request: SourcePrepare):
-        """Load a URL, pause on the cue-in frame. Needs a mixer built with playback_control."""
+        """Cue-in pause. Kinds: video only (playback_control). Not NDI, raw, MXL, browser or VMM."""
         return send("source.prepare", request, id=source_id, mixer=bridge.mixer)
 
     @router.post("/sources/{source_id}/media", response_model=SourceMediaResult,
                  response_model_exclude_none=True)
     def source_media(source_id: str, request: SourceMedia):
-        """play / pause / seek / stop / restart. Playhead stays client-estimated."""
+        """play / pause / seek / stop / restart. Kinds: video only (playback_control)."""
         return send("source.media", request, id=source_id, mixer=bridge.mixer)
 
     @router.post("/sources/{source_id}/resume_at", response_model=SourceResumeAtResult,
                  response_model_exclude_none=True)
     def resume_source_at(source_id: str, request: SourceResumeAt):
-        """Schedule `resume <pause_team> at <at_ms>` for a timed cue-in."""
+        """Timed cue-in resume. Kinds: video only (playback_control)."""
         return send("source.resume_at", request, id=source_id, mixer=bridge.mixer)
 
     @router.post("/sources/{source_id}/navigate", response_model=BrowserNavigateResult)
     def navigate_browser(source_id: str, request: BrowserNavigate):
-        """Load a URL in a browser source's window (dma-browser). Not `source.set`."""
+        """Load a URL in a browser window (dma-browser). Kinds: browser only."""
         return send("browser.navigate", request, id=source_id, mixer=bridge.mixer)
 
     @router.post("/sources/{source_id}/refresh", response_model=BrowserRefreshResult)
     def refresh_browser(source_id: str):
-        """Reload the page currently shown by a browser source."""
+        """Reload the current page. Kinds: browser only."""
         return send("browser.refresh", id=source_id, mixer=bridge.mixer)
 
     # --- Audio ---

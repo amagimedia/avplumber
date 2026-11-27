@@ -176,15 +176,19 @@ the OpenAPI document; [mixer.md](mixer.md) describes what the commands do.
 | `PUT /mixer/aux/{bus}/layout` | `mixer.aux_layout` |
 | `PUT /mixer/aux/{bus}/page` | `mixer.aux_page` |
 | `PUT /mixer/aux/{bus}/composition` | `mixer.aux_composition` (external-mode buses) |
-| `PUT /mixer/sources/{id}` | `mixer.source.set` |
-| `POST /mixer/sources/{id}/prepare` | `mixer.source.prepare` |
-| `POST /mixer/sources/{id}/media` | `mixer.source.media` |
-| `POST /mixer/sources/{id}/resume_at` | `mixer.source.resume_at` |
-| `POST /mixer/sources/{id}/navigate` | `mixer.browser.navigate` (browser sources) |
-| `POST /mixer/sources/{id}/refresh` | `mixer.browser.refresh` (browser sources) |
+| `GET /mixer/sources` | `mixer.sources` — every pad's `id`, `kind`, and `url`/`loop` when known |
+| `PUT /mixer/sources/{id}` | `mixer.source.set` — kinds `video`, `ndi`, `v210`, `nv12`, `p010`, `mxl` (not browser / VMM) |
+| `POST /mixer/sources/{id}/prepare` | `mixer.source.prepare` — kind `video` only (`playback_control`) |
+| `POST /mixer/sources/{id}/media` | `mixer.source.media` — kind `video` only |
+| `POST /mixer/sources/{id}/resume_at` | `mixer.source.resume_at` — kind `video` only |
+| `POST /mixer/sources/{id}/navigate` | `mixer.browser.navigate` — kind `browser` only |
+| `POST /mixer/sources/{id}/refresh` | `mixer.browser.refresh` — kind `browser` only |
 | `GET`, `PATCH /mixer/audio/gains` | `mixer.audio_gain_status`, `mixer.audio_gain` |
 | `GET /mixer/audio/processors` | `mixer.audio_processor_status` |
 | `PATCH /mixer/audio/processors/{output}/{id}` | `mixer.audio_processor` |
+
+Wrong kind for a source route is 409 `engine_rejected`. `navigate` / `refresh` are
+unregistered when the show has no browser sources (404 `not_available`).
 
 `mixer.status`, `mixer.scenes` and the takes are the engine's; the key, fade to
 black, AUX, source, audio and settings commands are registered by `pyplumber.mixer`, so
@@ -212,7 +216,10 @@ for it; requests for one source run one at a time.
 name: a file on its host, or an address that host reaches. Whoever may call the
 gateway chooses it. `MixerOptions.source_urls` limits it to protocols and
 directories ([mixer.md](mixer.md#source-repoint-mixersourceset)); a URL outside
-them is a 409 `engine_rejected`. Without that option any URL is taken.
+them is a 409 `engine_rejected`. Without that option any URL is taken. Raw and
+MXL pads keep the geometry they were built with; an MXL URL is
+`mxl://<domain>?id=<flow>` with `loop` false. A browser page is
+`POST …/navigate`, not `PUT …/sources/{id}`.
 
 ```
 curl -s http://127.0.0.1:7682/api/v1/mixer/status

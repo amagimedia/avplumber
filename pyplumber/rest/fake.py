@@ -18,7 +18,7 @@ from types import SimpleNamespace
 from pyplumber.mixer.browser_control import BrowserController
 from pyplumber.mixer.config import ConfigError
 from pyplumber.mixer.control import AvpProtocolError
-from pyplumber.mixer.source_control import SourceController, source_pads
+from pyplumber.mixer.source_control import SETTABLE_KINDS, SourceController, source_pads
 
 
 class _Refused(Exception):
@@ -46,18 +46,23 @@ class FakeEngine:
         # mixer's own controller checks and answers the source commands, over a graph of no nodes.
         self.sources = {scene: {"id": scene, "url": f"fake://{scene}", "loop": False, "kind": "video"}
                         for scene in self.scenes}
-        self.sources["web"] = {"id": "web", "url": "https://example.test/", "loop": False, "kind": "browser"}
         self.sources["mxl1"] = {"id": "mxl1", "url": "mxl:///var/mxl/domain?id=flow-a", "loop": False, "kind": "mxl"}
-        video_pads = source_pads([SimpleNamespace(id=scene, kind="video", has_audio=False) for scene in self.scenes],
-                                 playback_control=True)
-        mxl_pads = source_pads([SimpleNamespace(id="mxl1", kind="mxl", has_audio=False)])
+        self.sources["web"] = {"id": "web", "url": "https://example.test/", "loop": False, "kind": "browser"}
+        pads = source_pads(
+            [SimpleNamespace(id=scene, kind="video", has_audio=False) for scene in self.scenes]
+            + [SimpleNamespace(id="mxl1", kind="mxl", has_audio=False),
+               SimpleNamespace(id="web", kind="browser", has_audio=False)],
+            playback_control=True)
+        hints = {sid: {"url": src["url"], "loop": src["loop"]}
+                 for sid, src in self.sources.items() if src["kind"] in SETTABLE_KINDS}
+        browser_urls = {sid: src["url"] for sid, src in self.sources.items() if src["kind"] == "browser"}
         self._source_control = SourceController(
-            _NoGraph(), {**video_pads, **mxl_pads},
-            mixer=mixer, run_command=lambda _line: None, probe=lambda _url: 60_000)
+            _NoGraph(), pads, mixer=mixer, run_command=lambda _line: None, probe=lambda _url: 60_000,
+            hints=hints, browser_urls=browser_urls)
         self._browser_control = BrowserController(
             dmabuf_rest="http://127.0.0.1:9", browser_ids=("web",), mixer=mixer,
             navigate=lambda _base, window_id, url: self.sources[window_id].__setitem__("url", url),
-            refresh=lambda _base, _ids: None)
+            refresh=lambda _base, _ids: None, urls=browser_urls)
         self.processor = {"output": "program", "id": "duck", "type": "ducker", "enabled": True, "threshold_db": -40.0,
                           "depth_db": -20.0, "attack_ms": 10.0, "hold_ms": 300.0, "release_ms": 800.0, "gain_db": 0.0}
         self._lock = threading.Lock()
@@ -89,6 +94,7 @@ class FakeEngine:
             "mixer.audio_gain_status": lambda _arg: self._gains(),
             "mixer.audio_processor": lambda arg: self._audio_processor(json.loads(arg)),
             "mixer.audio_processor_status": lambda _arg: [self.processor],
+            "mixer.sources": lambda _arg: self._source_control.list(),
             "mixer.source.set": lambda arg: self._source("set", json.loads(arg)),
             "mixer.source.prepare": lambda arg: self._source_prepare(json.loads(arg)),
             "mixer.source.media": lambda arg: self._source_media(json.loads(arg)),

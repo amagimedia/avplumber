@@ -28,7 +28,8 @@ from .dmabuf_inputs import (BrowserStartupUnsettled, dmabuf_cuda_input_nodes, op
 from .dsk import DownstreamKeyer, register_dsk_commands
 from .inputs import build_input, build_v210_input, build_raw420_input
 from .browser_control import BrowserController, register_browser_commands
-from .source_control import SourceController, SourceUrls, chain_teams, register_source_commands, source_pads
+from .source_control import (SETTABLE_KINDS, SourceController, SourceUrls, chain_teams,
+                             register_source_commands, source_pads)
 from .janus import (DEFAULT_KEYFRAME_MIN_INTERVAL_MS, JANUS_KEYFRAME_NODE, JanusVideoConfig,
                     RtcpFeedbackGroup, add_nodes, build_janus_output, dpb_options, release_commands)
 from ..transform import transform_output, transform_params
@@ -1333,14 +1334,19 @@ def _build_from_config(options: MixerOptions, cfg: "mixer_config.MixerConfig", a
         return json.dumps({"outputs": overlay_on}) + "\n"
 
     avp.registerControlCommand("mixer.debug_overlay", debug_overlay, True)
+    pads = source_pads(cfg.sources, external=set(external),
+                       playback_control=options.playback_control, raw_upload=cfg.raw_upload)
+    source_hints = {s.id: {"url": s.location, "loop": s.loop}
+                    for s in cfg.sources if pads[s.id].kind in SETTABLE_KINDS}
+    browser_urls = {s.id: s.location for s in cfg.sources if pads[s.id].kind == "browser"}
     register_source_commands(avp, SourceController(
-        avp, source_pads(cfg.sources, external=set(external),
-                         playback_control=options.playback_control, raw_upload=cfg.raw_upload),
-        mixer=MIXER_NAME, control_port=options.remote_control_port, allowed_urls=options.source_urls))
+        avp, pads, mixer=MIXER_NAME, control_port=options.remote_control_port,
+        allowed_urls=options.source_urls, hints=source_hints, browser_urls=browser_urls))
     if browsers and options.dmabuf_rest:
         register_browser_commands(avp, BrowserController(
             dmabuf_rest=options.dmabuf_rest,
-            browser_ids=(source.id for source in browsers.values()), mixer=MIXER_NAME))
+            browser_ids=(source.id for source in browsers.values()), mixer=MIXER_NAME,
+            urls=browser_urls))
     held = []
     # Purge idle imports left by the capture pool's start-up churn.
     importers = tuple(f"input_{index}_to_cuda" for index in browsers)

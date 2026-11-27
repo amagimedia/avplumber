@@ -448,6 +448,10 @@ is `mxl://<domain>?id=<flow>` (absolute domain path and a video flow id) and
 `PUT /mixer/sources/{id}` with `{"url","loop"}`. A browser page uses
 `mixer.browser.navigate` (below) instead.
 
+`mixer.sources` lists every show pad in index order (`id`, `kind`, and `url` /
+`loop` when known — from the input node's params or the show config for settable
+kinds, and from navigate tracking for browsers). REST: `GET /mixer/sources`.
+
 The URL is opened by the engine, on its host: a file there, or an address that
 host reaches. By default any URL is taken, as `node.param.set` on the control
 port takes one. `MixerOptions.source_urls` limits what `mixer.source.set` and
