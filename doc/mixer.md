@@ -440,11 +440,13 @@ is a request the engine carries out afterwards: a URL that cannot be opened show
 in the engine's log and the node state, not in this answer.
 
 Address sources by show source id (resolved to `input_<index>` the way
-`build_application` names them). Supported kinds are `video`, `ndi` and raw
-(`v210` / `nv12` / `p010`). Raw pads keep the width, height, pixel format and
-colour they were built with: only the file path changes. Browser, MXL and VMM
-pads answer with a clear error. REST: `PUT /mixer/sources/{id}` with
-`{"url","loop"}`. A browser page uses `mixer.browser.navigate` (below) instead.
+`build_application` names them). Supported kinds are `video`, `ndi`, raw
+(`v210` / `nv12` / `p010`) and `mxl`. Raw and MXL pads keep the width, height,
+pixel format and colour they were built with: only the URL changes. An MXL URL
+is `mxl://<domain>?id=<flow>` (absolute domain path and a video flow id) and
+`loop` must be false. Browser and VMM pads answer with a clear error. REST:
+`PUT /mixer/sources/{id}` with `{"url","loop"}`. A browser page uses
+`mixer.browser.navigate` (below) instead.
 
 The URL is opened by the engine, on its host: a file there, or an address that
 host reaches. By default any URL is taken, as `node.param.set` on the control
@@ -452,14 +454,14 @@ port takes one. `MixerOptions.source_urls` limits what `mixer.source.set` and
 `mixer.source.prepare` accept; set it when others than the host's operator can
 send these commands, e.g. through the REST API. It is a list of:
 
-* FFmpeg protocol names: `"srt"`, `"https"`, `"udp"`. `"file"` allows every
-  file. The name is the URL's whole scheme, so `"https"` does not allow
+* FFmpeg protocol names: `"srt"`, `"https"`, `"udp"`, `"mxl"`. `"file"` allows
+  every file. The name is the URL's whole scheme, so `"https"` does not allow
   `crypto+https://…`, and `concat:` or `subfile,…:` need their own entry.
 * absolute directories: `"/media/clips"` allows the files below it, given as a
   path or as `file:<path>`. `..` and symbolic links are resolved first.
 
 ```python
-MixerOptions(source_urls=("srt", "/media/clips"))
+MixerOptions(source_urls=("srt", "mxl", "/media/clips"))
 ```
 
 An empty list allows nothing. A URL outside the list is refused before the

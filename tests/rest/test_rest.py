@@ -139,6 +139,15 @@ def test_browser_navigate_and_refresh(api, engine):
     assert refused.status_code == 409 and refused.json()["error"]["code"] == "engine_rejected"
 
 
+def test_mxl_source_set_via_rest(api, engine):
+    url = "mxl:///var/mxl/domain?id=flow-b"
+    reply = api.put("/mixer/sources/mxl1", json={"url": url, "loop": False}).json()
+    assert reply == {"id": "mxl1", "url": url, "loop": False}
+    assert engine.sources["mxl1"]["url"] == url
+    refused = api.put("/mixer/sources/mxl1", json={"url": url, "loop": True})
+    assert refused.status_code == 409 and "cannot loop" in refused.json()["error"]["message"]
+
+
 def test_key_and_aux_replies_are_the_mixers(api):
     keys = api.patch("/mixer/keys/logo", json={"on": True}).json()["keys"]
     assert [(key["id"], key["on"]) for key in keys] == [("logo", True), ("lower_third", False)]

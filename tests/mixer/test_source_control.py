@@ -254,11 +254,10 @@ def test_unsupported_kind_is_refused():
         id="page", index=1, kind="browser", group="input_1", input_node="input_1")})
     with pytest.raises(ConfigError, match="unsupported"):
         controller.set({"id": "page", "url": "https://example", "loop": False})
-    for kind in ("mxl", "vmm"):
-        controller = SourceController(avp, {"x": SourcePad(
-            id="x", index=0, kind=kind, group="input_0", input_node="input_0")})
-        with pytest.raises(ConfigError, match="unsupported"):
-            controller.set({"id": "x", "url": "file:///a", "loop": False})
+    controller = SourceController(avp, {"x": SourcePad(
+        id="x", index=0, kind="vmm", group="input_0", input_node="input_0")})
+    with pytest.raises(ConfigError, match="unsupported"):
+        controller.set({"id": "x", "url": "file:///a", "loop": False})
 
 
 def test_raw_pads_accept_source_set_without_playback():
@@ -271,6 +270,30 @@ def test_raw_pads_accept_source_set_without_playback():
             "id": "bars", "url": "file:///next.v210", "loop": True}
         with pytest.raises(ConfigError, match="no pause or seek"):
             controller.prepare({"id": "bars", "url": "file:///next.v210", "loop": False})
+
+
+def test_mxl_source_set_needs_mxl_url_and_refuses_loop():
+    avp = _Avp([_Node("input_0", dst="out")])
+    controller = SourceController(avp, {"flow": SourcePad(
+        id="flow", index=0, kind="mxl", group="input_0", input_node="input_0")})
+    url = "mxl:///var/mxl/domain?id=video-flow-1"
+    assert controller.set({"id": "flow", "url": url, "loop": False}) == {
+        "id": "flow", "url": url, "loop": False}
+    with pytest.raises(ConfigError, match="cannot loop"):
+        controller.set({"id": "flow", "url": url, "loop": True})
+    with pytest.raises(ConfigError, match="mxl://"):
+        controller.set({"id": "flow", "url": "/var/mxl/domain", "loop": False})
+    with pytest.raises(ConfigError, match="no pause or seek"):
+        controller.prepare({"id": "flow", "url": url, "loop": False})
+    # source_urls may list the mxl protocol when operators lock URLs.
+    locked = SourceController(avp, {"flow": SourcePad(
+        id="flow", index=0, kind="mxl", group="input_0", input_node="input_0")},
+        allowed_urls=("file",))
+    with pytest.raises(ConfigError, match="not allowed"):
+        locked.set({"id": "flow", "url": url, "loop": False})
+    assert SourceController(avp, {"flow": SourcePad(
+        id="flow", index=0, kind="mxl", group="input_0", input_node="input_0")},
+        allowed_urls=("mxl",)).set({"id": "flow", "url": url, "loop": False})["url"] == url
 
 
 def test_continuous_loop_follows_the_raw_upload_path():

@@ -29,11 +29,13 @@ from .config import ConfigError
 from .control import AvpConnection, AvpProtocolError
 
 # Pads whose head node is ``input_<index>`` with a retargetable ``url`` / ``loop``. Browser needs
-# navigate (dma-browser); MXL and VMM need other primitives and refuse ``mixer.source.set``.
-SETTABLE_KINDS = frozenset({"video", "ndi", "v210", "nv12", "p010"})
+# navigate (dma-browser); VMM (cuda_ipc) refuses ``mixer.source.set``.
+SETTABLE_KINDS = frozenset({"video", "ndi", "v210", "nv12", "p010", "mxl"})
 # Pause and seek are input_rec's: a file, or a stream it can seek. An NDI feed is read by the plain
-# input node, which waits on no pause team and has no position to seek to. Raw files have none.
+# input node, which waits on no pause team and has no position to seek to. Raw and MXL have none.
 PLAYBACK_KINDS = frozenset({"video"})
+# Live MXL reader URL as ``config._mxl_flow`` builds it: absolute domain path and a flow id.
+_MXL_URL = re.compile(r"^mxl://(/[^?]*)\?id=(.+)$")
 MEDIA_ACTIONS = frozenset({"play", "pause", "seek", "stop", "restart"})
 # Pause / seek need a shown frame; just after group.start there may be none yet. The control
 # protocol has no error codes: this text, from RealTimeTeam (src/RealTimeTeam.hpp), is the only
@@ -260,6 +262,12 @@ class SourceController:
         # Optional fields the chain does not yet retarget (audio track, deinterlace) stay for a
         # follow-up; refuse them so a client does not think they took effect.
         _no_other_fields(request, "source.set", "url", "loop")
+        if pad.kind == "mxl":
+            if loop:
+                raise ConfigError("source.set: an mxl source cannot loop")
+            if not _MXL_URL.match(url):
+                raise ConfigError("source.set: an mxl source needs url mxl://<domain>?id=<flow> "
+                                 "(absolute domain path and a video flow id)")
 
         with self._locks[pad.id]:
             self._set_unlocked(pad, url, loop)

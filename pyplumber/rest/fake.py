@@ -47,9 +47,12 @@ class FakeEngine:
         self.sources = {scene: {"id": scene, "url": f"fake://{scene}", "loop": False, "kind": "video"}
                         for scene in self.scenes}
         self.sources["web"] = {"id": "web", "url": "https://example.test/", "loop": False, "kind": "browser"}
+        self.sources["mxl1"] = {"id": "mxl1", "url": "mxl:///var/mxl/domain?id=flow-a", "loop": False, "kind": "mxl"}
+        video_pads = source_pads([SimpleNamespace(id=scene, kind="video", has_audio=False) for scene in self.scenes],
+                                 playback_control=True)
+        mxl_pads = source_pads([SimpleNamespace(id="mxl1", kind="mxl", has_audio=False)])
         self._source_control = SourceController(
-            _NoGraph(), source_pads([SimpleNamespace(id=scene, kind="video", has_audio=False) for scene in self.scenes],
-                                    playback_control=True),
+            _NoGraph(), {**video_pads, **mxl_pads},
             mixer=mixer, run_command=lambda _line: None, probe=lambda _url: 60_000)
         self._browser_control = BrowserController(
             dmabuf_rest="http://127.0.0.1:9", browser_ids=("web",), mixer=mixer,

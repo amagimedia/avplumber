@@ -288,12 +288,14 @@ class AuxCompositionResult(Reply):
 # --- Sources ---
 
 class SourceSet(Request):
-    """Repoint a wired file / live video, NDI or raw (`v210` / `nv12` / `p010`) source: stop its
-    group safely, set URL and loop, restart. Browser, MXL and VMM pads refuse the command.
-    Raw pads keep the geometry and format they were built with.
+    """Repoint a wired file / live video, NDI, raw (`v210` / `nv12` / `p010`) or MXL source: stop
+    its group safely, set URL and loop, restart. Browser and VMM pads refuse the command.
+    Raw and MXL keep the geometry and format they were built with. MXL needs
+    `url` `mxl://<domain>?id=<flow>` and `loop` false.
 
     The engine opens the URL on its host. A mixer built with `MixerOptions.source_urls` refuses
-    one outside the protocols and directories listed there (409 `engine_rejected`)."""
+    one outside the protocols and directories listed there (409 `engine_rejected`); include
+    `"mxl"` to allow MXL reader URLs."""
     url: Annotated[str, Field(min_length=1)]
     loop: bool
 
