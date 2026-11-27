@@ -73,6 +73,7 @@ class FakeEngine:
             "node.object.get": lambda arg: {"node": self._node(arg.split()[0])["name"], "object": arg.split()[1]},
             "queues.json": lambda _arg: [{"name": f"{scene}_video", "capacity": 15, "occupied": 0} for scene in self.scenes],
             "mixer.status": lambda arg: self._for_mixer(arg, self._status),
+            "mixer.startup": lambda _arg: self._startup(),
             "mixer.scenes": lambda arg: self._for_mixer(arg, lambda: self.scenes),
             "mixer.settings": lambda _arg: self._settings(),
             "mixer.preview": lambda arg: self._preview(self._scene(json.loads(arg))),
@@ -143,6 +144,13 @@ class FakeEngine:
                 "transition_on_air": False, "transition_paused": False, "transition_manual": False,
                 "transition_progress": 0.0, "transition_duration_ms": 0, "now_pts_ms": int(time.monotonic() * 1000),
                 "lever": {"position": self.lever, "origin": 0.0, "engaged": 0 < self.lever < 1}}
+
+    def _startup(self):
+        """A settled show: the fake has no preheat, so going on air is immediate."""
+        return {"settled": True, "reason": "", "waited_sec": 0.0, "outputs": 1,
+                "warm_up": {"missed_deadlines": 0, "output_drops": 0}, "counters": {},
+                "stable_sec": 10.0, "timeout_sec": 60.0, "released_at": time.time(),
+                "browser_windows": None}
 
     def _settings(self):
         return {"source_count": len(self.scenes), "canvas": {"width": 1920, "height": 1080, "fps": 30, "working_format": "nv12"},

@@ -84,6 +84,33 @@ class Status(Reply):
                                                      "`POST /mixer/sources/{id}/resume_at` is on")
 
 
+class StartupWarmUp(Reply):
+    missed_deadlines: int
+    output_drops: int
+
+
+class StartupCounters(StartupWarmUp):
+    frames: int
+
+
+class Startup(Reply):
+    """How going on air went. Registered after the show is released; 404 `not_available` before that
+    or without a mixer application. `released_at` is the on-air moment (Unix seconds); on-air
+    compositor counters start from zero after that."""
+    settled: bool = Field(description="False when the stable window never completed before the timeout")
+    reason: str = Field("", description="What kept the window from settling; empty when settled")
+    waited_sec: float
+    outputs: int = Field(description="Janus (or held) outputs released together")
+    warm_up: StartupWarmUp = Field(description="Totals discarded by the counter reset at release")
+    counters: dict[str, StartupCounters] = Field(default_factory=dict,
+                                                 description="Per compositor at release, before reset")
+    stable_sec: float
+    timeout_sec: float
+    released_at: float = Field(description="Unix time when outputs were released")
+    browser_windows: dict[str, Any] | None = Field(
+        None, description="dma-browser window stats at release, when the show has browser sources")
+
+
 class Scenes(BaseModel):
     scenes: list[str]
 
@@ -470,6 +497,12 @@ def mixer_router(bridge: MixerBridge, *, on_aux_change: Callable[[str, dict], No
     def status():
         """What is on Program and Preview, and the transition on air."""
         return bridge.status()
+
+    @router.get("/startup", response_model=Startup)
+    def startup():
+        """How this mixer went on air: settled or timed out, warm-up counters, release time.
+        404 `not_available` while the show is still preheating or without a mixer application."""
+        return ask("mixer.startup", "null")
 
     @router.get("/scenes", response_model=Scenes)
     def scenes():

@@ -42,6 +42,7 @@ def spaced(command, **payload):
     ("GET", "/engine/nodes/comp_a/objects/streams", None, 200, "node.object.get comp_a streams"),
     ("GET", "/engine/queues", None, 200, "queues.json"),
     ("GET", "/mixer/status", None, 200, "mixer.status mixer"),
+    ("GET", "/mixer/startup", None, 200, "mixer.startup"),
     ("GET", "/mixer/scenes", None, 200, "mixer.scenes mixer"),
     ("GET", "/mixer/settings", None, 200, "mixer.settings mixer"),
     ("PUT", "/mixer/preview", {"scene": "cam2"}, 204, line("preview", scene="cam2", mixer="mixer")),
@@ -108,6 +109,15 @@ def test_take_reaches_program_and_swaps_preview(api):
     status = api.get("/mixer/status").json()
     assert (status["pgm_scene"], status["pvw_scene"]) == ("cam3", "cam1")
     assert status["lever"] == {"position": 0.0, "origin": 0.0, "engaged": False}   # fields the model does not name pass through
+
+
+def test_startup_reports_how_going_on_air_went(api):
+    report = api.get("/mixer/startup").json()
+    assert report["settled"] is True and report["reason"] == ""
+    assert report["warm_up"] == {"missed_deadlines": 0, "output_drops": 0}
+    assert report["counters"] == {} and report["browser_windows"] is None
+    assert report["outputs"] == 1 and report["stable_sec"] == 10.0 and report["timeout_sec"] == 60.0
+    assert isinstance(report["released_at"], (int, float)) and report["released_at"] > 0
 
 
 def test_list_sources_reports_pads_and_follows_set_and_navigate(api, engine):

@@ -160,6 +160,7 @@ the OpenAPI document; [mixer.md](mixer.md) describes what the commands do.
 | Operation | Control command |
 | --- | --- |
 | `GET /mixer/status` | `mixer.status` |
+| `GET /mixer/startup` | `mixer.startup` — how going on air went (settled, warm-up, `released_at`) |
 | `GET /mixer/scenes` | `mixer.scenes` |
 | `GET /mixer/settings` | `mixer.settings` |
 | `PUT /mixer/preview` | `mixer.preview` |

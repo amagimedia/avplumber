@@ -706,9 +706,9 @@ compositor's counters and releases all outputs together on a key
 frame, in that order, so what the counters say on air starts from zero and
 nothing on air is reset away. `mixer.startup` answers with how it went:
 `settled` (false after the timeout), `waited_sec`, `reason`, each compositor's
-`counters` at the release and the `warm_up` totals the reset discarded. Setup
-waits up to 180 s for the mixer's startup: the preheat and this wait share that
-budget.
+`counters` at the release and the `warm_up` totals the reset discarded. REST:
+`GET /mixer/startup` (404 until the show is on air). Setup waits up to 180 s for
+the mixer's startup: the preheat and this wait share that budget.
 
 Sources feed the compositors directly after source normalization.
 Their scene layers use `dst_x`, `dst_y`, `dst_w`, `dst_h`, optional `crop`, and

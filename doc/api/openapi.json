@@ -1636,6 +1636,124 @@
         "title": "Sources",
         "type": "object"
       },
+      "Startup": {
+        "additionalProperties": true,
+        "description": "How going on air went. Registered after the show is released; 404 `not_available` before that\nor without a mixer application. `released_at` is the on-air moment (Unix seconds); on-air\ncompositor counters start from zero after that.",
+        "properties": {
+          "browser_windows": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "dma-browser window stats at release, when the show has browser sources",
+            "title": "Browser Windows"
+          },
+          "counters": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/StartupCounters"
+            },
+            "description": "Per compositor at release, before reset",
+            "title": "Counters",
+            "type": "object"
+          },
+          "outputs": {
+            "description": "Janus (or held) outputs released together",
+            "title": "Outputs",
+            "type": "integer"
+          },
+          "reason": {
+            "default": "",
+            "description": "What kept the window from settling; empty when settled",
+            "title": "Reason",
+            "type": "string"
+          },
+          "released_at": {
+            "description": "Unix time when outputs were released",
+            "title": "Released At",
+            "type": "number"
+          },
+          "settled": {
+            "description": "False when the stable window never completed before the timeout",
+            "title": "Settled",
+            "type": "boolean"
+          },
+          "stable_sec": {
+            "title": "Stable Sec",
+            "type": "number"
+          },
+          "timeout_sec": {
+            "title": "Timeout Sec",
+            "type": "number"
+          },
+          "waited_sec": {
+            "title": "Waited Sec",
+            "type": "number"
+          },
+          "warm_up": {
+            "$ref": "#/components/schemas/StartupWarmUp",
+            "description": "Totals discarded by the counter reset at release"
+          }
+        },
+        "required": [
+          "settled",
+          "waited_sec",
+          "outputs",
+          "warm_up",
+          "stable_sec",
+          "timeout_sec",
+          "released_at"
+        ],
+        "title": "Startup",
+        "type": "object"
+      },
+      "StartupCounters": {
+        "additionalProperties": true,
+        "properties": {
+          "frames": {
+            "title": "Frames",
+            "type": "integer"
+          },
+          "missed_deadlines": {
+            "title": "Missed Deadlines",
+            "type": "integer"
+          },
+          "output_drops": {
+            "title": "Output Drops",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "missed_deadlines",
+          "output_drops",
+          "frames"
+        ],
+        "title": "StartupCounters",
+        "type": "object"
+      },
+      "StartupWarmUp": {
+        "additionalProperties": true,
+        "properties": {
+          "missed_deadlines": {
+            "title": "Missed Deadlines",
+            "type": "integer"
+          },
+          "output_drops": {
+            "title": "Output Drops",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "missed_deadlines",
+          "output_drops"
+        ],
+        "title": "StartupWarmUp",
+        "type": "object"
+      },
       "Status": {
         "additionalProperties": true,
         "properties": {
@@ -5807,6 +5925,123 @@
           }
         ],
         "summary": "Resume Source At",
+        "tags": [
+          "mixer"
+        ]
+      }
+    },
+    "/api/v1/mixer/startup": {
+      "get": {
+        "description": "How this mixer went on air: settled or timed out, warm-up counters, release time.\n404 `not_available` while the show is still preheating or without a mixer application.",
+        "operationId": "mixer_startup",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Startup"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unauthorized`: the gateway requires a bearer token and the request has none, or another one"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`cross_origin`: a browser sent the request for another site's page"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`not_available`: this show or engine has no such command (e.g. keys in a show without a keyer)"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`engine_rejected`: the engine refused the command, `message` is its reason; `conflict`: the resource changed since the revision the request names"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`invalid_request`: the request does not match the schema, `details` lists the fields"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`internal_error`: the gateway failed; its log has the cause"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`bad_engine_reply`: the engine's reply is not JSON, or lacks a field this route's schema promises"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`engine_unreachable`: no control connection to the engine; `engine_not_ready`: the engine is starting and does not take this command yet"
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`engine_timeout`: the engine did not answer in time; the command may still have run"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Startup",
         "tags": [
           "mixer"
         ]
