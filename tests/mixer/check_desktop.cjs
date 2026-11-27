@@ -62,12 +62,14 @@ const executablePath = require(path.join(demo, 'desktop/node_modules/electron'))
     phase = 'running';
     const [mixer] = await Promise.all([app.waitForEvent('window'), setup.locator('#open-controls').click({ noWaitAfter: true })]);
     await mixer.locator('#graph-link').waitFor();
+    assert.ok(setup.isClosed(), 'entering Mixer dismisses first-run Setup');
     await mixer.locator('canvas[data-feed="aux_pvw"]').waitFor();
     const cut = mixer.waitForResponse(r => r.url().endsWith('/api/command'));
     await mixer.keyboard.press('c');
     await cut;
     assert.equal(commands.at(-1).command, 'cut');
-    await mixer.locator('#setup-link').click({ noWaitAfter: true });
+    const [settings] = await Promise.all([app.waitForEvent('window'), mixer.locator('#setup-link').click({ noWaitAfter: true })]);
+    await settings.waitForURL('**/setup/');
     assert.equal(app.windows().length, 2);
     assert.match(mixer.url(), new RegExp(':' + port + '/$'));
     await mixer.bringToFront();
@@ -77,12 +79,19 @@ const executablePath = require(path.join(demo, 'desktop/node_modules/electron'))
     await mixer.locator('#graph-link').click();
     assert.equal(app.windows().length, 3);
     assert.equal(await graph.getByRole('textbox').inputValue(), 'compositor');
+    await mixer.bringToFront();
+    const liveCut = mixer.waitForResponse(r => r.url().endsWith('/api/command'));
+    await mixer.keyboard.press('c');
+    await liveCut;
+    assert.equal(commands.at(-1).command, 'cut', 'Graph allows live mixer shortcuts');
     assert.equal(await mixer.evaluate(() => typeof require), 'undefined');
     if (process.platform === 'linux') {
       const menuBars = await app.evaluate(({ BrowserWindow }) => Object.fromEntries(
         BrowserWindow.getAllWindows().map(w => [w.getTitle(), w.isMenuBarVisible()])));
       assert.deepEqual(menuBars, { 'Mixer Setup': false, 'Processing Graph': false, 'Mixer': true });
     }
+    await settings.close();
+    assert.equal(app.windows().length, 2, 'closing settings leaves the console and inspector open');
     // The Window menu's shortcut can recover the console while its tools stay open.
     await mixer.close();
     const [reopened] = await Promise.all([app.waitForEvent('window'), app.evaluate(({ Menu }) => {
@@ -91,7 +100,7 @@ const executablePath = require(path.join(demo, 'desktop/node_modules/electron'))
       action.click();
     })]);
     await reopened.locator('#graph-link').waitFor();
-    assert.equal(app.windows().length, 3);
+    assert.equal(app.windows().length, 2);
     assert.equal(await graph.getByRole('textbox').inputValue(), 'compositor');
     await app.close();
     app = await launch();
@@ -99,6 +108,15 @@ const executablePath = require(path.join(demo, 'desktop/node_modules/electron'))
     await live.locator('#graph-link').waitFor();
     assert.equal(app.windows().length, 1);
     assert.equal(previewRequests, 0, 'Electron must never load the WebRTC player');
+    await app.close();
+    phase = 'starting';
+    app = await launch();
+    const firstSetup = await app.firstWindow();
+    await firstSetup.waitForURL('**/setup/');
+    const firstSetupWindow = await app.browserWindow(firstSetup);
+    const [consoleWindow] = await Promise.all([app.waitForEvent('window'), firstSetupWindow.evaluate(w => w.close())]);
+    await consoleWindow.locator('#graph-link').waitFor();
+    assert.equal(app.windows().length, 1, 'closing first-run Setup opens Mixer');
     console.log('Desktop startup, reconnect, window routing and viewer isolation passed');
   } finally {
     if (app) await app.close();

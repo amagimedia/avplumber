@@ -15,6 +15,7 @@ const views = {
   matrix: { title: 'Audio Matrix', route: '/matrix', width: 1200, height: 800 }
 };
 const windows = new Map();
+let startupSetup, quitting = false;
 
 function destination(address) {
   if (!URL.canParse(address)) return;
@@ -35,16 +36,18 @@ function openView(key, address = origin + views[key].route) {
   const existing = windows.get(key);
   if (existing) {
     focus(existing);
-    return;
+    return existing;
   }
   const win = new BrowserWindow({
     title: view.title, width: view.width, height: view.height,
-    autoHideMenuBar: key !== 'mixer',
     backgroundColor: '#15191c', show: false,
     webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false,
       preload: path.join(__dirname, 'preload.cjs') }
   });
   windows.set(key, win);
+  // Keep menu accelerators available in tool windows, including return to Mixer.
+  if (key !== 'mixer' && process.platform !== 'darwin') win.setMenuBarVisibility(false);
+  if (key === 'mixer') startupSetup?.close();
   win.once('ready-to-show', () => win.show());
   win.on('page-title-updated', event => event.preventDefault());
   let retry;
@@ -88,6 +91,7 @@ function openView(key, address = origin + views[key].route) {
     if (status >= 400) unavailable();
   });
   load();
+  return win;
 }
 
 async function initialWindow() {
@@ -96,12 +100,22 @@ async function initialWindow() {
     const status = await net.fetch(origin + '/api/setup', { signal: AbortSignal.timeout(2000) });
     if (status.ok) phase = (await status.json()).phase;
   } catch { /* The stack may still be starting. Setup reports its progress. */ }
-  if (!windows.size) openView(phase === 'running' ? 'mixer' : 'setup');
+  if (windows.size) return;
+  if (phase === 'running') {
+    openView('mixer');
+  } else {
+    startupSetup = openView('setup');
+    startupSetup.once('close', () => {
+      startupSetup = undefined;
+      if (!quitting && !windows.has('mixer')) openView('mixer');
+    });
+  }
 }
 
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
+  app.on('before-quit', () => { quitting = true; });
   app.on('second-instance', () => {
     const win = windows.get('mixer') || windows.get('setup') || windows.values().next().value;
     if (win) focus(win);
