@@ -21,6 +21,9 @@ It has the same parameters as the `input` node and some additional
 -   `live_delay` (float, seconds) - time to delay between latest available packet and currently displayed in live mode (default `1`)
 -   `start_ts` (string) - start timestamp
 -   `stop_ts` (string) - stop timestamp
+-   `wait_for_video_headers` (bool, default false) - on a live MPEG-TS input, keep reading
+    the same connection if stream discovery ends before the first video stream has dimensions
+    and a pixel format. Discard incomplete probe windows. The initial timeout covers the entire wait.
 -   `loop` (bool) - if set to true, video will be played in a loop. A loop to the start seeks to the
     first video packet's decode timestamp (a transport stream with B-frames seeks by decode time, so the
     first picture's presentation time lies past the opening keyframe). A new pass that begins with a
