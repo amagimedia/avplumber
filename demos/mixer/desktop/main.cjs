@@ -1,6 +1,6 @@
 // The desktop uses the same documents and keyboard handlers as the browser.
 // Each tool has one window. Navigation between tools focuses that window.
-const { app, BrowserWindow, Menu, net, session, ipcMain } = require('electron');
+const { app, BrowserWindow, Menu, nativeTheme, net, session, ipcMain } = require('electron');
 const path = require('node:path');
 
 const port = Number(process.env.MIXER_PUBLIC_PORT || 7681);
@@ -39,6 +39,7 @@ function openView(key, address = origin + views[key].route) {
   }
   const win = new BrowserWindow({
     title: view.title, width: view.width, height: view.height,
+    autoHideMenuBar: key !== 'mixer',
     backgroundColor: '#15191c', show: false,
     webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false,
       preload: path.join(__dirname, 'preload.cjs') }
@@ -106,6 +107,7 @@ if (!app.requestSingleInstanceLock()) {
     if (win) focus(win);
   });
   app.whenReady().then(() => {
+    nativeTheme.themeSource = 'dark';
     // A desktop app opened against an older web UI must never start its network player.
     session.defaultSession.webRequest.onBeforeRequest({ urls: [origin + '/preview/*', 'http://127.0.0.1:8080/*'] },
       (_details, done) => done({ cancel: true }));
@@ -119,15 +121,16 @@ if (!app.requestSingleInstanceLock()) {
       ['mixer', 'wall'].some(key => windows.get(key)?.webContents === contents && destination(contents.getURL()) === key));
     const menu = [
       { label: 'Mixer', submenu: [
-        { label: 'Mixer Controls', click: () => openView('mixer') },
         { label: 'Setup…', click: () => openView('setup') },
         { type: 'separator' }, { role: 'quit', label: 'Quit Desktop App' }
       ] },
       { role: 'editMenu' },
       { label: 'Window', submenu: [
+        { id: 'show-mixer', label: 'Mixer Controls', accelerator: 'CmdOrCtrl+1', click: () => openView('mixer') },
         { label: 'Processing Graph', click: () => openView('graph') },
         { label: 'Outputs', click: () => openView('wall') },
         { label: 'Audio Levels', click: () => openView('levels') },
+        { label: 'Audio Matrix', click: () => openView('matrix') },
         { type: 'separator' }, { role: 'togglefullscreen' }, { role: 'close' }
       ] }
     ];

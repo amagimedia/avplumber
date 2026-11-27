@@ -9,6 +9,8 @@ RUN c++ -std=c++17 -O2 -fPIC -shared -I/usr/local/include/node receiver.cc -o re
 # Compose builds the HTML input browser first. Share its Linux Electron binary
 # and graphics libraries. The GUI has its own process, profile and display.
 FROM browser-runtime
+# Electron reads the Linux menu bar colours from GTK.
+ENV GTK_THEME=Adwaita:dark
 WORKDIR /opt/mixer-desktop
 COPY --chmod=0444 *.cjs *.html package.json ./
 COPY --from=native --chmod=0555 /src/demos/mixer/desktop/receiver.node .

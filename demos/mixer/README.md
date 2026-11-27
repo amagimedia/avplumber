@@ -13,6 +13,8 @@ Cut/Fade/media wipes, downstream keys and AUX monitors. Video only.
 
 ### On a desktop
 
+Mixer is the main window and has a dark menu bar. Setup, Graph and the other tools open as separate windows you can place on another monitor. On Linux, tap **Alt** in a tool window to reveal the menu, or press **Ctrl+1** to bring Mixer back, even if you closed it.
+
 1. Run `./demos/mixer/desktop.sh` from the checkout as your normal user. On a local Linux graphical login with an NVIDIA GPU, the launcher builds and opens the **Mixer** desktop app. First startup opens **Setup** while the demo prepares media. A running show opens directly in **Mixer**.
 2. In **Setup**, choose the sources, canvas and outputs. **Apply setup** pauses output while the mixer prepares the show and restarts. When the status says **Mixer ready**, choose **Open mixer controls**. Select a scene on Preview, then press **C** for Cut or **Space** for the selected transition. The keyboard legend at the top of Mixer lists the other shortcuts.
 3. Open **Graph** from Mixer to inspect the live nodes and queues in a separate window. Its bottom bar shows delivered Program fps, total frame traffic across the queues and the Program compositor’s mean, p95 and p99 draw times once frames are flowing. Compare the draw time with one frame period. **Setup** and **Graph** each reopen their existing window, preserving your settings edits and graph position.

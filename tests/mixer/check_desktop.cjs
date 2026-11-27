@@ -56,6 +56,7 @@ const executablePath = require(path.join(demo, 'desktop/node_modules/electron'))
     }
     const setup = await app.firstWindow();
     await setup.getByRole('heading', { name: 'Connecting to the desktop mixer…' }).waitFor();
+    assert.equal(await app.evaluate(({ nativeTheme }) => nativeTheme.themeSource), 'dark');
     available = true;
     await setup.waitForURL('**/setup/');
     phase = 'running';
@@ -77,6 +78,21 @@ const executablePath = require(path.join(demo, 'desktop/node_modules/electron'))
     assert.equal(app.windows().length, 3);
     assert.equal(await graph.getByRole('textbox').inputValue(), 'compositor');
     assert.equal(await mixer.evaluate(() => typeof require), 'undefined');
+    if (process.platform === 'linux') {
+      const menuBars = await app.evaluate(({ BrowserWindow }) => Object.fromEntries(
+        BrowserWindow.getAllWindows().map(w => [w.getTitle(), w.isMenuBarVisible()])));
+      assert.deepEqual(menuBars, { 'Mixer Setup': false, 'Processing Graph': false, 'Mixer': true });
+    }
+    // The Window menu's shortcut can recover the console while its tools stay open.
+    await mixer.close();
+    const [reopened] = await Promise.all([app.waitForEvent('window'), app.evaluate(({ Menu }) => {
+      const action = Menu.getApplicationMenu().getMenuItemById('show-mixer');
+      if (action.accelerator !== 'CmdOrCtrl+1') throw new Error('Missing Mixer Controls shortcut');
+      action.click();
+    })]);
+    await reopened.locator('#graph-link').waitFor();
+    assert.equal(app.windows().length, 3);
+    assert.equal(await graph.getByRole('textbox').inputValue(), 'compositor');
     await app.close();
     app = await launch();
     const live = await app.firstWindow();
